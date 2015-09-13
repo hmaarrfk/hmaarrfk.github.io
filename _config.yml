@@ -1,0 +1,3 @@
+highlighter: pygments
+port: 8080
+exclude: [Gemfile, Gemfile.lock]
