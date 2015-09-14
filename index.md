@@ -5,8 +5,8 @@ date: 2015-09-13
 ---
 
 # Mark Harfouche
-Graduate Student  
-[California Institute of Technology](http://www.caltech.edu/)  
+Graduate Student
+[California Institute of Technology](http://www.caltech.edu/)
 [Optical and Quantum Electronics Laboratory](http://www.its.caltech.edu/~aphyariv/)
 
 
