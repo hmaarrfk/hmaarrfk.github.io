@@ -4,22 +4,22 @@ date: 2015-09-13
 
 ---
 
-Graduate Student
-[California Institute of Technology](http://www.caltech.edu/)
+Graduate Student<br>
+[California Institute of Technology](http://www.caltech.edu/)<br>
 [Optical and Quantum Electronics Laboratory](http://www.its.caltech.edu/~aphyariv/)
 
 
 ## Welcome
-Welcome to my homepage. It is currently under heavy development.
+Welcome to my homepage.
+It is currently under heavy development.
 
 I'm hoping to have information on here about myself, my research at Caltech, and various hobbies of mine.
 
 ## Contact me
 The best way to contact me is through email.
 
-  * mark.harfouche [at] [gmail] [dot] [com] (personal)
-  * mark.harfouche [at] [caltech] [dot] [edu] (Caltech related)
-  * mark.harfouche [at] [utoronto] [dot] [ca] (UofT related??? please update this one, I'm no longer at UofT)
+  * mark.harfouche [at] [gmail] [dot] [com] --- Personal
+  * mark.harfouche [at] [caltech] [dot] [edu] --- Caltech related
 
 ## Technology behind this page
 

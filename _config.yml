@@ -2,6 +2,9 @@ highlighter: pygments
 port: 8080
 exclude: [Gemfile, Gemfile.lock]
 
+redcarpet:
+    extensions: [smart, footnotes, autolink, tables, no_intra_emphasis, disable_indented_code_blocks, space_after_headers]
+
 defaults:
   -
     scope:
@@ -9,6 +12,8 @@ defaults:
     values:
       layout: "default"
 
-kramdown:
-  input: GFM
+markdown: redcarpet
+
+#kramdown:
+  #input: GFM
 
