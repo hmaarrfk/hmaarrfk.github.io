@@ -1,11 +1,7 @@
 ---
-title: Teaching - Mark Harfouche
+title: Teaching
 
 ---
-
-# Teaching
-
-## My first taste
 I've been involved in teaching ever since I was in elementary school. I believe my first role as a teacher was when I presented Euler's to the class of 8th graders as a 7th grader. I don't know if anybody understood anything from that one hour presentation, but I believe it seeded my passion for teaching.
 
 ## High school

@@ -1,11 +1,7 @@
 ---
-title: Research - Mark Harfouche
-name: Research
+title: My research
 
 ---
-
-# My research
-
 I'm current working as a graduate student under the supervision of Professor Yariv at the California Institute of Technology.
 
 This page will soon contain info about my research. For the time being, I work on a variety of projects.

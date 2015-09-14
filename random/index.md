@@ -1,8 +1,6 @@
 ---
-title: Cycling - Mark Harfouche
+title: Random thoughts
 
 ---
-
-# Random
 
 Ah random thoughts... to be continued...

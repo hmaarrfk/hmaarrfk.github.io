@@ -1,9 +1,7 @@
 ---
-title: Cycling - Mark Harfouche
+title: Cycling
 
 ---
-
-# Cycling
 
 I've always enjoyed cycling, but recently I've acquired a decent road bike that has allowed me to push myself further. I've also found an awesome group of friends with whom to cycle with around Pasadena.
 
