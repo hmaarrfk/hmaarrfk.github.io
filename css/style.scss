@@ -1,12 +1,13 @@
 ---
 ---
 
+$font-size-base:          18px !default;
 @import "variables";
 @import "bootstrap";
 @import "bootswatch";
 
 
 .content{
-    width: 80%;
-    margin: 0 auto;
+    margin-top:70px;
+    margin-bottom:100px;
 }
