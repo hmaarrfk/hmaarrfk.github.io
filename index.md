@@ -18,8 +18,8 @@ I'm hoping to have information on here about myself, my research at Caltech, and
 ## Contact me
 The best way to contact me is through email.
 
-  * mark.harfouche [at] [gmail] [dot] [com] --- Personal
-  * mark.harfouche [at] [caltech] [dot] [edu] --- Caltech related
+  * [Personal](mailto:mark.harfouche@gmail.com)
+  * [Caltech related](mailto:mark.harfouche@caltech.edu)
 
 ## Technology behind this page
 

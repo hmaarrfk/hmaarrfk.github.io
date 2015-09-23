@@ -3,4 +3,4 @@ all: server
 
 
 server:
-	bundle exec jekyll server
+	bundle exec jekyll server --future

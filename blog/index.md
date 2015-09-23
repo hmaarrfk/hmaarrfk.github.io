@@ -1,5 +1,6 @@
 ---
 title: Random thoughts
+layout: blog
 
 ---
 
