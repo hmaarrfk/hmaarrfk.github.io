@@ -11,9 +11,8 @@ Graduate Student<br>
 
 ## Welcome
 Welcome to my homepage.
-It is currently under heavy development.
 
-I'm hoping to have information on here about myself, my research at Caltech, and various hobbies of mine.
+Here, I've included information about myself, my research at Caltech, and various hobbies of mine.
 
 ## Contact me
 The best way to contact me is through email.
