@@ -30,6 +30,6 @@ defaults:
       layout: "default"
 
 
-#kramdown:
-  #input: GFM
+kramdown:
+  input: GFM
 
