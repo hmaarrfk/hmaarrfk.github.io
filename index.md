@@ -1,6 +1,7 @@
 ---
 title: Mark Harfouche
 date: 2015-09-13
+layout: home
 
 ---
 
