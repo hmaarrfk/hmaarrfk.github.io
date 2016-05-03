@@ -5,8 +5,8 @@ layout: home
 
 ---
 
-Graduate Student
-[California Institute of Technology](http://www.caltech.edu/)
+Graduate Student  
+[California Institute of Technology](http://www.caltech.edu/)  
 [Yariv Lab -- Optical and Quantum Electronics Laboratory](http://www.its.caltech.edu/~aphyariv/)
 
 
