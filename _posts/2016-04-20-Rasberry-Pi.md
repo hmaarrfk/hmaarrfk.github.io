@@ -88,13 +88,17 @@ Select the option that enables the camera, and reboot your system.
 Here is the reference to the RPi [documentation](https://www.raspberrypi.org/documentation/usage/camera/python/README.md).
 
 ### Enabling ssh
+Apparently this is already enabled by default. You can skip this step.
+
 Within the `raspi-config`, you should enable sshd. This is particularly useful. I do recommend changing the password with the command `passwd` first. The default password is `raspberry`.
 
-Full disclaimer, ssh seems to have an issue over WiFi with me. It seems to have been documented 
-[here](https://www.raspberrypi.org/forums/viewtopic.php?f=28&t=138631&start=25).
-
 ## Install your useful software
-I like `vim` and `iceweasle` (Firefox)! What will be the first software that you install?
+I like `vim` and `iceweasle` (Firefox)!
 
 ## WiFi woes
-The RaspberryPi3 is rather new and bugs are to be expected. I guess we are back to how linux was in 2007 when having a working WiFi connection was the [Holy Grail!!!](https://www.raspberrypi.org/forums/viewtopic.php?f=28&t=138631&start=25) In either case, I setup a [bridge](https://major.io/2015/03/29/share-a-wireless-connection-via-ethernet-in-gnome-3-14/) between my laptop's WiFi and an old ethernet cable I had lying around. This allowed me to finally use `ssh` and `git`!
+The RaspberryPi3 is rather new and bugs are to be expected. I guess we are back to how linux was in 2007 when having a working WiFi connection was the [Holy Grail!!!](https://www.raspberrypi.org/forums/viewtopic.php?f=28&t=138631&start=25).
+
+I found two solutions to this problem:
+
+  1. I setup a [bridge](https://major.io/2015/03/29/share-a-wireless-connection-via-ethernet-in-gnome-3-14/) between my laptop's WiFi and an old ethernet cable I had lying around. This allowed me to finally use `ssh` and `git`!
+  2. Edit the files add the line `IPQoS cs0 cs0` to the files `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config`. Adding the line to the first one will allow other computers to connect to the RaspberryPi and adding the lines to the second one will allow you to connect to outside servers. This solution was outlined in the forum post above.
