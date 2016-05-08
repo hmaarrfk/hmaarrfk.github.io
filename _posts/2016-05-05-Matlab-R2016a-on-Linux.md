@@ -75,7 +75,7 @@ sudo ln -s /usr/local/MATLAB/R2016a/bin/matlab /usr/local/bin/.
 
 Matlab probably doesn't want you to do this, but getting a notification that you have an academic license, or any type of license every time is a little annoying.
 
-You can remove the notification by modifying the file `/usr/local/MATLAB/R2016a/reseources/MATLAB/en/branding.xml`. Of course, you should change `en` to the language you are using for Matlab.
+You can remove the notification by modifying the file `/usr/local/MATLAB/R2016a/resources/MATLAB/en/branding.xml`. Of course, you should change `en` to the language you are using for Matlab.
 
 Within the file, find the entries 
 
