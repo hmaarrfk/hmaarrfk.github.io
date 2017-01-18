@@ -54,13 +54,13 @@ sudo apt-get remove minecraft-pi sonic-pi bluej greenfoot nodered claws-mail
 I like to remove `idle-python2.7`. Unless you have a good reason, you should switch to python 3 at this point.
 
 ```
-sudo apt-get remvoe idle-python2.7
+sudo apt-get remove idle-python2.7
 ```
 
 If you don't want java
 
 ```
-sudo apt-get remvoe oracle-java8-jdk
+sudo apt-get remove oracle-java8-jdk
 ```
 
 Now you can run
@@ -102,3 +102,26 @@ I found two solutions to this problem:
 
   1. I setup a [bridge](https://major.io/2015/03/29/share-a-wireless-connection-via-ethernet-in-gnome-3-14/) between my laptop's WiFi and an old ethernet cable I had lying around. This allowed me to finally use `ssh` and `git`!
   2. Edit the files add the line `IPQoS cs0 cs0` to the files `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config`. Adding the line to the first one will allow other computers to connect to the RaspberryPi and adding the lines to the second one will allow you to connect to outside servers. This solution was outlined in the forum post above.
+
+### Static IP address
+To setup a static IP address, connect to your WiFi and enter the password. Then you can add the following lines to the file `/etc/dhcpcd.conf`
+
+```sh
+SSID WirelessFreezer
+static ip_address=192.168.1.9/24
+static routers=192.168.1.1
+static domain_name_servers=192.168.1.1
+```
+
+## Personal Tweaks
+
+### Your own computer name
+You can change the name of your RaspberryPi computer just as you would change the name of a normal Linux computer. Edit the file `/etc/hostname` to include whatever name you want and restart your computer.
+
+### Visual Noise
+The default configuration adds quite a bit of visual noise when logging in via ssh.
+
+You can edit the file `/etc/motd` with your own little message to show everytime you log in by ssh.
+You can leave it blank if it annoys you to see a long message about Debian's software licensing.
+
+You can remove the information about the last login by changing the line containing `PrintLastLog` from `yes` to `no` in `/etc/ssh/sshd_config`.

@@ -1,7 +1,5 @@
 ---
-title: Random thoughts
+title: Blog
 layout: blog
 
 ---
-
-Ah random thoughts... to be continued...

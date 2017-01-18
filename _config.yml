@@ -12,7 +12,6 @@ url: "http://hmaarrfk.github.io"
 
 port: 8080 # Gets overwritten by github. Need this for testing purposes
 
-
 exclude: [Gemfile, Gemfile.lock]
 
 google_analytics_id: UA-55670916-1
@@ -30,7 +29,6 @@ defaults:
       path: "" # an empty string here means all files in the project
     values:
       layout: "default"
-
 
 kramdown:
   input: GFM

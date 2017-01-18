@@ -2,23 +2,16 @@
 layout: home
 ---
 {% include header.html %}
-
-<div class="container content">
-  <div class="row">
-    <div class="col-xs-12 col-sm-3">
-    <img src="{{ site.baseurl }}/img/mark_2015_dec.png" alt="Mark" />
-    </div>
-    <div class="col-xs-12 col-sm-9">
-      <h1>{{ page.title }}</h1>
-      {{ content }}
-    </div>
+<div class="row">
+  <div class="col-xs-12 col-sm-3">
+  <img src="{{ site.baseurl }}/img/mark_2015_dec.png" alt="Mark" />
   </div>
-
-  <p class="social-buttons">
-  <a href="https://github.com/hmaarrfk" title="Github"><i class="fa fa-github-square fa-4x"></i></a>
-  <a href="https://www.linkedin.com/pub/mark-harfouche/39/429/a07" title="LinkeIn"><i class="fa fa-linkedin-square fa-4x"></i></a>
-  </p>
+  <div class="col-xs-12 col-sm-9">
+    <h1>{{ page.title }}</h1>
+    {{ content }}
+  </div>
 </div>
+
 
 
 {% include footer.html %}

@@ -3,7 +3,7 @@ title: Matlab R2016a on Linux
 
 ---
 
-Matlab R2016a on Linux seems to have some trouble. The issue is reported [here](https://www.mathworks.com/matlabcentral/newsreader/view_thread/345009). 
+Matlab R2016a on Linux seems to have some trouble. The issue is reported [here](https://www.mathworks.com/matlabcentral/newsreader/view_thread/345009).
 
 It seems to have something to do with opening new windows.
 
@@ -13,6 +13,13 @@ inputdlg()
 
 For reference, I run Matlab in [Fedora](https://getfedora.org/) 23 x64 bit, with an Intel(R) Core(TM) i5-3570K processor and no other graphics card.
 
+# Fedora 24
+Fedora 24 has upgraded to `ncurses6`. Matlab expects `ncurses5`. As documented [here](https://wiki.archlinux.org/index.php/matlab#Installing_from_the_MATLAB_installation_software), you need to install `ncurses-compat-libs` to get things working.
+
+```sh
+sudo dnf install ncurses-compat-libs
+```
+
 # OpenGL rendering
 The issue seems to be associated with [OpenGL rendering](http://askubuntu.com/questions/765455/how-to-run-matlab-2016a-with-nvidia-drivers-of-gtx-960-in-ubuntu-16-04/767231). You can try to see if enabling software rendering helps you. In a terminal, run the following command:
 
@@ -20,12 +27,12 @@ The issue seems to be associated with [OpenGL rendering](http://askubuntu.com/qu
 /usr/local/MATLAB/R2016a/bin/matlab -softwareopengl
 ```
 
-Now try to run 
+Now try to run
 
 ```matlab
 inputdlg()
 ```
-or 
+or
 
 ```matlab
 plot(1:10)
@@ -57,6 +64,7 @@ Now create a new file called `matlab` with the following content
 Make sure `"$@"` and not just `$@` as explained [here](http://stackoverflow.com/questions/4824590/propagate-all-arguments-in-a-bash-shell-script).
 
 Now make sure the new file is executable
+
 ```bash
 chmod 755 matlab
 ```
@@ -77,7 +85,7 @@ Matlab probably doesn't want you to do this, but getting a notification that you
 
 You can remove the notification by modifying the file `/usr/local/MATLAB/R2016a/resources/MATLAB/en/branding.xml`. Of course, you should change `en` to the language you are using for Matlab.
 
-Within the file, find the entries 
+Within the file, find the entries
 
   * `ACADEMIC_CMD_WINDOW_STR` -- make this one empty
   * `ACADEMIC_IDE_TITLE` -- make this one `MATLAB {0}`
