@@ -49,7 +49,7 @@ Now create a new file called `matlab` with the following content
 
 wmname LG3D
 
-/usr/local/MATLAB/R2016a/bin/matlab_actual -softwareopengl "$@"
+/usr/local/MATLAB/R2016a/bin/matlab_actual "$@"
 ```
 
 Make sure `"$@"` and not just `$@` as explained [here](http://stackoverflow.com/questions/4824590/propagate-all-arguments-in-a-bash-shell-script).
