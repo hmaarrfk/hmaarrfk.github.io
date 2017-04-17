@@ -1,5 +1,5 @@
 ---
-title: Modding my Soni MDRV6 headphones
+title: Modding my Sony MDRV6 headphones
 
 ---
 
