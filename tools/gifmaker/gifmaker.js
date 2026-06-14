@@ -818,13 +818,15 @@ function updatePending() {
   tlPending.style.width = Math.max(0, pct(b) - pct(a)) + '%';
 }
 
-function setPlayhead() {
-  playhead.style.left = pct(preview.currentTime || 0) + '%';
+// Position the cursor/timecode at an explicit time (used during scrubbing so the
+// cursor tracks the finger immediately, without waiting for the slow video seek).
+function renderPlayhead(t) {
+  playhead.style.left = pct(t) + '%';
   const fps = captureFps();
-  timecode.textContent =
-    `${fmtTime(preview.currentTime)} / ${fmtTime(duration)} · frame ${Math.round((preview.currentTime || 0) * fps)}`;
+  timecode.textContent = `${fmtTime(t)} / ${fmtTime(duration)} · frame ${Math.round((t || 0) * fps)}`;
   updatePending();
 }
+function setPlayhead() { renderPlayhead(preview.currentTime || 0); }
 
 function seek(t) { preview.currentTime = clamp(t, 0, Math.max(0, duration - 1e-3)); }
 
@@ -1312,7 +1314,7 @@ function startDrag(kind, e) {
   if (!duration) return;
   dragging = kind;
   try { tlTrack.setPointerCapture(e.pointerId); } catch {}
-  if (kind === 'scrub') { preview.pause(); requestSeek(tFromEvent(e)); }
+  if (kind === 'scrub') { preview.pause(); const t = tFromEvent(e); renderPlayhead(t); requestSeek(t); }
   e.preventDefault();
 }
 handleIn.addEventListener('pointerdown',  (e) => { e.stopPropagation(); startDrag('in', e); });
@@ -1324,9 +1326,9 @@ tlTrack.addEventListener('pointerdown', (e) => {
 tlTrack.addEventListener('pointermove', (e) => {
   if (!dragging) return;
   const t = tFromEvent(e);
-  if (dragging === 'in')  { cropStart = clamp(t, 0, cropEnd - frameStep()); renderTimeline(); requestSeek(cropStart); }
-  else if (dragging === 'out') { cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); requestSeek(cropEnd); }
-  else { requestSeek(t); }
+  if (dragging === 'in')  { cropStart = clamp(t, 0, cropEnd - frameStep()); renderTimeline(); renderPlayhead(cropStart); requestSeek(cropStart); }
+  else if (dragging === 'out') { cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); renderPlayhead(cropEnd); requestSeek(cropEnd); }
+  else { renderPlayhead(t); requestSeek(t); }
 });
 const endDrag = () => { dragging = null; };
 tlTrack.addEventListener('pointerup', endDrag);
