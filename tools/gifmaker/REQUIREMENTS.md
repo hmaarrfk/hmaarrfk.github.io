@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (four size/quality variants per render from one frame-extraction pass; touch/layout optimizations — single-column controls on phones, grouped Crop region / Output size fields, even step grid, larger tap targets, no-zoom inputs; compressed timeline after Trim; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (simplified tone curve to a 3-point gamma control + harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -177,23 +177,34 @@ Optimized for phones (iPhone-first) as well as desktop:
   (CSS `ctx.filter` during draw).
 - **Rotate** (0/90/180/270) and **Flip** live in the **Crop & size** step
   (geometry), not here.
-- **Tone curve (contrast)** — a GIMP-style curves editor on a `<canvas>`:
-  draggable control points (click/tap line to add, double-tap/double-click to remove) define a
-  256-entry LUT via a **smooth monotonic cubic** (Fritsch–Carlson) interpolation.
-  The **end points move horizontally** too, so dragging them inward clips
-  blacks/whites to *increase* contrast (not just decrease it). The histograms are
-  computed over the **current crop ROI** and update live as the ROI is dragged
-  while the Style step is showing. Layout: **input histogram behind the curve on
-  the left → arrow → output histogram on the right** (both square; pre-GIF
-  quantization). The **output histogram is tinted by the colormap** (each bar in
-  the colour that value maps to; grayscale when no colormap). A **log scale**
-  toggle (log1p) reveals the dark end. Applied to the colormap input, or to RGB
-  when no colormap is set. Live in the preview.
-- **Invert input** (toggle): flips the input axis (value `255−x` fed through the
-  curve) so the selected range + midpoint invert together; negates the image on
-  RGB input. **Reverse colormap** (separate toggle): flips the colour ramp
-  (`lut[255−i]`) at lookup — affects colormap output only, baked into the GPU
-  colormap texture. These are distinct operations.
+- **Tone curve (gamma)** — a deliberately simple `<canvas>` editor with exactly
+  **three control points** that move *vertically only*: **min** (input 0 → output
+  black level), **mid** (sets the gamma), **max** (input 255 → output white
+  level). `buildCurveLut()` builds the 256-entry LUT as a pure gamma curve
+  `out = min + (max−min)·(x/255)^γ`, with γ solved so `out(128) = mid`. **No
+  clipping happens in the curve by design** — to clip the value range, use the
+  output colormap. (This replaced an earlier freeform multi-point Fritsch–Carlson
+  curve with add/remove points, which was too complicated.)
+- **Harmonized editor (everything follows the inversion).** The editor shares one
+  invert-aware transform so the curve, the three handles, the input histogram and
+  the bottom axis ramp all **mirror together** when *invert input* is on. Two live
+  gradient strips anchor the mapping: a **grayscale INPUT ramp along the bottom**
+  (flips with *invert input*) and the **effective colormap OUTPUT ramp up the left
+  edge** (flips with *reverse colormap*). Display uses the *natural* (pre-invert)
+  LUT (`curveLutNatural`); only the *pipeline* LUT (`curveLut`) is value-flipped
+  (`255−x`) for the actual pixels. Hit-testing uses the same transform, so
+  dragging always matches the displayed curve.
+- Histograms are computed over the **current crop ROI** and update live as the ROI
+  is dragged while the Style step is showing. Layout: **input histogram behind the
+  curve on the left → arrow → output histogram on the right**. The **output
+  histogram is tinted by the (effective) colormap** (each bar in the colour that
+  value maps to; reflects *reverse colormap*; grayscale when no colormap). A **log
+  scale** toggle (log1p) reveals the dark end.
+- **Invert input** (toggle): feeds value `255−x` through the curve so the range +
+  midpoint invert together (negates the image on RGB input), and mirrors the
+  editor's input axis. **Reverse colormap** (separate toggle): flips the colour
+  ramp (`lut[255−i]`) at lookup — affects colormap output only (and its on-canvas
+  ramp + output histogram). These are distinct operations.
 
 ### Logo / watermark step
 - Optional logo image (its own click-to-open dropzone that shows a **preview** of
@@ -209,18 +220,18 @@ Optimized for phones (iPhone-first) as well as desktop:
 - **Timing** (metadata-only, instant): either **By speed** (0.25×–4×) or **By
   total duration** (1/2/3/5/10 s or custom) — duration spreads all frames evenly,
   intuitive when there are few frames. **Looping** forever/once/n.
-- **Four size/quality variants per render** (`VARIANT_DEFS`): one "Create GIF"
-  extracts every frame **once** (shared), then encodes up to four GIFs and shows
-  them side by side so the user picks the smallest acceptable one:
-  1. **Requested** — the requested fps & quality.
-  2. **¼ frame rate** — every 4th frame (`frames.filter((_,i)=>i%4===0)`), same quality.
-  3. **¾ quality** — full frame rate, quality × 0.75.
-  4. **¼ rate + ¾ quality** — both reductions combined (smallest).
-  Variants that subsample below 2 frames, or that would duplicate another
-  variant's (frame-count, quality) pair, are skipped. Each is rendered as a
-  `.result-card` (preview, label, meta, **Download** named
+- **Three size/quality variants per render** (`VARIANT_DEFS`): one "Create GIF"
+  extracts every frame **once** (shared), then encodes the variants and shows them
+  side by side so the user picks the smallest acceptable one:
+  1. **High quality** — the requested fps & quality.
+  2. **Medium** — half the frame rate (`frames.filter((_,i)=>i%2===0)`), same quality.
+  3. **High compression** — half the frame rate **and** quality × 0.75 (smallest).
+  (¼ frame rate was dropped as too aggressive; the standalone ¾-quality variant
+  was folded into High compression.) Variants that subsample below 2 frames, or
+  that would duplicate another variant's (frame-count, quality) pair, are skipped.
+  Each is rendered as a `.result-card` (preview, label, meta, **Download** named
   `<source>-<key>.gif`). Frame *rate* (sampling) and quality genuinely need a
-  re-encode; that's why all four are produced up front in the single pass.
+  re-encode; that's why all variants are produced up front in the single pass.
 - **Metadata patching**: each variant's base GIF is encoded once at 1× / infinite
   loop; changing timing or loop rewrites every variant's per-frame delays /
   Netscape loop block **in place** (`patchGif`, then `refreshResultCards`
@@ -244,10 +255,10 @@ Optimized for phones (iPhone-first) as well as desktop:
 2. For each frame, `paint()` rotation + flip + color filter; for video, crop +
    scale to the final size; then `finishFrame()` applies the colormap (per-pixel
    LUT) and composites the logo, and reads back `ImageData`.
-3. Build the variant specs from the single `frames[]` (subsample for ¼-rate
-   variants, scale quality for ¾-quality variants), then `encode()` each as an
-   `ImageData[]` at 1× / infinite loop with constant `frameDurations` and its
-   quality.
+3. Build the variant specs from the single `frames[]` (subsample to half rate for
+   the smaller variants, scale quality for the compressed one), then `encode()`
+   each as an `ImageData[]` at 1× / infinite loop with constant `frameDurations`
+   and its quality.
 4. Patch each base GIF's timing/loop (`patchGif`), wrap the bytes in a
    `Blob('image/gif')`, and render the variant cards (preview + per-variant
    download).
@@ -293,10 +304,12 @@ CPU/2D fallback (feature-detected; the vendored gifski WASM encode is unchanged)
 - `window.__gifskiTest(opts)` runs the full transform+encode on synthetic
   frames (no file picker) and returns the GIF header/size/dims — used to verify
   rotate/flip/filter/speed/loop/**quality** produce valid `GIF89a`s.
-- The four-variant flow is exercised end-to-end with a synthetic in-page video
+- The variant flow is exercised end-to-end with a synthetic in-page video
   (canvas → `MediaRecorder` → `File` → the real `#file-video` input), then
-  asserting four `.result-card`s render with monotonically decreasing sizes and
-  that speed/loop/duration changes patch all cards with **zero console errors**.
+  asserting the `.result-card`s render with non-increasing sizes and that
+  speed/loop/duration changes patch all cards with **zero console errors**. The
+  gamma curve + invert/reverse harmonization are checked by driving the curve
+  canvas with pointer events and screenshotting the editor.
 - `window.__keepRangesTest(duration, cropStart, cropEnd, cuts)` exposes the
   keep-range solver for unit checks (crop, single/multiple/overlapping cuts).
 - Manual/automated browser checks use a **WebM (VP9)** sample — headless

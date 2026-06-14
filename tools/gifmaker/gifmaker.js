@@ -143,9 +143,12 @@ let logoUrl = null;          // object URL for the dropzone preview
 // Colormap selection (custom searchable combobox).
 let colormapKey = 'none';
 
-// Tone curve: control points {x,y} in 0..255 (input → output) + its 256 LUT.
-let curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
-const curveLut = new Uint8Array(256);
+// Tone curve: three fixed-x control points — min (x=0), mid (x=128), max
+// (x=255) — whose y values define a gamma curve (see buildCurveLut). Only y is
+// dragged. min/mid/max set the output black level, gamma and white level.
+let curvePoints = [{ x: 0, y: 0 }, { x: 128, y: 128 }, { x: 255, y: 255 }];
+const curveLut = new Uint8Array(256);          // pipeline LUT (input-inverted when toggled)
+const curveLutNatural = new Uint8Array(256);   // pre-invert LUT, used to draw the editor
 let curveIdentity = true;
 const inputHist = new Float32Array(256);
 const outputHist = new Float32Array(256);
@@ -419,48 +422,35 @@ function effectiveColormapKey() {
   return (colormapKey !== 'none' && ALL_CM[colormapKey]) ? colormapKey : 'gray';
 }
 function curveActive() { return !curveIdentity; }
-// Build the 256-entry LUT from the control points with a smooth, monotonic
-// (Fritsch–Carlson) cubic so the curve bends naturally between points and can
-// both increase and decrease contrast. Drag the end points inward to clip.
+// Build the 256-entry LUT as a pure gamma curve from three control points:
+// min (output at input 0), max (output at input 255), and mid (sets the gamma,
+// i.e. how the midtones bend). The curve is
+//   out = min + (max-min) · (x/255)^γ,   with γ chosen so out(128) = mid.
+// No clipping happens here by design — clipping the value range is the job of
+// the output colormap. Points only move vertically, so the shape is always a
+// clean gamma correction.
 function buildCurveLut() {
-  const p = [...curvePoints].sort((a, b) => a.x - b.x);
-  const n = p.length;
-  const dx = [], slope = [];
-  for (let i = 0; i < n - 1; i++) {
-    const d = p[i + 1].x - p[i].x;
-    dx.push(d);
-    slope.push(d === 0 ? 0 : (p[i + 1].y - p[i].y) / d);
-  }
-  const m = new Array(n);
-  m[0] = slope[0] || 0;
-  m[n - 1] = slope[n - 2] || 0;
-  for (let i = 1; i < n - 1; i++) m[i] = (slope[i - 1] * slope[i] <= 0) ? 0 : (slope[i - 1] + slope[i]) / 2;
-  for (let i = 0; i < n - 1; i++) {
-    if (slope[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
-    const a = m[i] / slope[i], b = m[i + 1] / slope[i], s = a * a + b * b;
-    if (s > 9) { const t = 3 / Math.sqrt(s); m[i] = t * a * slope[i]; m[i + 1] = t * b * slope[i]; }
+  const lo = curvePoints[0].y, mid = curvePoints[1].y, hi = curvePoints[2].y;
+  const span = hi - lo;
+  let gamma = 1;
+  if (span !== 0) {
+    const m = clamp((mid - lo) / span, 0.001, 0.999);
+    gamma = Math.log(m) / Math.log(0.5);
   }
   let identity = true;
   for (let x = 0; x < 256; x++) {
-    let y;
-    if (x <= p[0].x) y = p[0].y;
-    else if (x >= p[n - 1].x) y = p[n - 1].y;
-    else {
-      let i = 0; while (i < n - 2 && x > p[i + 1].x) i++;
-      const h = dx[i], t = (x - p[i].x) / h, t2 = t * t, t3 = t2 * t;
-      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
-      y = h00 * p[i].y + h10 * h * m[i] + h01 * p[i + 1].y + h11 * h * m[i + 1];
-    }
-    y = Math.round(clamp(y, 0, 255));
+    const y = Math.round(clamp(lo + span * Math.pow(x / 255, gamma), 0, 255));
+    curveLutNatural[x] = y;
     curveLut[x] = y;
     if (y !== x) identity = false;
   }
-  // "Invert input" flips the input axis (value 255-x is fed through the curve),
-  // so the selected range + midpoint invert together. Distinct from reversing
-  // the colormap (which flips the output colours, handled at lookup time).
+  // "Invert input" feeds value 255-x through the curve, so the selected range +
+  // midpoint invert together (distinct from reversing the colormap, which flips
+  // the output colours at lookup time). Only the *pipeline* LUT is flipped here;
+  // the editor keeps the natural LUT and instead mirrors its input (X) axis, so
+  // the curve, handles, input histogram and axis ramp all move together.
   if (invertInput.checked) {
-    const tmp = Uint8Array.from(curveLut);
-    for (let x = 0; x < 256; x++) curveLut[x] = tmp[255 - x];
+    for (let x = 0; x < 256; x++) curveLut[x] = curveLutNatural[255 - x];
     identity = false;
   }
   curveIdentity = identity;
@@ -1104,33 +1094,70 @@ function computeHistograms(ctx, rx, ry, rw, rh) {
     inputHist[v]++; outputHist[curveLut[v]]++;
   }
 }
-// `color` is a fixed fill, or `colorFn(i)` returns a per-bar colour.
-function drawHistBars(canvas, ctx, hist, color, colorFn) {
-  const W = canvas.width, H = canvas.height, log = histLog.checked;
+// Draw a 256-bin histogram. `area` is the rectangle the bars live in; `xmap(i)`
+// returns the left x for bin i (so callers can mirror/inset the axis). `color`
+// is a fixed fill, or `colorFn(i)` returns a per-bar colour.
+function drawHistBars(ctx, hist, color, colorFn, area, xmap) {
+  const log = histLog.checked;
   const f = (v) => (log ? Math.log1p(v) : v);
   let max = 0;
   for (let i = 0; i < 256; i++) { const v = f(hist[i]); if (v > max) max = v; }
   if (max <= 0) return;
   if (!colorFn) ctx.fillStyle = color;
-  const bw = Math.max(1, W / 256);
+  const bw = Math.max(1, area.w / 256), baseY = area.y + area.h;
   for (let i = 0; i < 256; i++) {
-    const h = f(hist[i]) / max * (H - 1);
-    if (h > 0) { if (colorFn) ctx.fillStyle = colorFn(i); ctx.fillRect(i / 255 * (W - 1), H - h, bw, h); }
+    const h = f(hist[i]) / max * (area.h - 1);
+    if (h > 0) { if (colorFn) ctx.fillStyle = colorFn(i); ctx.fillRect(xmap(i), baseY - h, bw, h); }
   }
 }
-const cpx = (c, v) => v / 255 * (c.width - 1);
-const cpy = (c, v) => (c.height - 1) - v / 255 * (c.height - 1);
+
+// The curve canvas leaves thin margins for two live axis ramps: an INPUT
+// grayscale ramp along the bottom (mirrors with "invert input") and an OUTPUT
+// colour ramp up the left edge (the effective colormap, mirrors with "reverse
+// colormap"). The plot — curve, handles, input histogram, diagonal — lives in
+// the inset area, all sharing one invert-aware transform.
+const CURVE_ML = 12, CURVE_MB = 12;
+function plotW(c) { return (c.width - 1) - CURVE_ML; }
+function plotH(c) { return (c.height - 1) - CURVE_MB; }
+// Input value (0..255) → x, flipped when "invert input" is on (so the curve,
+// handles, input histogram and bottom ramp all mirror together). cpy maps an
+// output value → y (the output axis never inverts); yToVal is its inverse, used
+// to turn a pointer's y into the dragged point's output value.
+function cpx(c, v) { const f = invertInput.checked ? (1 - v / 255) : (v / 255); return CURVE_ML + f * plotW(c); }
+function cpy(c, v) { return plotH(c) - v / 255 * plotH(c); }
+function yToVal(c, py) { return clamp(Math.round((1 - py / plotH(c)) * 255), 0, 255); }
+function drawCurveRamps(c, ctx) {
+  const pw = plotW(c), ph = plotH(c), bw = Math.max(1, pw / 256) + 1, bh = Math.max(1, ph / 256) + 1;
+  for (let i = 0; i < 256; i++) {                  // bottom: input grayscale ramp
+    ctx.fillStyle = `rgb(${i},${i},${i})`;
+    ctx.fillRect(cpx(c, i), ph + 2, bw, CURVE_MB - 2);
+  }
+  const lut = colormapActive() ? ALL_CM[effectiveColormapKey()].lut : null;
+  const rev = reverseCmap.checked;
+  for (let v = 0; v < 256; v++) {                   // left: output colormap ramp
+    const cc = lut ? lut[rev ? 255 - v : v] : [v, v, v];
+    ctx.fillStyle = `rgb(${cc[0]},${cc[1]},${cc[2]})`;
+    ctx.fillRect(0, cpy(c, v), CURVE_ML - 2, bh);
+  }
+}
 function drawCurve() {
-  const c = curveCanvas, ctx = curveCtx, W = c.width, H = c.height;
+  const c = curveCanvas, ctx = curveCtx, W = c.width, H = c.height, pw = plotW(c), ph = plotH(c);
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#16181b'; ctx.fillRect(0, 0, W, H);
-  drawHistBars(c, ctx, inputHist, 'rgba(125,145,165,.40)');
+  drawHistBars(ctx, inputHist, 'rgba(125,145,165,.40)', null,
+    { x: CURVE_ML, y: 0, w: pw, h: ph }, (i) => cpx(c, i));
   ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 1; ctx.beginPath();
-  for (let g = 1; g < 4; g++) { ctx.moveTo(g / 4 * W, 0); ctx.lineTo(g / 4 * W, H); ctx.moveTo(0, g / 4 * H); ctx.lineTo(W, g / 4 * H); }
+  for (let g = 1; g < 4; g++) {
+    const gx = CURVE_ML + g / 4 * pw, gy = g / 4 * ph;
+    ctx.moveTo(gx, 0); ctx.lineTo(gx, ph);
+    ctx.moveTo(CURVE_ML, gy); ctx.lineTo(W - 1, gy);
+  }
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,.20)'; ctx.beginPath(); ctx.moveTo(0, H - 1); ctx.lineTo(W - 1, 0); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.20)'; ctx.beginPath();    // identity diagonal (displayed space)
+  ctx.moveTo(cpx(c, 0), cpy(c, 0)); ctx.lineTo(cpx(c, 255), cpy(c, 255)); ctx.stroke();
+  drawCurveRamps(c, ctx);
   ctx.strokeStyle = '#00bc8c'; ctx.lineWidth = 2; ctx.beginPath();
-  for (let x = 0; x < 256; x++) { const X = cpx(c, x), Y = cpy(c, curveLut[x]); x === 0 ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y); }
+  for (let x = 0; x < 256; x++) { const X = cpx(c, x), Y = cpy(c, curveLutNatural[x]); x === 0 ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y); }
   ctx.stroke();
   ctx.fillStyle = '#fff';
   for (const pt of curvePoints) { ctx.beginPath(); ctx.arc(cpx(c, pt.x), cpy(c, pt.y), 4, 0, 7); ctx.fill(); }
@@ -1140,63 +1167,49 @@ function drawHistOut() {
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.fillStyle = '#16181b'; ctx.fillRect(0, 0, c.width, c.height);
   // Tint each output bar with the colour the (effective) colormap gives that
-  // value; grayscale when there's no colormap. So the output histogram shows
-  // the actual output colours, including a reversed range when inverted.
+  // value; grayscale when there's no colormap. Reflects "reverse colormap".
   const lut = colormapActive() ? ALL_CM[effectiveColormapKey()].lut : null;
   const rev = reverseCmap.checked;
   const colorFn = lut
     ? (i) => { const cc = lut[rev ? 255 - i : i]; return `rgb(${cc[0]},${cc[1]},${cc[2]})`; }
     : (i) => `rgb(${i},${i},${i})`;
-  drawHistBars(c, ctx, outputHist, null, colorFn);
+  drawHistBars(ctx, outputHist, null, colorFn,
+    { x: 0, y: 0, w: c.width - 1, h: c.height - 1 }, (i) => i / 255 * (c.width - 1));
 }
 function refreshCurveUI() { drawCurve(); drawHistOut(); }
 function onCurveEdit() { buildCurveLut(); markStale(); drawPreview(); refreshCurveUI(); }
 
+// The three points only move vertically (their x is fixed at 0/128/255), so a
+// drag just sets the grabbed point's y. Grab the point nearest the pointer's x.
 let curveDrag = -1;
-function evToVal(e) {
+function evY(e) {
   const r = curveCanvas.getBoundingClientRect();
-  return {
-    x: clamp(Math.round((e.clientX - r.left) / r.width * 255), 0, 255),
-    y: clamp(Math.round((1 - (e.clientY - r.top) / r.height) * 255), 0, 255),
-  };
+  return yToVal(curveCanvas, (e.clientY - r.top) / r.height * curveCanvas.height);
 }
-function nearestPoint(v) {
-  const r = curveCanvas.getBoundingClientRect();
-  const px = matchMedia('(pointer: coarse)').matches ? 22 : 14;   // bigger grab radius for touch
-  const thx = px / r.width * 255, thy = px / r.height * 255;
-  for (let i = 0; i < curvePoints.length; i++)
-    if (Math.abs(curvePoints[i].x - v.x) <= thx && Math.abs(curvePoints[i].y - v.y) <= thy) return i;
-  return -1;
-}
-let lastTapT = 0, lastTapIdx = -1;
-curveCanvas.addEventListener('pointerdown', (e) => {
-  const v = evToVal(e);
-  let i = nearestPoint(v);
-  // Manual double-tap / double-click detection (dblclick is unreliable on touch):
-  // a second tap on the same interior point within 350 ms removes it.
-  if (i > 0 && i < curvePoints.length - 1 && i === lastTapIdx && (e.timeStamp - lastTapT) < 350) {
-    curvePoints.splice(i, 1);
-    lastTapIdx = -1; lastTapT = 0; curveDrag = -1;
-    e.preventDefault(); onCurveEdit();
-    return;
+function nearestPoint(e) {
+  const c = curveCanvas, r = c.getBoundingClientRect();
+  const px = (e.clientX - r.left) / r.width * c.width;
+  let best = -1, bd = Infinity;
+  for (let i = 0; i < curvePoints.length; i++) {
+    const d = Math.abs(cpx(c, curvePoints[i].x) - px);
+    if (d < bd) { bd = d; best = i; }
   }
-  lastTapT = e.timeStamp; lastTapIdx = i;
-  if (i < 0) { curvePoints.push({ x: v.x, y: v.y }); curvePoints.sort((a, b) => a.x - b.x); i = curvePoints.indexOf(curvePoints.find((p) => p.x === v.x && p.y === v.y)); }
-  curveDrag = i;
+  return best;
+}
+function applyCurveDrag(e) {
+  const y = evY(e), lo = curvePoints[0], mid = curvePoints[1], hi = curvePoints[2];
+  if (curveDrag === 0)      { lo.y = clamp(y, 0, hi.y - 2);          mid.y = clamp(mid.y, lo.y + 1, hi.y - 1); }
+  else if (curveDrag === 2) { hi.y = clamp(y, lo.y + 2, 255);        mid.y = clamp(mid.y, lo.y + 1, hi.y - 1); }
+  else                      { mid.y = clamp(y, lo.y + 1, hi.y - 1); }
+  onCurveEdit();
+}
+curveCanvas.addEventListener('pointerdown', (e) => {
+  curveDrag = nearestPoint(e);
   try { curveCanvas.setPointerCapture(e.pointerId); } catch {}
   e.preventDefault();
-  onCurveEdit();
+  applyCurveDrag(e);
 });
-curveCanvas.addEventListener('pointermove', (e) => {
-  if (curveDrag < 0) return;
-  const v = evToVal(e), last = curvePoints.length - 1, pt = curvePoints[curveDrag];
-  // End points may move horizontally (black/white point clipping → more contrast).
-  if (curveDrag === 0) pt.x = clamp(v.x, 0, curvePoints[1].x - 1);
-  else if (curveDrag === last) pt.x = clamp(v.x, curvePoints[last - 1].x + 1, 255);
-  else pt.x = clamp(v.x, curvePoints[curveDrag - 1].x + 1, curvePoints[curveDrag + 1].x - 1);
-  pt.y = v.y;
-  onCurveEdit();
-});
+curveCanvas.addEventListener('pointermove', (e) => { if (curveDrag >= 0) applyCurveDrag(e); });
 const endCurveDrag = () => { curveDrag = -1; };
 curveCanvas.addEventListener('pointerup', endCurveDrag);
 curveCanvas.addEventListener('pointercancel', endCurveDrag);
@@ -1204,7 +1217,7 @@ histLog.addEventListener('change', refreshCurveUI);
 invertInput.addEventListener('change', onCurveEdit);              // changes the value LUT
 reverseCmap.addEventListener('change', () => { markStale(); drawPreview(); refreshCurveUI(); }); // colormap only
 curveReset.addEventListener('click', () => {
-  curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+  curvePoints = [{ x: 0, y: 0 }, { x: 128, y: 128 }, { x: 255, y: 255 }];
   invertInput.checked = false; reverseCmap.checked = false;
   onCurveEdit();
 });
@@ -1697,14 +1710,13 @@ function applyMetadata({ rebuild = false } = {}) {
   }
 }
 
-// The four size/quality variants produced on every "Create GIF". They share a
-// single frame-extraction pass; the smaller ones subsample frames (¼ frame rate)
-// and/or lower gifski's quality (¾). The user picks which to download.
+// The size/quality variants produced on every "Create GIF". They share a single
+// frame-extraction pass; the smaller ones drop to half the frame rate and/or
+// lower gifski's quality. The user picks which to download.
 const VARIANT_DEFS = [
-  { key: 'requested',  label: 'Requested',         fpsDiv: 1, qMul: 1 },
-  { key: 'quarterfps', label: '¼ frame rate',      fpsDiv: 4, qMul: 1 },
-  { key: 'lowquality', label: '¾ quality',         fpsDiv: 1, qMul: 0.75 },
-  { key: 'smallest',   label: '¼ rate + ¾ quality', fpsDiv: 4, qMul: 0.75 },
+  { key: 'high',   label: 'High quality',     fpsDiv: 1, qMul: 1 },
+  { key: 'medium', label: 'Medium',           fpsDiv: 2, qMul: 1 },
+  { key: 'small',  label: 'High compression', fpsDiv: 2, qMul: 0.75 },
 ];
 
 encodeBtn.addEventListener('click', async () => {
@@ -1800,7 +1812,7 @@ resetBtn.addEventListener('click', () => {
   crop = null; cropRectEl.hidden = true; cropInfo.textContent = '';
   clearLogo();
   selectColormap('none');
-  curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+  curvePoints = [{ x: 0, y: 0 }, { x: 128, y: 128 }, { x: 255, y: 255 }];
   invertInput.checked = false; reverseCmap.checked = false; buildCurveLut(); refreshCurveUI();
   resultsGrid.innerHTML = '';
   stage.hidden = true;
