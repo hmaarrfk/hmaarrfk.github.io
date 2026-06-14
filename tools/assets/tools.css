@@ -240,6 +240,13 @@ input[type="range"] { width: 100%; }
   width: 2px; height: 2px; opacity: 0.01;
   pointer-events: none; z-index: 0;
 }
+/* Generate step: collapse the stage to nothing visible, but keep it display:block
+   so the decode-source <video> inside stays rendered for frame extraction. */
+#stage.collapsed { padding: 0; margin: 0; border: 0; background: none; }
+#stage.collapsed #preview-wrap,
+#stage.collapsed .transport,
+#stage.collapsed .timeline { display: none; }
+
 #preview-wrap {
   position: relative;
   display: block;
@@ -403,6 +410,18 @@ input[type="range"] { width: 100%; }
 .tl-actions .small-btn.armed { background: #f1c40f; color: #3a2f00; border-color: #f1c40f; }
 .tl-actions .small-btn.armed:hover { background: #f4d03f; }
 .tl-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+
+/* Collapsible About panel — tasteful, small when closed */
+details.about { padding: 14px 20px; }
+details.about > summary {
+  cursor: pointer; list-style: none;
+  font-size: 1rem; font-weight: 600; color: var(--text);
+}
+details.about > summary::-webkit-details-marker { display: none; }
+details.about > summary::before { content: '▸'; color: var(--muted); margin-right: 8px; }
+details.about[open] > summary::before { content: '▾'; }
+details.about[open] > summary { margin-bottom: 10px; }
+details.about h3 { font-size: .95rem; }
 
 /* "Vibe" callout */
 .vibe {

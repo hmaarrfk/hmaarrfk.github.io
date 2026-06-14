@@ -74,6 +74,7 @@ const status      = $('status');
 
 const result      = $('result');
 const resultsGrid = $('results-grid');
+const vibePanel   = $('vibe');
 
 const scratchCanvas = $('scratch-canvas');
 const previewCanvas = $('preview-canvas');
@@ -889,6 +890,14 @@ function showStep(name) {
   previewWrap.style.touchAction = ta;
   previewCanvas.style.touchAction = ta;
   if (preview.videoWidth) renderTimeline();  // full (edit) ⇄ compressed timeline
+  // The Generate (export) step is a focused view: collapse the input-video stage
+  // so only the output (+ the star ask) shows. Uses a class (not display:none on
+  // #stage) so the decode-source <video> inside stays rendered — iOS needs it
+  // rendered to extract frames during encoding.
+  stage.classList.toggle('collapsed', name === 'export');
+  // The "star us on GitHub" ask appears only on the first (choose) screen and at
+  // download time — not while editing.
+  vibePanel.hidden = !(name === 'source' || name === 'export');
   updateOvalUI();
   drawPreview();  // switch full-frame ⇄ ROI-only view for the new step
 }

@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -268,10 +268,18 @@ Optimized for phones (iPhone-first) as well as desktop:
   mid-load image is never stranded when its old blob URL is revoked.
 
 ### Privacy / about
-- A "100% vibed" callout (no tracking/uploads) links to the GitHub repo to star.
-- About panel lists the AGPL license + "Built on" / "Inspired by" reference
-  links (gifski, gifski-wasm, matplotlib/Turbo/ColorBrewer, Squoosh, ffmpeg.wasm,
-  Claude Code, …).
+- A "100% vibed" callout (`#vibe`, no tracking/uploads) links to the GitHub repo
+  to star. It is **shown only on the Source (choose) step and the Generate/Export
+  (download) step** — hidden while editing, so it isn't nagging the whole time.
+- **Generate is a focused step**: on the Export step the input-video stage is
+  collapsed (`#stage.collapsed` — kept `display:block`, only the visible preview
+  UI hidden, so the decode-source `<video>` stays rendered for iOS extraction),
+  leaving just the encode controls + output GIFs + the star ask.
+- The **About & license** panel (AGPL notice + "Built on" / "Inspired by" links —
+  gifski, gifski-wasm, matplotlib/Turbo/ColorBrewer, Squoosh, ffmpeg.wasm, Claude
+  Code, …) is a **collapsed `<details class="about">`** (closed by default) so it
+  stays small/tasteful. A one-line legal footer remains always visible (AGPL +
+  source link), so the license info is still readily available.
 
 ## Pipeline (how it works)
 
