@@ -141,7 +141,9 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   draggable control points (click line to add, double-click to remove) define a
   256-entry LUT via a **smooth monotonic cubic** (Fritsch–Carlson) interpolation.
   The **end points move horizontally** too, so dragging them inward clips
-  blacks/whites to *increase* contrast (not just decrease it). The cropped
+  blacks/whites to *increase* contrast (not just decrease it). The histograms are
+  computed over the **current crop ROI** and update live as the ROI is dragged
+  while the Style step is showing. The cropped
   region's **input histogram** sits behind the curve
   (toggle "show output on curve"); a live **output histogram** strip sits below
   (pre-GIF-quantization). Applied to the colormap input, or to RGB when no

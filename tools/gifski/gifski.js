@@ -370,6 +370,10 @@ function afterCropChange({ keepFinal = true } = {}) {
   syncCropInputs();
   positionCropRect();
   markStale();
+  // The histograms (and curve preview) are computed over the crop ROI, so a ROI
+  // change must refresh them while the Style step is showing (drawPreview redraws
+  // the curve + histograms at its end when the Style pane is visible).
+  if (stylePane && !stylePane.hidden) drawPreview();
 }
 function refreshReady() {
   const ready = (mode === 'video' && videoFile) ||
