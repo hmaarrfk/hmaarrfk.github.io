@@ -1376,11 +1376,22 @@ async function framesFromVideo(fps, tf) {
     if (previewCanvas.width !== fw) previewCanvas.width = fw;
     if (previewCanvas.height !== fh) previewCanvas.height = fh;
     let lastPreviewAt = 0;
+    // Fast path: with no rotation/flip the two-stage render (paint() to
+    // fullCanvas, then crop-scale into scratch) is equivalent to a single
+    // crop-scale drawImage straight from the video to the scratch canvas.
+    // The full-frame transform stage is only needed for centered rotate/flip.
+    const direct = tf.rotation === 0 && tf.flip === 'none';
     for (let i = 0; i < times.length; i++) {
       await seekFor(v, times[i]);
-      paint(fullCtx, v, content.w, content.h, full.w, full.h, tf.rotation, tf.flip, tf.filterStr);
       g.clearRect(0, 0, fw, fh);
-      g.drawImage(fullCanvas, c.x * s, c.y * s, c.w * s, c.h * s, 0, 0, fw, fh);
+      if (direct) {
+        g.filter = tf.filterStr;
+        g.drawImage(v, c.x, c.y, c.w, c.h, 0, 0, fw, fh);
+        g.filter = 'none';
+      } else {
+        paint(fullCtx, v, content.w, content.h, full.w, full.h, tf.rotation, tf.flip, tf.filterStr);
+        g.drawImage(fullCanvas, c.x * s, c.y * s, c.w * s, c.h * s, 0, 0, fw, fh);
+      }
       frames.push(finishFrame(g, fw, fh));
       // Keep the timeline cursor + progress moving every iteration (near-free
       // DOM text/style writes); throttle the on-screen frame blit to ~30fps so
