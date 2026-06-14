@@ -199,6 +199,23 @@ bundle exec jekyll serve --future     # http://127.0.0.1:4000/
 The Gemfile also declares `csv base64 bigdecimal logger webrick` so modern Ruby
 can load the pinned Jekyll; harmless on GitHub Pages (its own gem env).
 
+## Performance / hardware acceleration
+
+Per-pixel work and redundant readbacks are GPU/throughput-optimized, each with a
+CPU/2D fallback (feature-detected; the vendored gifski WASM encode is unchanged):
+- **WebGL2 shader pass** does colormap + tone-curve (and is the pixel-effects path
+  for both the live preview and per-frame extraction), replacing the per-frame
+  `getImageData` → JS loop → `putImageData`. Falls back to the CPU
+  `applyPixelEffects` path if WebGL2 is unavailable or errors (`glDead`).
+- **Direct `gl.readPixels`** readback (with a vertical row-flip to match the 2D
+  convention) skips the GL→2D-canvas→`getImageData` double copy when a pixel
+  effect is active and there's no logo.
+- **Extraction draws** are collapsed into one crop-scale `drawImage` on the
+  rot=0/flip=none fast path; the render-time preview is a throttled (~33ms) blit
+  of the finished frame instead of re-running the full preview pipeline.
+- (Rejected in review: rVFC playback-based extraction — it sampled one source
+  frame late vs the seek path, so the export wouldn't match the WYSIWYG preview.)
+
 ## Testing approach
 
 - `window.__gifskiTest(opts)` runs the full transform+encode on synthetic
