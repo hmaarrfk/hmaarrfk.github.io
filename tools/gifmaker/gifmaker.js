@@ -823,6 +823,11 @@ function showStep(name) {
   currentStep = name;
   stepPanes.forEach((p) => { p.hidden = p.dataset.pane !== name; });
   stepBtns.forEach((b) => b.classList.toggle('active', b.dataset.step === name));
+  // While the crop box is editable (full-frame steps), stop the preview surface
+  // from scrolling the page during a drag; allow normal scrolling otherwise.
+  const ta = ROI_STEPS.has(name) ? '' : 'none';
+  previewWrap.style.touchAction = ta;
+  previewCanvas.style.touchAction = ta;
   drawPreview();  // switch full-frame ⇄ ROI-only view for the new step
 }
 stepBtns.forEach((b) => b.addEventListener('click', () => showStep(b.dataset.step)));
@@ -1363,6 +1368,7 @@ cropRectEl.addEventListener('pointerdown', (e) => {
 });
 cropRectEl.addEventListener('pointermove', (e) => {
   if (!cropDrag) return;
+  e.preventDefault();
   const p = wrapToFull(e), f = fullDims();
   if (cropDrag.mode === 'move') {
     crop.x = clamp(cropDrag.start.x + (p.x - cropDrag.p0.x), 0, f.w - cropDrag.start.w);
