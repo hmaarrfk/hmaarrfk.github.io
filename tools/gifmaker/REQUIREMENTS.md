@@ -84,8 +84,12 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   instant a control changes. The `<video>` is the hidden decode source; an rAF
   loop redraws the canvas during playback. Backing store capped at
   `PREVIEW_MAX` (854 px wide) for smoothness. During encoding the preview +
-  timeline cursor advance frame-by-frame (`drawPreview(true)` per extracted
-  frame) so you can watch it render.
+  timeline cursor advance frame-by-frame so you can watch it render.
+- **Two preview modes** (`roiView()`): Source/Trim/Crop show the **full frame
+  with the editable crop box**; from **Style onward (Style/Logo/Export)** the
+  preview shows **only the cropped ROI, scaled up to fill, with the crop box
+  hidden/locked** (`drawFullPreview` vs `drawRoiPreview`) — you can't re-crop once
+  you're styling/exporting; you see the actual framed output.
 - **Transport**: jump-to-in, prev frame, play/pause, next frame, jump-to-out,
   plus a timecode readout (`m:ss.xx / m:ss.xx · frame N`).
 - **Scrubbable timeline track**: click or drag to move the playhead.

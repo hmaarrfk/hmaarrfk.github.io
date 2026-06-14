@@ -239,34 +239,59 @@ function previewSize(srcW, srcH) {
 
 // Render the current video frame through the same transform pipeline as the
 // output, so the preview shows rotation/flip/colour exactly as it will encode.
+// The Style step shows only the cropped ROI (zoomed, no editable crop box); other
+// steps show the full frame with the crop box.
+function roiView() { return ROI_STEPS.has(currentStep) && !!crop; }
+function applyEffectsTo(canvas, ctx, w, h) {
+  if (!(colormapActive() || curveActive())) return;
+  const glOut = glPixelEffects(canvas, w, h);
+  if (glOut) { ctx.clearRect(0, 0, w, h); ctx.drawImage(glOut, 0, 0); }
+  else { const id = ctx.getImageData(0, 0, w, h); applyPixelEffects(id); ctx.putImageData(id, 0, 0); }
+}
 function drawPreview(force = false) {
   if ((extracting && !force) || !preview.videoWidth) return;
   const tf = readTransform();
+  if (roiView()) drawRoiPreview(tf);
+  else drawFullPreview(tf);
+}
+// Full frame + crop box (Crop / Trim / Logo / Export steps).
+function drawFullPreview(tf) {
   const base = previewSize(preview.videoWidth, preview.videoHeight);
   const out = outputDims(base.w, base.h, tf.rotation);
   if (previewCanvas.width !== out.w) previewCanvas.width = out.w;
   if (previewCanvas.height !== out.h) previewCanvas.height = out.h;
   paint(previewCtx, preview, base.w, base.h, out.w, out.h, tf.rotation, tf.flip, tf.filterStr);
-  const styleVisible = stylePane && !stylePane.hidden;
-  if (styleVisible) computeHistograms(previewCtx, out.w, out.h);  // from the raw frame
-  if (colormapActive() || curveActive()) {
-    const glOut = glPixelEffects(previewCanvas, out.w, out.h);
-    if (glOut) {
-      previewCtx.clearRect(0, 0, out.w, out.h);
-      previewCtx.drawImage(glOut, 0, 0);
-    } else {
-      const id = previewCtx.getImageData(0, 0, out.w, out.h);
-      applyPixelEffects(id);
-      previewCtx.putImageData(id, 0, 0);
-    }
-  }
-  // The logo lives inside the cropped region; place it there on the full-frame preview.
+  applyEffectsTo(previewCanvas, previewCtx, out.w, out.h);
   if (logoBitmap && crop) {
     const f = fullDims(), scale = f.w ? out.w / f.w : 1;
     drawLogoInto(previewCtx, crop.x * scale, crop.y * scale, crop.w * scale, crop.h * scale);
   }
-  positionCropRect();
-  if (styleVisible) { drawCurve(); drawHistOut(); }
+  if (crop) { cropRectEl.hidden = false; positionCropRect(); } else cropRectEl.hidden = true;
+}
+// Only the cropped ROI, scaled up to fill, no crop box (Style step).
+function drawRoiPreview(tf) {
+  cropRectEl.hidden = true;
+  const c = crop;
+  let ow = c.w, oh = c.h;
+  if (ow > PREVIEW_MAX) { const s = PREVIEW_MAX / ow; ow = PREVIEW_MAX; oh = Math.max(1, Math.round(oh * s)); }
+  if (oh > PREVIEW_MAX) { const s = PREVIEW_MAX / oh; oh = PREVIEW_MAX; ow = Math.max(1, Math.round(ow * s)); }
+  const s2 = ow / c.w;
+  const content = {
+    w: Math.max(1, Math.round(preview.videoWidth * s2)),
+    h: Math.max(1, Math.round(preview.videoHeight * s2)),
+  };
+  const full = outputDims(content.w, content.h, tf.rotation);
+  fullCanvas.width = full.w; fullCanvas.height = full.h;
+  paint(fullCtx, preview, content.w, content.h, full.w, full.h, tf.rotation, tf.flip, tf.filterStr);
+  if (previewCanvas.width !== ow) previewCanvas.width = ow;
+  if (previewCanvas.height !== oh) previewCanvas.height = oh;
+  previewCtx.clearRect(0, 0, ow, oh);
+  previewCtx.drawImage(fullCanvas, c.x * s2, c.y * s2, c.w * s2, c.h * s2, 0, 0, ow, oh);
+  const onStyle = currentStep === 'style';
+  if (onStyle) computeHistograms(previewCtx, 0, 0, ow, oh);  // whole ROI, raw (pre-effect)
+  applyEffectsTo(previewCanvas, previewCtx, ow, oh);
+  if (logoBitmap) drawLogoInto(previewCtx, 0, 0, ow, oh);
+  if (onStyle) { drawCurve(); drawHistOut(); }
 }
 function previewLoop() { drawPreview(); previewRaf = requestAnimationFrame(previewLoop); }
 function stopPreviewLoop() {
@@ -803,10 +828,15 @@ function setPlayhead() {
 function seek(t) { preview.currentTime = clamp(t, 0, Math.max(0, duration - 1e-3)); }
 
 // ---- Step navigation (non-linear: any step, any time) ------------------
+// From the Style step onward the preview shows only the cropped ROI (zoomed, no
+// editable crop box); earlier steps show the full frame with the crop box.
+const ROI_STEPS = new Set(['style', 'logo', 'export']);
+let currentStep = 'source';
 function showStep(name) {
+  currentStep = name;
   stepPanes.forEach((p) => { p.hidden = p.dataset.pane !== name; });
   stepBtns.forEach((b) => b.classList.toggle('active', b.dataset.step === name));
-  if (name === 'style') { drawPreview(); refreshCurveUI(); }  // recompute histograms
+  drawPreview();  // switch full-frame ⇄ ROI-only view for the new step
 }
 stepBtns.forEach((b) => b.addEventListener('click', () => showStep(b.dataset.step)));
 
@@ -1035,14 +1065,8 @@ colormapSearch.addEventListener('blur', () => setTimeout(hideCmList, 150));
 
 // ---- Tone curve editor + histograms ------------------------------------
 // Histograms of the cropped region (raw, pre-curve), input + curve-mapped output.
-function computeHistograms(ctx, cw, ch) {
+function computeHistograms(ctx, rx, ry, rw, rh) {
   inputHist.fill(0); outputHist.fill(0);
-  if (!crop) return;
-  const f = fullDims(), sc = f.w ? cw / f.w : 1;
-  const rx = clamp(Math.round(crop.x * sc), 0, cw - 1);
-  const ry = clamp(Math.round(crop.y * sc), 0, ch - 1);
-  const rw = Math.min(Math.max(1, Math.round(crop.w * sc)), cw - rx);
-  const rh = Math.min(Math.max(1, Math.round(crop.h * sc)), ch - ry);
   let data;
   try { data = ctx.getImageData(rx, ry, rw, rh).data; } catch { return; }
   const chn = channelSel.value, total = rw * rh, stride = Math.max(1, Math.floor(total / 40000));
