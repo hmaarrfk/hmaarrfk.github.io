@@ -252,7 +252,6 @@
             <option value="none" selected>None</option>
             <option value="grayscale">Grayscale</option>
             <option value="sepia">Sepia</option>
-            <option value="invert">Invert</option>
             <option value="contrast">High contrast</option>
             <option value="warm">Warm</option>
             <option value="cool">Cool</option>
@@ -265,6 +264,8 @@
         <div class="row" style="justify-content:space-between">
           <label style="margin:0">Tone curve (contrast)</label>
           <span class="row" style="gap:14px">
+            <label class="toggle"><input type="checkbox" id="invert-input"><span>invert input</span></label>
+            <label class="toggle"><input type="checkbox" id="reverse-colormap"><span>reverse colormap</span></label>
             <label class="toggle"><input type="checkbox" id="hist-log"><span>log scale</span></label>
             <button type="button" class="btn secondary small-btn" id="curve-reset">Reset</button>
           </span>

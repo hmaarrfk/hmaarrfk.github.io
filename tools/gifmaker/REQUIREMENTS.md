@@ -143,11 +143,17 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   The **end points move horizontally** too, so dragging them inward clips
   blacks/whites to *increase* contrast (not just decrease it). The histograms are
   computed over the **current crop ROI** and update live as the ROI is dragged
-  while the Style step is showing. The cropped
-  region's **input histogram** sits behind the curve
-  (toggle "show output on curve"); a live **output histogram** strip sits below
-  (pre-GIF-quantization). Applied to the colormap input, or to RGB when no
-  colormap is set. Live in the preview.
+  while the Style step is showing. Layout: **input histogram behind the curve on
+  the left → arrow → output histogram on the right** (both square; pre-GIF
+  quantization). The **output histogram is tinted by the colormap** (each bar in
+  the colour that value maps to; grayscale when no colormap). A **log scale**
+  toggle (log1p) reveals the dark end. Applied to the colormap input, or to RGB
+  when no colormap is set. Live in the preview.
+- **Invert input** (toggle): flips the input axis (value `255−x` fed through the
+  curve) so the selected range + midpoint invert together; negates the image on
+  RGB input. **Reverse colormap** (separate toggle): flips the colour ramp
+  (`lut[255−i]`) at lookup — affects colormap output only, baked into the GPU
+  colormap texture. These are distinct operations.
 
 ### Logo / watermark step
 - Optional logo image (its own click-to-open dropzone that shows a **preview** of

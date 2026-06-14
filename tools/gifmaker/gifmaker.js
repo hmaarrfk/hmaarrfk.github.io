@@ -53,6 +53,8 @@ const curveCtx       = curveCanvas.getContext('2d');
 const histOut        = $('hist-out');
 const histOutCtx     = histOut.getContext('2d');
 const histLog        = $('hist-log');
+const invertInput    = $('invert-input');
+const reverseCmap    = $('reverse-colormap');
 const curveReset     = $('curve-reset');
 const stylePane      = document.querySelector('[data-pane="style"]');
 
@@ -445,6 +447,14 @@ function buildCurveLut() {
     curveLut[x] = y;
     if (y !== x) identity = false;
   }
+  // "Invert input" flips the input axis (value 255-x is fed through the curve),
+  // so the selected range + midpoint invert together. Distinct from reversing
+  // the colormap (which flips the output colours, handled at lookup time).
+  if (invertInput.checked) {
+    const tmp = Uint8Array.from(curveLut);
+    for (let x = 0; x < 256; x++) curveLut[x] = tmp[255 - x];
+    identity = false;
+  }
   curveIdentity = identity;
 }
 // ---- WebGL2 pixel-effect pass (colormap + tone curve) ------------------
@@ -556,12 +566,14 @@ function glUploadLuts() {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
     glCurveKey = cKey;
   }
-  const mKey = effectiveColormapKey();
-  const cm = ALL_CM[mKey];
+  const baseKey = effectiveColormapKey();
+  const rev = reverseCmap.checked;
+  const mKey = baseKey + (rev ? '-rev' : '');
+  const cm = ALL_CM[baseKey];
   if (cm && mKey !== glCmapKey) {
     const px = new Uint8Array(256 * 4);
     for (let i = 0; i < 256; i++) {
-      const c = cm.lut[i];
+      const c = cm.lut[rev ? 255 - i : i];
       px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255;
     }
     gl.activeTexture(gl.TEXTURE2);
@@ -623,7 +635,7 @@ function glPixelEffects(src, w, h, readBack) {
 function applyColormap(imageData, llut) {
   const cm = ALL_CM[effectiveColormapKey()];
   if (!cm) return;
-  const lut = cm.lut, ch = channelSel.value, d = imageData.data;
+  const lut = cm.lut, ch = channelSel.value, d = imageData.data, rev = reverseCmap.checked;
   for (let i = 0; i < d.length; i += 4) {
     let v;
     if (ch === 'r') v = d[i];
@@ -632,7 +644,7 @@ function applyColormap(imageData, llut) {
     else v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
     if (v < 0) v = 0; else if (v > 255) v = 255;
     if (llut) v = llut[v];
-    const c = lut[v];
+    const c = lut[rev ? 255 - v : v];
     d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2];
   }
 }
@@ -1045,17 +1057,18 @@ function computeHistograms(ctx, cw, ch) {
     inputHist[v]++; outputHist[curveLut[v]]++;
   }
 }
-function drawHistBars(canvas, ctx, hist, color) {
+// `color` is a fixed fill, or `colorFn(i)` returns a per-bar colour.
+function drawHistBars(canvas, ctx, hist, color, colorFn) {
   const W = canvas.width, H = canvas.height, log = histLog.checked;
   const f = (v) => (log ? Math.log1p(v) : v);
   let max = 0;
   for (let i = 0; i < 256; i++) { const v = f(hist[i]); if (v > max) max = v; }
   if (max <= 0) return;
-  ctx.fillStyle = color;
+  if (!colorFn) ctx.fillStyle = color;
   const bw = Math.max(1, W / 256);
   for (let i = 0; i < 256; i++) {
     const h = f(hist[i]) / max * (H - 1);
-    if (h > 0) ctx.fillRect(i / 255 * (W - 1), H - h, bw, h);
+    if (h > 0) { if (colorFn) ctx.fillStyle = colorFn(i); ctx.fillRect(i / 255 * (W - 1), H - h, bw, h); }
   }
 }
 const cpx = (c, v) => v / 255 * (c.width - 1);
@@ -1079,7 +1092,15 @@ function drawHistOut() {
   const c = histOut, ctx = histOutCtx;
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.fillStyle = '#16181b'; ctx.fillRect(0, 0, c.width, c.height);
-  drawHistBars(c, ctx, outputHist, 'rgba(0,188,140,.65)');
+  // Tint each output bar with the colour the (effective) colormap gives that
+  // value; grayscale when there's no colormap. So the output histogram shows
+  // the actual output colours, including a reversed range when inverted.
+  const lut = colormapActive() ? ALL_CM[effectiveColormapKey()].lut : null;
+  const rev = reverseCmap.checked;
+  const colorFn = lut
+    ? (i) => { const cc = lut[rev ? 255 - i : i]; return `rgb(${cc[0]},${cc[1]},${cc[2]})`; }
+    : (i) => `rgb(${i},${i},${i})`;
+  drawHistBars(c, ctx, outputHist, null, colorFn);
 }
 function refreshCurveUI() { drawCurve(); drawHistOut(); }
 function onCurveEdit() { buildCurveLut(); markStale(); drawPreview(); refreshCurveUI(); }
@@ -1126,7 +1147,13 @@ curveCanvas.addEventListener('dblclick', (e) => {
   if (i > 0 && i < curvePoints.length - 1) { curvePoints.splice(i, 1); onCurveEdit(); }
 });
 histLog.addEventListener('change', refreshCurveUI);
-curveReset.addEventListener('click', () => { curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }]; onCurveEdit(); });
+invertInput.addEventListener('change', onCurveEdit);              // changes the value LUT
+reverseCmap.addEventListener('change', () => { markStale(); drawPreview(); refreshCurveUI(); }); // colormap only
+curveReset.addEventListener('click', () => {
+  curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+  invertInput.checked = false; reverseCmap.checked = false;
+  onCurveEdit();
+});
 buildCurveLut();
 refreshCurveUI();
 
@@ -1678,7 +1705,8 @@ resetBtn.addEventListener('click', () => {
   crop = null; cropRectEl.hidden = true; cropInfo.textContent = '';
   clearLogo();
   selectColormap('none');
-  curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }]; buildCurveLut(); refreshCurveUI();
+  curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+  invertInput.checked = false; reverseCmap.checked = false; buildCurveLut(); refreshCurveUI();
   lastBaseGif = null; baseInfo = null;
   stage.hidden = true;
   result.classList.remove('show');
