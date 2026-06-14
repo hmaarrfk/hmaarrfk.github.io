@@ -395,20 +395,44 @@ function readTransform() {
 }
 
 // ---- Colormap + levels + logo (post-process) ---------------------------
-function colormapActive() { return colormapKey !== 'none' && !!ALL_CM[colormapKey]; }
+// A single-channel input is always "colormapped" (gray if no map chosen); the
+// "Full colour (RGB)" input means no colormap (the tone curve acts on RGB).
+function colormapActive() { return channelSel.value !== 'rgb'; }
+function effectiveColormapKey() {
+  return (colormapKey !== 'none' && ALL_CM[colormapKey]) ? colormapKey : 'gray';
+}
 function curveActive() { return !curveIdentity; }
-// Build the 256-entry LUT from the control points (linear between points).
+// Build the 256-entry LUT from the control points with a smooth, monotonic
+// (Fritsch–Carlson) cubic so the curve bends naturally between points and can
+// both increase and decrease contrast. Drag the end points inward to clip.
 function buildCurveLut() {
-  const pts = [...curvePoints].sort((a, b) => a.x - b.x);
+  const p = [...curvePoints].sort((a, b) => a.x - b.x);
+  const n = p.length;
+  const dx = [], slope = [];
+  for (let i = 0; i < n - 1; i++) {
+    const d = p[i + 1].x - p[i].x;
+    dx.push(d);
+    slope.push(d === 0 ? 0 : (p[i + 1].y - p[i].y) / d);
+  }
+  const m = new Array(n);
+  m[0] = slope[0] || 0;
+  m[n - 1] = slope[n - 2] || 0;
+  for (let i = 1; i < n - 1; i++) m[i] = (slope[i - 1] * slope[i] <= 0) ? 0 : (slope[i - 1] + slope[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (slope[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / slope[i], b = m[i + 1] / slope[i], s = a * a + b * b;
+    if (s > 9) { const t = 3 / Math.sqrt(s); m[i] = t * a * slope[i]; m[i + 1] = t * b * slope[i]; }
+  }
   let identity = true;
   for (let x = 0; x < 256; x++) {
     let y;
-    if (x <= pts[0].x) y = pts[0].y;
-    else if (x >= pts[pts.length - 1].x) y = pts[pts.length - 1].y;
+    if (x <= p[0].x) y = p[0].y;
+    else if (x >= p[n - 1].x) y = p[n - 1].y;
     else {
-      let i = 0; while (i < pts.length - 2 && x > pts[i + 1].x) i++;
-      const a = pts[i], b = pts[i + 1];
-      y = b.x === a.x ? b.y : a.y + (b.y - a.y) * ((x - a.x) / (b.x - a.x));
+      let i = 0; while (i < n - 2 && x > p[i + 1].x) i++;
+      const h = dx[i], t = (x - p[i].x) / h, t2 = t * t, t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+      y = h00 * p[i].y + h10 * h * m[i] + h01 * p[i + 1].y + h11 * h * m[i + 1];
     }
     y = Math.round(clamp(y, 0, 255));
     curveLut[x] = y;
@@ -525,8 +549,8 @@ function glUploadLuts() {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
     glCurveKey = cKey;
   }
-  const cm = ALL_CM[colormapKey];
-  const mKey = colormapKey;
+  const mKey = effectiveColormapKey();
+  const cm = ALL_CM[mKey];
   if (cm && mKey !== glCmapKey) {
     const px = new Uint8Array(256 * 4);
     for (let i = 0; i < 256; i++) {
@@ -590,7 +614,7 @@ function glPixelEffects(src, w, h, readBack) {
 // Recolour each pixel by looking up its chosen channel (optionally levels-
 // adjusted first) in the colormap LUT.
 function applyColormap(imageData, llut) {
-  const cm = ALL_CM[colormapKey];
+  const cm = ALL_CM[effectiveColormapKey()];
   if (!cm) return;
   const lut = cm.lut, ch = channelSel.value, d = imageData.data;
   for (let i = 0; i < d.length; i += 4) {
@@ -628,18 +652,28 @@ function drawLogoInto(ctx, x, y, w, h) {
   const lw = w * sizePct;
   const lh = lw * (logoBitmap.height / logoBitmap.width);
   const m = w * 0.04;
-  let lx, ly;
-  switch (logoPos.value) {
+  const pos = logoPos.value;
+  let lx, ly, rot = 0;
+  switch (pos) {
     case 'tl':     lx = x + m;            ly = y + m;            break;
     case 'tr':     lx = x + w - lw - m;   ly = y + m;            break;
     case 'bl':     lx = x + m;            ly = y + h - lh - m;   break;
-    case 'center': lx = x + (w - lw) / 2; ly = y + (h - lh) / 2; break;
+    case 'center':                                                          // fallthrough
+    case 'center45':
+    case 'center-45': lx = x + (w - lw) / 2; ly = y + (h - lh) / 2;
+                      rot = pos === 'center45' ? Math.PI / 4 : pos === 'center-45' ? -Math.PI / 4 : 0; break;
     default:       lx = x + w - lw - m;   ly = y + h - lh - m;   break; // br
   }
   ctx.save();
   ctx.filter = 'none';
   ctx.globalAlpha = clamp((parseInt(logoOpacity.value, 10) || 0) / 100, 0, 1);
-  ctx.drawImage(logoBitmap, lx, ly, lw, lh);
+  if (rot) {
+    ctx.translate(lx + lw / 2, ly + lh / 2);
+    ctx.rotate(rot);
+    ctx.drawImage(logoBitmap, -lw / 2, -lh / 2, lw, lh);
+  } else {
+    ctx.drawImage(logoBitmap, lx, ly, lw, lh);
+  }
   ctx.restore();
 }
 
@@ -898,7 +932,14 @@ flipSel.addEventListener('change', () => {
   drawPreview();
 });
 filterSel.addEventListener('change', drawPreview);
-channelSel.addEventListener('change', () => { markStale(); drawPreview(); refreshCurveUI(); });
+function updateColormapEnabled() {
+  const rgb = channelSel.value === 'rgb';
+  colormapSearch.disabled = rgb;
+  document.getElementById('colormap-combo').style.opacity = rgb ? 0.5 : 1;
+  colormapSearch.placeholder = rgb ? 'n/a — RGB input' : 'None';
+}
+channelSel.addEventListener('change', () => { updateColormapEnabled(); markStale(); drawPreview(); refreshCurveUI(); });
+updateColormapEnabled();
 
 // ---- Colormap combobox (searchable, fuzzy) -----------------------------
 let cmFiltered = CM_OPTIONS, cmActiveIndex = -1;
@@ -1055,8 +1096,9 @@ curveCanvas.addEventListener('pointerdown', (e) => {
 curveCanvas.addEventListener('pointermove', (e) => {
   if (curveDrag < 0) return;
   const v = evToVal(e), last = curvePoints.length - 1, pt = curvePoints[curveDrag];
-  if (curveDrag === 0) pt.x = 0;
-  else if (curveDrag === last) pt.x = 255;
+  // End points may move horizontally (black/white point clipping → more contrast).
+  if (curveDrag === 0) pt.x = clamp(v.x, 0, curvePoints[1].x - 1);
+  else if (curveDrag === last) pt.x = clamp(v.x, curvePoints[last - 1].x + 1, 255);
   else pt.x = clamp(v.x, curvePoints[curveDrag - 1].x + 1, curvePoints[curveDrag + 1].x - 1);
   pt.y = v.y;
   onCurveEdit();

@@ -125,25 +125,32 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   that the crop ≥ final size, then crop + scale to the exact final size.
 - Images mode has no spatial crop — just **Max width** (px); `0` = original.
 
-### Style step
-- **Rotate** 0/90/180/270 (90/270 swap output W/H), **Flip** none/h/v/both,
-  **Color filter** none/grayscale/sepia/invert/contrast/warm/cool/vintage
-  (CSS `ctx.filter` during draw).
+### Style step (order = how it's applied: input → colormap → filter)
+- **Input**: "Full colour (RGB)" (default — keeps colours, colormap disabled) or a
+  single channel (Luminance / R / G / B). A single channel is always colormapped
+  (falls back to **gray** when no map is chosen, i.e. grayscale).
 - **Colormap** (false-colour) via a **searchable combobox** (fuzzy match, gradient
-  swatches): None + 22 matplotlib LUTs (`colormaps.js`) + 3 in-code ramps
-  Black→Red/Green/Blue. The single-hue ColorBrewer maps are shown as
-  "White → Red/Green/Blue". Applied per-pixel: the chosen **channel** (luminance /
-  R / G / B) indexes the 256-entry LUT. Live in the preview.
+  swatches), disabled when input is RGB: None + 22 matplotlib LUTs (`colormaps.js`)
+  + 3 in-code ramps Black→Red/Green/Blue. Single-hue ColorBrewer maps shown as
+  "White → Red/Green/Blue". The chosen channel (0–255) indexes the 256-entry LUT.
+- **Colour filter** none/grayscale/sepia/invert/contrast/warm/cool/vintage
+  (CSS `ctx.filter` during draw).
+- **Rotate** (0/90/180/270) and **Flip** live in the **Crop & size** step
+  (geometry), not here.
 - **Tone curve (contrast)** — a GIMP-style curves editor on a `<canvas>`:
   draggable control points (click line to add, double-click to remove) define a
-  256-entry LUT. The cropped region's **input histogram** sits behind the curve
+  256-entry LUT via a **smooth monotonic cubic** (Fritsch–Carlson) interpolation.
+  The **end points move horizontally** too, so dragging them inward clips
+  blacks/whites to *increase* contrast (not just decrease it). The cropped
+  region's **input histogram** sits behind the curve
   (toggle "show output on curve"); a live **output histogram** strip sits below
   (pre-GIF-quantization). Applied to the colormap input, or to RGB when no
   colormap is set. Live in the preview.
 
 ### Logo / watermark step
 - Optional logo image (its own click-to-open dropzone). Position TL/TR/BL/BR/
-  center, **size** (% of frame width), **opacity** (0–100% → watermark). Drawn
+  center / center +45° / center −45° (rotated), **size** (% of frame width),
+  **opacity** (0–100% → watermark). Drawn
   *on top* (after colormap), inside the cropped output. Preview composites it
   within the crop region.
 

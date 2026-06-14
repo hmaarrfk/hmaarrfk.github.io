@@ -134,6 +134,26 @@
     <!-- STEP 3 · CROP & SIZE -->
     <section class="panel step-pane" data-pane="crop" hidden>
       <h2 style="margin-top:0">3 &middot; Crop &amp; output size</h2>
+      <div class="controls" style="margin-bottom:16px">
+        <div class="field">
+          <label for="rotate">Rotate</label>
+          <select id="rotate">
+            <option value="0" selected>None</option>
+            <option value="90">90&deg; clockwise</option>
+            <option value="180">180&deg;</option>
+            <option value="270">270&deg; (90&deg; ccw)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="flip">Flip</label>
+          <select id="flip">
+            <option value="none" selected>None</option>
+            <option value="h">Horizontal (mirror)</option>
+            <option value="v">Vertical</option>
+            <option value="hv">Both</option>
+          </select>
+        </div>
+      </div>
       <div class="video-only">
         <div class="controls">
           <div class="field">
@@ -204,27 +224,30 @@
     <!-- STEP 4 · STYLE -->
     <section class="panel step-pane" data-pane="style" hidden>
       <h2 style="margin-top:0">4 &middot; Style</h2>
+      <p class="muted small" style="margin:-4px 0 14px">Applied left&nbsp;&rarr;&nbsp;right: pick an input, map it through a colormap, then a colour filter.</p>
       <div class="controls">
         <div class="field">
-          <label for="rotate">Rotate</label>
-          <select id="rotate">
-            <option value="0" selected>None</option>
-            <option value="90">90&deg; clockwise</option>
-            <option value="180">180&deg;</option>
-            <option value="270">270&deg; (90&deg; ccw)</option>
+          <label for="channel">Input</label>
+          <select id="channel">
+            <option value="rgb" selected>Full colour (RGB)</option>
+            <option value="lum">Luminance</option>
+            <option value="r">Red channel</option>
+            <option value="g">Green channel</option>
+            <option value="b">Blue channel</option>
           </select>
+          <span class="hint">RGB keeps colours; a channel feeds the colormap</span>
         </div>
         <div class="field">
-          <label for="flip">Flip</label>
-          <select id="flip">
-            <option value="none" selected>None</option>
-            <option value="h">Horizontal (mirror)</option>
-            <option value="v">Vertical</option>
-            <option value="hv">Both</option>
-          </select>
+          <label for="colormap-search">Colormap</label>
+          <div class="combo" id="colormap-combo">
+            <input type="text" id="colormap-search" placeholder="None" autocomplete="off"
+                   role="combobox" aria-expanded="false" aria-autocomplete="list">
+            <div class="combo-list" id="colormap-list" hidden></div>
+          </div>
+          <span class="hint">type to search; false-colour the input channel</span>
         </div>
         <div class="field">
-          <label for="filter">Color filter</label>
+          <label for="filter">Colour filter</label>
           <select id="filter">
             <option value="none" selected>None</option>
             <option value="grayscale">Grayscale</option>
@@ -235,25 +258,6 @@
             <option value="cool">Cool</option>
             <option value="vintage">Vintage</option>
           </select>
-        </div>
-        <div class="field">
-          <label for="colormap-search">Colormap</label>
-          <div class="combo" id="colormap-combo">
-            <input type="text" id="colormap-search" placeholder="None" autocomplete="off"
-                   role="combobox" aria-expanded="false" aria-autocomplete="list">
-            <div class="combo-list" id="colormap-list" hidden></div>
-          </div>
-          <span class="hint">type to search; false-colour a channel</span>
-        </div>
-        <div class="field">
-          <label for="channel">Colormap input</label>
-          <select id="channel">
-            <option value="lum" selected>Luminance</option>
-            <option value="r">Red channel</option>
-            <option value="g">Green channel</option>
-            <option value="b">Blue channel</option>
-          </select>
-          <span class="hint">value fed into the colormap</span>
         </div>
       </div>
 
@@ -270,9 +274,10 @@
           <canvas id="hist-out" width="256" height="46"></canvas>
         </div>
         <span class="hint">
-          Drag points for brightness/contrast/gamma; click the line to add a point, double-click one to remove.
-          Histogram is the cropped region — input sits behind the curve, the strip below is the live output
-          (before the GIF's own colour quantization). Applies to the colormap input, or to RGB with no colormap.
+          Drag points for brightness/contrast/gamma (smooth curve through the points); click the line to add a
+          point, double-click one to remove. <strong>Drag the end points inward</strong> to boost contrast
+          (clip blacks/whites). Histogram is the cropped region — input sits behind the curve, the strip below
+          is the live output (before the GIF's own colour quantization).
         </span>
       </div>
       <p class="muted small" style="margin:12px 0 0">
@@ -299,6 +304,8 @@
             <option value="tr">Top-right</option>
             <option value="tl">Top-left</option>
             <option value="center">Center</option>
+            <option value="center45">Center, +45&deg;</option>
+            <option value="center-45">Center, &minus;45&deg;</option>
           </select>
         </div>
         <div class="field">
