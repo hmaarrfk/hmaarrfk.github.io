@@ -265,19 +265,26 @@
         <div class="row" style="justify-content:space-between">
           <label style="margin:0">Tone curve (contrast)</label>
           <span class="row" style="gap:14px">
-            <label class="toggle"><input type="checkbox" id="curve-show-output"><span>show output on curve</span></label>
+            <label class="toggle"><input type="checkbox" id="hist-log"><span>log scale</span></label>
             <button type="button" class="btn secondary small-btn" id="curve-reset">Reset</button>
           </span>
         </div>
-        <div class="curve-wrap">
-          <canvas id="curve-canvas" width="256" height="256"></canvas>
-          <canvas id="hist-out" width="256" height="46"></canvas>
+        <div class="curve-row">
+          <div class="curve-col">
+            <canvas id="curve-canvas" width="256" height="256"></canvas>
+            <span class="curve-cap">input &amp; curve</span>
+          </div>
+          <div class="curve-arrow" aria-hidden="true">&rarr;</div>
+          <div class="curve-col">
+            <canvas id="hist-out" width="256" height="256"></canvas>
+            <span class="curve-cap">output</span>
+          </div>
         </div>
         <span class="hint">
           Drag points for brightness/contrast/gamma (smooth curve through the points); click the line to add a
           point, double-click one to remove. <strong>Drag the end points inward</strong> to boost contrast
-          (clip blacks/whites). Histogram is the cropped region — input sits behind the curve, the strip below
-          is the live output (before the GIF's own colour quantization).
+          (clip blacks/whites). Histograms are the cropped ROI — input behind the curve (left), output on the
+          right (live, before the GIF's own quantization). Toggle <em>log scale</em> to reveal the dark end.
         </span>
       </div>
       <p class="muted small" style="margin:12px 0 0">
@@ -438,7 +445,7 @@
         corresponding source remain available to you. The bundled copy of the license is
         <a href="vendor/LICENSE" target="_blank" rel="noopener">included here</a>, the encoder source is at the
         gifski and gifski-wasm repositories linked above, and the full source of this page is on
-        <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/gifski" target="_blank" rel="noopener">GitHub</a>.
+        <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/gifmaker" target="_blank" rel="noopener">GitHub</a>.
       </p>
 
       <h3 style="margin:22px 0 10px">Built on</h3>
@@ -473,6 +480,6 @@
   <!-- Hidden canvas used for drawing frames during extraction -->
   <canvas id="scratch-canvas" style="display:none"></canvas>
 
-  <script type="module" src="/tools/gifski/gifski.js"></script>
+  <script type="module" src="/tools/gifmaker/gifmaker.js"></script>
 </body>
 </html>

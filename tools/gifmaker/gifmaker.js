@@ -52,7 +52,7 @@ const curveCanvas    = $('curve-canvas');
 const curveCtx       = curveCanvas.getContext('2d');
 const histOut        = $('hist-out');
 const histOutCtx     = histOut.getContext('2d');
-const curveShowOutput = $('curve-show-output');
+const histLog        = $('hist-log');
 const curveReset     = $('curve-reset');
 const stylePane      = document.querySelector('[data-pane="style"]');
 
@@ -668,7 +668,7 @@ function drawLogoInto(ctx, x, y, w, h) {
     case 'center':                                                          // fallthrough
     case 'center45':
     case 'center-45': lx = x + (w - lw) / 2; ly = y + (h - lh) / 2;
-                      rot = pos === 'center45' ? Math.PI / 4 : pos === 'center-45' ? -Math.PI / 4 : 0; break;
+                      rot = pos === 'center45' ? -Math.PI / 4 : pos === 'center-45' ? Math.PI / 4 : 0; break;
     default:       lx = x + w - lw - m;   ly = y + h - lh - m;   break; // br
   }
   ctx.save();
@@ -1046,14 +1046,15 @@ function computeHistograms(ctx, cw, ch) {
   }
 }
 function drawHistBars(canvas, ctx, hist, color) {
-  const W = canvas.width, H = canvas.height;
+  const W = canvas.width, H = canvas.height, log = histLog.checked;
+  const f = (v) => (log ? Math.log1p(v) : v);
   let max = 0;
-  for (let i = 0; i < 256; i++) if (hist[i] > max) max = hist[i];
+  for (let i = 0; i < 256; i++) { const v = f(hist[i]); if (v > max) max = v; }
   if (max <= 0) return;
   ctx.fillStyle = color;
   const bw = Math.max(1, W / 256);
   for (let i = 0; i < 256; i++) {
-    const h = hist[i] / max * (H - 1);
+    const h = f(hist[i]) / max * (H - 1);
     if (h > 0) ctx.fillRect(i / 255 * (W - 1), H - h, bw, h);
   }
 }
@@ -1063,7 +1064,7 @@ function drawCurve() {
   const c = curveCanvas, ctx = curveCtx, W = c.width, H = c.height;
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#16181b'; ctx.fillRect(0, 0, W, H);
-  drawHistBars(c, ctx, curveShowOutput.checked ? outputHist : inputHist, 'rgba(125,145,165,.40)');
+  drawHistBars(c, ctx, inputHist, 'rgba(125,145,165,.40)');
   ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 1; ctx.beginPath();
   for (let g = 1; g < 4; g++) { ctx.moveTo(g / 4 * W, 0); ctx.lineTo(g / 4 * W, H); ctx.moveTo(0, g / 4 * H); ctx.lineTo(W, g / 4 * H); }
   ctx.stroke();
@@ -1124,7 +1125,7 @@ curveCanvas.addEventListener('dblclick', (e) => {
   const i = nearestPoint(evToVal(e));
   if (i > 0 && i < curvePoints.length - 1) { curvePoints.splice(i, 1); onCurveEdit(); }
 });
-curveShowOutput.addEventListener('change', refreshCurveUI);
+histLog.addEventListener('change', refreshCurveUI);
 curveReset.addEventListener('click', () => { curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }]; onCurveEdit(); });
 buildCurveLut();
 refreshCurveUI();

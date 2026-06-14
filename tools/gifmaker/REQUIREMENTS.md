@@ -1,6 +1,6 @@
-# gifski web tool — requirements & design notes
+# GIF Maker — requirements & design notes
 
-A living spec for the gifski GIF-maker at `/tools/gifski/`. Update this file
+A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
 _Last updated: 2026-06-13 (tone-curve editor + histograms; speed/duration/loop as instant metadata patches; two-unit crop nudges; render-time preview)._
@@ -22,7 +22,7 @@ WebAssembly tools under `/tools/`.
 4. **Self-contained.** The gifski WASM + glue are **vendored** under `vendor/`
    (not loaded from a CDN at runtime) so the tool works offline and survives CDN
    outages.
-5. **No Jekyll/Liquid processing of the app.** `index.html`, `gifski.js`, and
+5. **No Jekyll/Liquid processing of the app.** `index.html`, `gifmaker.js`, and
    the vendored files carry **no YAML front matter** so Jekyll copies them
    verbatim and never mangles the JavaScript. (The `/tools/` gallery index *is* a
    normal Jekyll page and may use front matter.)
@@ -35,7 +35,7 @@ WebAssembly tools under `/tools/`.
 | Path | Role |
 |------|------|
 | `index.html` | Tool UI (raw HTML, no front matter) |
-| `gifski.js` | All app logic (ES module) |
+| `gifmaker.js` | All app logic (ES module) |
 | `colormaps.js` | 22 matplotlib colormap LUTs (256×[r,g,b]); generated from matplotlib, see header for licenses |
 | `../assets/tools.css` | Shared styling for standalone tool pages |
 | `vendor/dist/encode.js` | gifski-wasm high-level `encode()` wrapper |
@@ -193,7 +193,7 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
 ## Local preview
 
 The tool itself is static, so any static server works for it alone, e.g.
-`python3 -m http.server` then open `/tools/gifski/`.
+`python3 -m http.server` then open `/tools/gifmaker/`.
 
 For the **full Jekyll site** (homepage, `/tools/` gallery): the `github-pages`
 gem pins Jekyll 3.9 / Liquid 4.0.3, which only run on **Ruby ≤ 3.1**

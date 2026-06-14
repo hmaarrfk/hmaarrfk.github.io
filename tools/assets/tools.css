@@ -404,17 +404,16 @@ input[type="range"] { width: 100%; }
 }
 .combo-empty { padding: 9px 10px; color: var(--muted); font-size: .88rem; }
 
-/* Tone curve editor */
-.curve-wrap { max-width: 300px; margin-top: 8px; }
-#curve-canvas {
+/* Tone curve editor: [input + curve]  →  [output] */
+.curve-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.curve-col { display: flex; flex-direction: column; gap: 4px; flex: 1 1 220px; min-width: 150px; max-width: 300px; }
+.curve-col canvas {
   width: 100%; height: auto; display: block;
-  border: 1px solid var(--border); border-radius: 8px 8px 0 0;
-  cursor: crosshair; touch-action: none;
+  border: 1px solid var(--border); border-radius: 8px; background: #16181b;
 }
-#hist-out {
-  width: 100%; height: auto; display: block;
-  border: 1px solid var(--border); border-top: none; border-radius: 0 0 8px 8px;
-}
+#curve-canvas { cursor: crosshair; touch-action: none; }
+.curve-arrow { flex: 0 0 auto; color: var(--muted); font-size: 1.7rem; line-height: 1; }
+.curve-cap { font-size: .72rem; color: var(--muted); text-align: center; }
 .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; color: var(--muted); cursor: pointer; }
 .toggle input { width: 16px; height: 16px; }
 
