@@ -185,12 +185,15 @@ Optimized for phones (iPhone-first) as well as desktop:
   in-code ramps Black→Red/Green/Blue. Single-hue ColorBrewer maps shown as
   "White → Red/Green/Blue". The chosen channel (0–255) indexes the 256-entry LUT.
   - **Live thumbnails**: each option's swatch is a mini render of the **current
-    frame** recoloured by that colormap (the "None" swatch is the grayscale frame),
-    not an abstract gradient — more fun and WYSIWYG. The frame's selected channel
-    is captured when the list opens (`refreshCmThumbs`, drawn small from the
-    `<video>`), then recoloured per option (applying the current curve + reverse)
-    and cached as a data URL (`cmThumbUrl`). Falls back to a gradient swatch
-    (`swatchCss`) before a video is loaded.
+    cropped frame** recoloured by that colormap (the "None" swatch is the grayscale
+    frame), not an abstract gradient — more fun and WYSIWYG. The thumbnail is
+    rendered from the **crop ROI at the output aspect ratio** (rotation/flip
+    applied, same two-step paint+crop as the ROI preview), so it isn't stretched;
+    the swatch box uses `background-size:contain` to letterbox it. The selected
+    channel is captured when the list opens (`refreshCmThumbs`), then recoloured
+    per option (applying the current curve + reverse) and cached as a data URL
+    (`cmThumbUrl`). Falls back to a gradient swatch (`swatchCss`) before a video
+    is loaded.
 - **Colour filter** none/grayscale/sepia/invert/contrast/warm/cool/vintage
   (CSS `ctx.filter` during draw).
 - **Rotate** (0/90/180/270) and **Flip** live in the **Crop & size** step

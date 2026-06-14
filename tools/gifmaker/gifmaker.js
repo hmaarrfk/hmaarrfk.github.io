@@ -1050,25 +1050,45 @@ function swatchCss(key) {
   return `background:linear-gradient(90deg,${stops.join(',')})`;
 }
 
-// Live colormap-picker thumbnails: the current frame's selected channel recoloured
-// by each colormap, so the dropdown previews the actual look (more fun than an
-// abstract gradient). The channel is captured when the list opens; the recoloured
-// data URLs are cached per key. Falls back to swatchCss when no frame is loaded.
-const CM_THUMB_W = 60, CM_THUMB_H = 38;
+// Live colormap-picker thumbnails: the current cropped frame's selected channel
+// recoloured by each colormap, so the dropdown previews the actual look (more fun
+// than an abstract gradient). The thumbnail matches the chosen crop + output
+// aspect ratio (rotation/flip applied) so the previews aren't stretched. The
+// channel is captured when the list opens; recoloured data URLs are cached per
+// key. Falls back to swatchCss when no frame is loaded.
+const CM_THUMB_CAP = 64;          // longest thumbnail edge (px)
+const cmSrcCanvas = document.createElement('canvas');
+const cmSrcCtx = cmSrcCanvas.getContext('2d', { willReadFrequently: true });
 const cmThumbCanvas = document.createElement('canvas');
-cmThumbCanvas.width = CM_THUMB_W; cmThumbCanvas.height = CM_THUMB_H;
 const cmThumbCtx = cmThumbCanvas.getContext('2d', { willReadFrequently: true });
-let cmThumbChannel = null;        // Uint8Array of channel values for the frame
+let cmThumbChannel = null;        // Uint8Array of channel values for the cropped frame
 const cmThumbCache = new Map();   // colormap key → data URL
 function refreshCmThumbs() {
   cmThumbCache.clear();
   cmThumbChannel = null;
   if (!preview.videoWidth) return;
   try {
-    cmThumbCtx.clearRect(0, 0, CM_THUMB_W, CM_THUMB_H);
-    cmThumbCtx.drawImage(preview, 0, 0, CM_THUMB_W, CM_THUMB_H);
-    const data = cmThumbCtx.getImageData(0, 0, CM_THUMB_W, CM_THUMB_H).data;
-    const ch = channelSel.value, n = CM_THUMB_W * CM_THUMB_H, out = new Uint8Array(n);
+    const tf = readTransform();
+    const f = fullDims();
+    const c = crop || { x: 0, y: 0, w: f.w, h: f.h };
+    // Thumbnail dims follow the output aspect (final size, else the crop).
+    const aw = finalW || c.w, ah = finalH || c.h;
+    let tw, th;
+    if (aw >= ah) { tw = CM_THUMB_CAP; th = Math.max(1, Math.round(CM_THUMB_CAP * ah / aw)); }
+    else { th = CM_THUMB_CAP; tw = Math.max(1, Math.round(CM_THUMB_CAP * aw / ah)); }
+    // Render the full transformed frame, then crop it into the thumbnail (same
+    // two-step approach as the ROI preview / extraction).
+    const s2 = tw / c.w;
+    const content = { w: Math.max(1, Math.round(preview.videoWidth * s2)),
+                      h: Math.max(1, Math.round(preview.videoHeight * s2)) };
+    const full = outputDims(content.w, content.h, tf.rotation);
+    cmSrcCanvas.width = full.w; cmSrcCanvas.height = full.h;
+    paint(cmSrcCtx, preview, content.w, content.h, full.w, full.h, tf.rotation, tf.flip, tf.filterStr);
+    cmThumbCanvas.width = tw; cmThumbCanvas.height = th;
+    cmThumbCtx.clearRect(0, 0, tw, th);
+    cmThumbCtx.drawImage(cmSrcCanvas, c.x * s2, c.y * s2, c.w * s2, c.h * s2, 0, 0, tw, th);
+    const data = cmThumbCtx.getImageData(0, 0, tw, th).data;
+    const ch = channelSel.value, n = tw * th, out = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       const p = i * 4;
       let v = ch === 'r' ? data[p] : ch === 'g' ? data[p + 1] : ch === 'b' ? data[p + 2]
@@ -1083,8 +1103,9 @@ function cmThumbUrl(key) {
   if (cmThumbCache.has(key)) return cmThumbCache.get(key);
   const cm = ALL_CM[key === 'none' ? 'gray' : key];
   if (!cm) return null;
+  const w = cmThumbCanvas.width, h = cmThumbCanvas.height, n = w * h;
   const lut = cm.lut, rev = reverseCmap.checked, cv = curveActive();
-  const n = CM_THUMB_W * CM_THUMB_H, id = cmThumbCtx.createImageData(CM_THUMB_W, CM_THUMB_H), d = id.data;
+  const id = cmThumbCtx.createImageData(w, h), d = id.data;
   for (let i = 0; i < n; i++) {
     let v = cmThumbChannel[i];
     if (cv) v = curveLut[v];
