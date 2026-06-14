@@ -82,6 +82,8 @@ const previewWrap   = $('preview-wrap');
 
 // Crop UI
 const cropRectEl  = $('crop-rect');
+const cropOval    = $('crop-oval');
+const ovalMask    = $('oval-mask');
 const cropAspect  = $('crop-aspect');
 const cropXIn = $('crop-x'), cropYIn = $('crop-y'), cropWIn = $('crop-w'), cropHIn = $('crop-h');
 const finalWIn = $('final-w'), finalHIn = $('final-h');
@@ -279,6 +281,7 @@ function drawRoiPreview(tf) {
   const onStyle = currentStep === 'style';
   if (onStyle) computeHistograms(previewCtx, 0, 0, ow, oh);  // whole ROI, raw (pre-effect)
   applyEffectsTo(previewCanvas, previewCtx, ow, oh);
+  if (maskActive()) applyOvalMask(previewCtx, ow, oh);       // transparent corners (before the logo)
   if (logoBitmap) drawLogoInto(previewCtx, 0, 0, ow, oh);
   if (onStyle) { drawCurve(); drawHistOut(); }
 }
@@ -696,21 +699,35 @@ function drawLogoInto(ctx, x, y, w, h) {
   ctx.restore();
 }
 
-// Apply colormap + logo to a finished output frame and read it back.
+function maskActive() { return !!(ovalMask && ovalMask.checked); }
+// Clip ctx to the inscribed ellipse: everything outside becomes transparent
+// (GIF transparency). Done before the logo so a watermark still draws on top.
+function applyOvalMask(ctx, w, h) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.filter = 'none';
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Apply colormap + oval mask + logo to a finished output frame and read it back.
 function finishFrame(g, w, h) {
+  const mask = maskActive();
   if (colormapActive() || curveActive()) {
-    // Fast path: no logo means the GL result is the final frame, so read it
-    // straight off the GPU (skip the extra drawImage + getImageData). The
-    // encoder accepts a bare { data } object, so wrap the readPixels buffer.
-    if (!logoBitmap) {
+    // Fast path: no logo and no mask means the GL result is the final frame, so
+    // read it straight off the GPU (skip the extra drawImage + getImageData).
+    if (!logoBitmap && !mask) {
       const glOut = glPixelEffects(g.canvas, w, h, true);
       if (glOut && glOut.pixels) {
         // The buffer is reused next call; copy so the pushed frame is stable.
         return { data: glOut.pixels.slice(), width: w, height: h };
       }
     }
-    // Logo present (or readback failed): run the effect onto the 2D canvas so
-    // the logo can be composited in 2D afterwards.
+    // Logo/mask present (or readback failed): run the effect onto the 2D canvas
+    // so the mask + logo can be composited in 2D afterwards.
     const glOut = glPixelEffects(g.canvas, w, h);
     if (glOut) {
       g.clearRect(0, 0, w, h);
@@ -721,6 +738,7 @@ function finishFrame(g, w, h) {
       g.putImageData(id, 0, 0);
     }
   }
+  if (mask) applyOvalMask(g, w, h);          // transparent corners (before the logo)
   if (logoBitmap) drawLogoInto(g, 0, 0, w, h);
   return g.getImageData(0, 0, w, h);
 }
@@ -871,9 +889,18 @@ function showStep(name) {
   previewWrap.style.touchAction = ta;
   previewCanvas.style.touchAction = ta;
   if (preview.videoWidth) renderTimeline();  // full (edit) ⇄ compressed timeline
+  updateOvalUI();
   drawPreview();  // switch full-frame ⇄ ROI-only view for the new step
 }
 stepBtns.forEach((b) => b.addEventListener('click', () => showStep(b.dataset.step)));
+
+// Oval mask: dashed ellipse guide on the crop box + checkerboard behind the
+// preview (so transparent corners read as transparent).
+function updateOvalUI() {
+  if (cropOval) cropOval.hidden = !maskActive();
+  previewCanvas.classList.toggle('masked', maskActive());
+}
+if (ovalMask) ovalMask.addEventListener('change', () => { updateOvalUI(); markStale(); drawPreview(); });
 
 // ---- Drag & drop wiring ------------------------------------------------
 // Click-to-open dropzone (source video + the optional logo).
@@ -1822,6 +1849,7 @@ resetBtn.addEventListener('click', () => {
   selectColormap('none');
   curvePoints = [{ x: 0, y: 0 }, { x: 128, y: 128 }, { x: 255, y: 255 }];
   invertInput.checked = false; reverseCmap.checked = false; buildCurveLut(); refreshCurveUI();
+  if (ovalMask) ovalMask.checked = false; updateOvalUI();
   resultsGrid.innerHTML = '';
   stage.hidden = true;
   result.classList.remove('show');

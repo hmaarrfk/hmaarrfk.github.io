@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -157,6 +157,16 @@ Optimized for phones (iPhone-first) as well as desktop:
   so dragging the crop box — including over the dimmed area — never scrolls the
   page; normal scrolling is restored on Style/Logo/Export.
 - **Aspect presets**: free / original / 1:1 / 4:3 / 3:2 / 16:9 / 3:4 / 9:16.
+- **Oval mask** (`#oval-mask`): makes everything outside the inscribed ellipse of
+  the output rectangle **transparent** (a circle for square crops, an oval
+  otherwise) — exported as real GIF transparency (gifski emits a transparent
+  palette index for fully-transparent pixels). Implemented as a `destination-in`
+  ellipse composite (`applyOvalMask`) applied in `finishFrame` **after** the
+  colormap/curve but **before** the logo, so a logo/watermark still draws on top
+  of the masked frame. The same mask is shown live in the ROI preview, with a
+  dashed ellipse guide on the crop box (`.crop-oval`) during the Crop step and a
+  checkerboard behind the preview (`#preview-canvas.masked`) so transparent
+  corners read as transparent. Toggling it `markStale()`s (needs a re-encode).
 - Exact numeric entry in **both spaces**: crop X/Y/W/H in source px, and final
   W/H in output px (final follows the crop aspect).
 - **Rotation/flip carry the crop** (transform its extents, don't reset); a

@@ -40,6 +40,7 @@
         <div id="preview-wrap">
           <canvas id="preview-canvas"></canvas>
           <div id="crop-rect" hidden>
+            <div id="crop-oval" class="crop-oval" hidden></div>
             <span class="ch nw" data-h="nw"></span>
             <span class="ch n"  data-h="n"></span>
             <span class="ch ne" data-h="ne"></span>
@@ -146,6 +147,10 @@
         </div>
       </div>
       <div class="video-only">
+        <label class="checkbox" style="margin-bottom:16px">
+          <input type="checkbox" id="oval-mask">
+          <span>Oval mask &mdash; make the corners outside an inscribed ellipse transparent (a circle for square crops). The logo/watermark still draws on top.</span>
+        </label>
         <div class="controls">
           <div class="field">
             <label for="crop-aspect">Aspect ratio</label>
