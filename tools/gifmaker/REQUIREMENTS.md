@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -179,10 +179,17 @@ Optimized for phones (iPhone-first) as well as desktop:
 - **Input**: "Full colour (RGB)" (default — keeps colours, colormap disabled) or a
   single channel (Luminance / R / G / B). A single channel is always colormapped
   (falls back to **gray** when no map is chosen, i.e. grayscale).
-- **Colormap** (false-colour) via a **searchable combobox** (fuzzy match, gradient
-  swatches), disabled when input is RGB: None + 22 matplotlib LUTs (`colormaps.js`)
-  + 3 in-code ramps Black→Red/Green/Blue. Single-hue ColorBrewer maps shown as
+- **Colormap** (false-colour) via a **searchable combobox** (fuzzy match),
+  disabled when input is RGB: None + 22 matplotlib LUTs (`colormaps.js`) + 3
+  in-code ramps Black→Red/Green/Blue. Single-hue ColorBrewer maps shown as
   "White → Red/Green/Blue". The chosen channel (0–255) indexes the 256-entry LUT.
+  - **Live thumbnails**: each option's swatch is a mini render of the **current
+    frame** recoloured by that colormap (the "None" swatch is the grayscale frame),
+    not an abstract gradient — more fun and WYSIWYG. The frame's selected channel
+    is captured when the list opens (`refreshCmThumbs`, drawn small from the
+    `<video>`), then recoloured per option (applying the current curve + reverse)
+    and cached as a data URL (`cmThumbUrl`). Falls back to a gradient swatch
+    (`swatchCss`) before a video is loaded.
 - **Colour filter** none/grayscale/sepia/invert/contrast/warm/cool/vintage
   (CSS `ctx.filter` during draw).
 - **Rotate** (0/90/180/270) and **Flip** live in the **Crop & size** step

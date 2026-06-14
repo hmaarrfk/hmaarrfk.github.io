@@ -429,8 +429,11 @@ input[type="range"] { width: 100%; }
 }
 .combo-opt:hover, .combo-opt.active { background: var(--accent); color: #fff; }
 .combo-opt .swatch {
-  width: 60px; height: 12px; border-radius: 3px; flex: none;
+  width: 60px; height: 38px; border-radius: 4px; flex: none;
   border: 1px solid rgba(0,0,0,.4);
+  background-size: cover; background-position: center;
+  /* checkerboard shows through any transparency in the thumbnail */
+  background-color: #2e3338;
 }
 .combo-empty { padding: 9px 10px; color: var(--muted); font-size: .88rem; }
 

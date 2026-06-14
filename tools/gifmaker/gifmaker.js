@@ -1049,6 +1049,53 @@ function swatchCss(key) {
     `rgb(${lut[i][0]},${lut[i][1]},${lut[i][2]}) ${(i / 255 * 100).toFixed(0)}%`);
   return `background:linear-gradient(90deg,${stops.join(',')})`;
 }
+
+// Live colormap-picker thumbnails: the current frame's selected channel recoloured
+// by each colormap, so the dropdown previews the actual look (more fun than an
+// abstract gradient). The channel is captured when the list opens; the recoloured
+// data URLs are cached per key. Falls back to swatchCss when no frame is loaded.
+const CM_THUMB_W = 60, CM_THUMB_H = 38;
+const cmThumbCanvas = document.createElement('canvas');
+cmThumbCanvas.width = CM_THUMB_W; cmThumbCanvas.height = CM_THUMB_H;
+const cmThumbCtx = cmThumbCanvas.getContext('2d', { willReadFrequently: true });
+let cmThumbChannel = null;        // Uint8Array of channel values for the frame
+const cmThumbCache = new Map();   // colormap key → data URL
+function refreshCmThumbs() {
+  cmThumbCache.clear();
+  cmThumbChannel = null;
+  if (!preview.videoWidth) return;
+  try {
+    cmThumbCtx.clearRect(0, 0, CM_THUMB_W, CM_THUMB_H);
+    cmThumbCtx.drawImage(preview, 0, 0, CM_THUMB_W, CM_THUMB_H);
+    const data = cmThumbCtx.getImageData(0, 0, CM_THUMB_W, CM_THUMB_H).data;
+    const ch = channelSel.value, n = CM_THUMB_W * CM_THUMB_H, out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = i * 4;
+      let v = ch === 'r' ? data[p] : ch === 'g' ? data[p + 1] : ch === 'b' ? data[p + 2]
+            : (data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114) | 0;
+      out[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    cmThumbChannel = out;
+  } catch { cmThumbChannel = null; }
+}
+function cmThumbUrl(key) {
+  if (!cmThumbChannel) return null;
+  if (cmThumbCache.has(key)) return cmThumbCache.get(key);
+  const cm = ALL_CM[key === 'none' ? 'gray' : key];
+  if (!cm) return null;
+  const lut = cm.lut, rev = reverseCmap.checked, cv = curveActive();
+  const n = CM_THUMB_W * CM_THUMB_H, id = cmThumbCtx.createImageData(CM_THUMB_W, CM_THUMB_H), d = id.data;
+  for (let i = 0; i < n; i++) {
+    let v = cmThumbChannel[i];
+    if (cv) v = curveLut[v];
+    const c = lut[rev ? 255 - v : v], p = i * 4;
+    d[p] = c[0]; d[p + 1] = c[1]; d[p + 2] = c[2]; d[p + 3] = 255;
+  }
+  cmThumbCtx.putImageData(id, 0, 0);
+  const url = cmThumbCanvas.toDataURL();
+  cmThumbCache.set(key, url);
+  return url;
+}
 // Subsequence fuzzy match; -1 = no match, higher = better.
 function fuzzyScore(q, s) {
   q = q.toLowerCase(); s = s.toLowerCase();
@@ -1078,7 +1125,9 @@ function renderCmList(q = '') {
     cmFiltered.forEach((o, i) => {
       const el = document.createElement('div');
       el.className = 'combo-opt' + (i === cmActiveIndex ? ' active' : '');
-      el.innerHTML = `<span class="swatch" style="${swatchCss(o.key)}"></span><span>${o.name}</span>`;
+      const url = cmThumbUrl(o.key);
+      const sw = url ? `background-image:url(${url})` : swatchCss(o.key);
+      el.innerHTML = `<span class="swatch" style="${sw}"></span><span>${o.name}</span>`;
       el.addEventListener('mousedown', (e) => { e.preventDefault(); selectColormap(o.key); });
       el.addEventListener('mouseenter', () => { cmActiveIndex = i; markCmActive(); });
       colormapList.appendChild(el);
@@ -1094,10 +1143,10 @@ function selectColormap(key) {
   markStale();
   drawPreview();
 }
-colormapSearch.addEventListener('focus', () => renderCmList(''));
+colormapSearch.addEventListener('focus', () => { refreshCmThumbs(); renderCmList(''); });
 colormapSearch.addEventListener('input', () => renderCmList(colormapSearch.value));
 colormapSearch.addEventListener('keydown', (e) => {
-  if (colormapList.hidden && e.key === 'ArrowDown') { renderCmList(colormapSearch.value); return; }
+  if (colormapList.hidden && e.key === 'ArrowDown') { refreshCmThumbs(); renderCmList(colormapSearch.value); return; }
   if (e.key === 'ArrowDown') { e.preventDefault(); cmActiveIndex = Math.min(cmActiveIndex + 1, cmFiltered.length - 1); markCmActive(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); cmActiveIndex = Math.max(cmActiveIndex - 1, 0); markCmActive(); }
   else if (e.key === 'Enter') { e.preventDefault(); if (cmFiltered[cmActiveIndex]) selectColormap(cmFiltered[cmActiveIndex].key); }
