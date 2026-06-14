@@ -143,9 +143,10 @@ let logoUrl = null;          // object URL for the dropzone preview
 // Colormap selection (custom searchable combobox).
 let colormapKey = 'none';
 
-// Tone curve: three fixed-x control points — min (x=0), mid (x=128), max
-// (x=255) — whose y values define a gamma curve (see buildCurveLut). Only y is
-// dragged. min/mid/max set the output black level, gamma and white level.
+// Tone curve (levels + gamma): three control points — min {x,0} and max {x,255}
+// are the input black/white points (dragged horizontally; narrower = more
+// contrast), and mid bends the gamma (dragged vertically; its x is pinned to the
+// centre of [min, max]). See buildCurveLut.
 let curvePoints = [{ x: 0, y: 0 }, { x: 128, y: 128 }, { x: 255, y: 255 }];
 const curveLut = new Uint8Array(256);          // pipeline LUT (input-inverted when toggled)
 const curveLutNatural = new Uint8Array(256);   // pre-invert LUT, used to draw the editor
@@ -422,24 +423,25 @@ function effectiveColormapKey() {
   return (colormapKey !== 'none' && ALL_CM[colormapKey]) ? colormapKey : 'gray';
 }
 function curveActive() { return !curveIdentity; }
-// Build the 256-entry LUT as a pure gamma curve from three control points:
-// min (output at input 0), max (output at input 255), and mid (sets the gamma,
-// i.e. how the midtones bend). The curve is
-//   out = min + (max-min) · (x/255)^γ,   with γ chosen so out(128) = mid.
-// No clipping happens here by design — clipping the value range is the job of
-// the output colormap. Points only move vertically, so the shape is always a
-// clean gamma correction.
+// Build the 256-entry LUT as a levels + gamma curve from three control points:
+// min and max are the input black/white points (input ≤ min → 0, ≥ max → 255),
+// and mid sets the gamma. Narrowing [min, max] steepens the slope → more
+// contrast (with clipping at the ends); widening it reduces contrast. The mapped
+// range is
+//   out = 255 · ((x - min)/(max - min))^γ,   with γ from the mid point's height
+// (mid sits at the centre of the range, where out = 255·0.5^γ).
 function buildCurveLut() {
-  const lo = curvePoints[0].y, mid = curvePoints[1].y, hi = curvePoints[2].y;
-  const span = hi - lo;
-  let gamma = 1;
-  if (span !== 0) {
-    const m = clamp((mid - lo) / span, 0.001, 0.999);
-    gamma = Math.log(m) / Math.log(0.5);
-  }
+  const minX = curvePoints[0].x, maxX = curvePoints[2].x, midY = curvePoints[1].y;
+  const span = maxX - minX;
+  const gamma = Math.log(clamp(midY / 255, 0.001, 0.999)) / Math.log(0.5);
   let identity = true;
   for (let x = 0; x < 256; x++) {
-    const y = Math.round(clamp(lo + span * Math.pow(x / 255, gamma), 0, 255));
+    let y;
+    if (span <= 0) y = x < maxX ? 0 : 255;
+    else if (x <= minX) y = 0;
+    else if (x >= maxX) y = 255;
+    else y = 255 * Math.pow((x - minX) / span, gamma);
+    y = Math.round(clamp(y, 0, 255));
     curveLutNatural[x] = y;
     curveLut[x] = y;
     if (y !== x) identity = false;
@@ -1125,6 +1127,7 @@ function plotH(c) { return (c.height - 1) - CURVE_MB; }
 // to turn a pointer's y into the dragged point's output value.
 function cpx(c, v) { const f = invertInput.checked ? (1 - v / 255) : (v / 255); return CURVE_ML + f * plotW(c); }
 function cpy(c, v) { return plotH(c) - v / 255 * plotH(c); }
+function xToVal(c, px) { let f = (px - CURVE_ML) / plotW(c); if (invertInput.checked) f = 1 - f; return clamp(Math.round(f * 255), 0, 255); }
 function yToVal(c, py) { return clamp(Math.round((1 - py / plotH(c)) * 255), 0, 255); }
 function drawCurveRamps(c, ctx) {
   const pw = plotW(c), ph = plotH(c), bw = Math.max(1, pw / 256) + 1, bh = Math.max(1, ph / 256) + 1;
@@ -1179,28 +1182,33 @@ function drawHistOut() {
 function refreshCurveUI() { drawCurve(); drawHistOut(); }
 function onCurveEdit() { buildCurveLut(); markStale(); drawPreview(); refreshCurveUI(); }
 
-// The three points only move vertically (their x is fixed at 0/128/255), so a
-// drag just sets the grabbed point's y. Grab the point nearest the pointer's x.
+// min (0) and max (2) are input black/white points dragged horizontally; mid (1)
+// is dragged vertically for gamma. Moving min/max recentres mid's x, which keeps
+// the gamma (mid.y) unchanged. Grab the point nearest the pointer (2-D).
 let curveDrag = -1;
-function evY(e) {
-  const r = curveCanvas.getBoundingClientRect();
-  return yToVal(curveCanvas, (e.clientY - r.top) / r.height * curveCanvas.height);
+function evToVal(e) {
+  const c = curveCanvas, r = c.getBoundingClientRect();
+  const px = (e.clientX - r.left) / r.width * c.width;
+  const py = (e.clientY - r.top) / r.height * c.height;
+  return { x: xToVal(c, px), y: yToVal(c, py) };
 }
 function nearestPoint(e) {
   const c = curveCanvas, r = c.getBoundingClientRect();
   const px = (e.clientX - r.left) / r.width * c.width;
+  const py = (e.clientY - r.top) / r.height * c.height;
   let best = -1, bd = Infinity;
   for (let i = 0; i < curvePoints.length; i++) {
-    const d = Math.abs(cpx(c, curvePoints[i].x) - px);
+    const dx = cpx(c, curvePoints[i].x) - px, dy = cpy(c, curvePoints[i].y) - py;
+    const d = dx * dx + dy * dy;
     if (d < bd) { bd = d; best = i; }
   }
   return best;
 }
 function applyCurveDrag(e) {
-  const y = evY(e), lo = curvePoints[0], mid = curvePoints[1], hi = curvePoints[2];
-  if (curveDrag === 0)      { lo.y = clamp(y, 0, hi.y - 2);          mid.y = clamp(mid.y, lo.y + 1, hi.y - 1); }
-  else if (curveDrag === 2) { hi.y = clamp(y, lo.y + 2, 255);        mid.y = clamp(mid.y, lo.y + 1, hi.y - 1); }
-  else                      { mid.y = clamp(y, lo.y + 1, hi.y - 1); }
+  const v = evToVal(e), lo = curvePoints[0], mid = curvePoints[1], hi = curvePoints[2];
+  if (curveDrag === 0)      { lo.x = clamp(v.x, 0, hi.x - 2);   mid.x = Math.round((lo.x + hi.x) / 2); }
+  else if (curveDrag === 2) { hi.x = clamp(v.x, lo.x + 2, 255); mid.x = Math.round((lo.x + hi.x) / 2); }
+  else                      { mid.y = clamp(v.y, 1, 254); }
   onCurveEdit();
 }
 curveCanvas.addEventListener('pointerdown', (e) => {

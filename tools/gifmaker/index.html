@@ -255,7 +255,7 @@
 
       <div class="field" style="margin-top:16px">
         <div class="curve-head">
-          <label style="margin:0">Tone curve (gamma)</label>
+          <label style="margin:0">Tone curve (contrast)</label>
           <span class="curve-toggles">
             <label class="toggle"><input type="checkbox" id="invert-input"><span>invert input</span></label>
             <label class="toggle"><input type="checkbox" id="reverse-colormap"><span>reverse colormap</span></label>
@@ -275,12 +275,12 @@
           </div>
         </div>
         <span class="hint">
-          Drag the three points up/down: <strong>min</strong> (left) sets the black level, <strong>max</strong>
-          (right) the white level, and <strong>mid</strong> bends the gamma (midtones). The shape stays a clean
-          gamma correction — to clip the range, use the output colormap. The grey strip below the curve is the
-          input; the colour strip on its left is the output colormap. Both flip with <em>invert input</em> /
-          <em>reverse colormap</em>. Histograms are the cropped ROI (input behind the curve, output on the
-          right, before the GIF's own quantization). Toggle <em>log scale</em> to reveal the dark end.
+          Drag <strong>min</strong> and <strong>max</strong> inward along the bottom to clip the input range and
+          <strong>boost contrast</strong>; drag <strong>mid</strong> up/down to bend the gamma (midtones —
+          moving min/max keeps the current gamma). The grey strip below the curve is the input; the colour strip
+          on its left is the output colormap. Both flip with <em>invert input</em> / <em>reverse colormap</em>.
+          Histograms are the cropped ROI (input behind the curve, output on the right, before the GIF's own
+          quantization). Toggle <em>log scale</em> to reveal the dark end.
         </span>
       </div>
       <p class="muted small" style="margin:12px 0 0">

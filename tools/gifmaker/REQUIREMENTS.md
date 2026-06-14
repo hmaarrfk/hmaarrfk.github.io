@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (simplified tone curve to a 3-point gamma control + harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -177,14 +177,18 @@ Optimized for phones (iPhone-first) as well as desktop:
   (CSS `ctx.filter` during draw).
 - **Rotate** (0/90/180/270) and **Flip** live in the **Crop & size** step
   (geometry), not here.
-- **Tone curve (gamma)** — a deliberately simple `<canvas>` editor with exactly
-  **three control points** that move *vertically only*: **min** (input 0 → output
-  black level), **mid** (sets the gamma), **max** (input 255 → output white
-  level). `buildCurveLut()` builds the 256-entry LUT as a pure gamma curve
-  `out = min + (max−min)·(x/255)^γ`, with γ solved so `out(128) = mid`. **No
-  clipping happens in the curve by design** — to clip the value range, use the
-  output colormap. (This replaced an earlier freeform multi-point Fritsch–Carlson
-  curve with add/remove points, which was too complicated.)
+- **Tone curve (contrast)** — a deliberately simple `<canvas>` levels + gamma
+  editor with exactly **three control points**: **min** and **max** are the input
+  black/white points (dragged *horizontally* along the bottom; input ≤ min → 0,
+  ≥ max → 255), and **mid** sets the **gamma** (dragged *vertically*; its x is
+  pinned to the centre of `[min, max]`). `buildCurveLut()` builds the 256-entry
+  LUT as `out = 255·((x−min)/(max−min))^γ` with clipping at the ends, where γ
+  comes from the mid point's height (`out = 255·0.5^γ` at the centre).
+  **Narrowing `[min, max]` boosts contrast**; widening it lowers contrast.
+  Moving min/max recentres mid's x, which **preserves the current gamma**. (This
+  replaced an earlier freeform multi-point Fritsch–Carlson curve with add/remove
+  points, which was too complicated, and a brief output-levels-only gamma variant
+  that couldn't increase contrast.)
 - **Harmonized editor (everything follows the inversion).** The editor shares one
   invert-aware transform so the curve, the three handles, the input histogram and
   the bottom axis ramp all **mirror together** when *invert input* is on. Two live
