@@ -192,13 +192,23 @@
             <button type="button" class="btn secondary small-btn" id="crop-reset">Reset crop to full frame</button>
           </div>
         </div>
-        <div class="controls cols-2" style="margin-top:14px">
-          <div class="field"><label for="crop-x">Crop X <span class="lu">source px</span></label><input type="number" id="crop-x" min="0" step="1"></div>
-          <div class="field"><label for="crop-y">Crop Y <span class="lu">source px</span></label><input type="number" id="crop-y" min="0" step="1"></div>
-          <div class="field"><label for="crop-w">Width <span class="lu">source px</span></label><input type="number" id="crop-w" min="1" step="1"></div>
-          <div class="field"><label for="crop-h">Height <span class="lu">source px</span></label><input type="number" id="crop-h" min="1" step="1"></div>
-          <div class="field"><label for="final-w">Final width <span class="lu">output px</span></label><input type="number" id="final-w" min="1" step="1"></div>
-          <div class="field"><label for="final-h">Final height <span class="lu">output px</span></label><input type="number" id="final-h" min="1" step="1"></div>
+        <div class="field-groups">
+          <div class="field-group">
+            <div class="fg-title">Crop region <span class="lu">source px</span></div>
+            <div class="fg-grid">
+              <label class="fg-item"><span class="fg-l" title="Crop X">X</span><input type="number" id="crop-x" min="0" step="1" aria-label="Crop X (source px)"></label>
+              <label class="fg-item"><span class="fg-l" title="Crop Y">Y</span><input type="number" id="crop-y" min="0" step="1" aria-label="Crop Y (source px)"></label>
+              <label class="fg-item"><span class="fg-l" title="Crop width">W</span><input type="number" id="crop-w" min="1" step="1" aria-label="Crop width (source px)"></label>
+              <label class="fg-item"><span class="fg-l" title="Crop height">H</span><input type="number" id="crop-h" min="1" step="1" aria-label="Crop height (source px)"></label>
+            </div>
+          </div>
+          <div class="field-group">
+            <div class="fg-title">Output size <span class="lu">output px</span></div>
+            <div class="fg-grid">
+              <label class="fg-item"><span class="fg-l" title="Final width">W</span><input type="number" id="final-w" min="1" step="1" aria-label="Final width (output px)"></label>
+              <label class="fg-item"><span class="fg-l" title="Final height">H</span><input type="number" id="final-h" min="1" step="1" aria-label="Final height (output px)"></label>
+            </div>
+          </div>
         </div>
         <p class="muted small" id="crop-info" style="margin:10px 0 0"></p>
       </div>

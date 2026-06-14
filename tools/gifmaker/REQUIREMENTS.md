@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (four size/quality variants per render from one frame-extraction pass; touch/layout optimizations — single-column controls on phones, even step grid, larger tap targets, no-zoom inputs; compressed timeline after Trim; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (four size/quality variants per render from one frame-extraction pass; touch/layout optimizations — single-column controls on phones, grouped Crop region / Output size fields, even step grid, larger tap targets, no-zoom inputs; compressed timeline after Trim; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -70,9 +70,12 @@ control panels switch. (Video-only tool — the images path was removed.)
 ### Responsive / touch layout
 Optimized for phones (iPhone-first) as well as desktop:
 - `.controls` collapse to **one column at ≤640px** (verbose labels/inputs no
-  longer overflow); the crop number fields keep **two columns** (`.controls.cols-2`)
-  since they're short, paired X/Y and W/H. On desktop they flow via
-  `auto-fit minmax(180px, 1fr)`.
+  longer overflow).
+- The crop number fields are **grouped subsections** (`.field-groups`): a titled
+  **"Crop region · source px"** block (X/Y/W/H in a 2-up grid with single-letter
+  labels) and an **"Output size · output px"** block (W/H). The two groups sit
+  side by side on desktop and stack on phones; each keeps its inner 2-up inputs.
+  IDs are unchanged (`crop-x/y/w/h`, `final-w/h`) so the existing wiring is intact.
 - The step bar becomes an **even 3×2 grid** on phones (not an uneven flex-wrap);
   the step-3 label is abbreviated to **"Crop"**.
 - The tone-curve header (label + invert/reverse/log toggles + Reset) is a

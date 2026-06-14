@@ -150,6 +150,18 @@ h2 { font-size: 1.2rem; margin: 28px 0 12px; font-weight: 600; }
    up with neighbouring inputs (replaces an empty <label> spacer). */
 .field.action { justify-content: flex-end; }
 .field.action .btn { width: 100%; }
+
+/* Grouped number fields (e.g. Crop region X/Y/W/H + Output size W/H): a titled
+   block with compact single-letter inputs in a 2-up grid. Two groups sit side
+   by side on desktop, stack on phones. */
+.field-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; align-items: start; }
+.field-group { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.fg-title { font-size: .85rem; font-weight: 600; color: var(--muted); margin-bottom: 10px; }
+.fg-title .lu { font-weight: 400; color: #7a8590; font-size: .78rem; }
+.fg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.fg-item { display: flex; align-items: center; gap: 8px; margin: 0; }
+.fg-item .fg-l { width: 1.1em; flex: none; text-align: center; color: var(--muted); font-weight: 600; font-size: .9rem; }
+.fg-item input { width: 100%; min-width: 0; }
 input[type="number"], input[type="text"], select {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -453,10 +465,10 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
   .stepbtn { flex: none; padding: 8px 6px; font-size: .78rem; gap: 5px; }
   .stepbtn b { width: 18px; height: 18px; font-size: .72rem; }
-  /* One control per row — verbose labels/inputs no longer overflow on phones.
-     The crop number fields keep two columns (they're short, paired X/Y, W/H). */
+  /* One control per row — verbose labels/inputs no longer overflow on phones. */
   .controls { grid-template-columns: 1fr; gap: 12px; }
-  .controls.cols-2 { grid-template-columns: 1fr 1fr; }
+  /* Crop region / Output size groups stack; each keeps its inner 2-up inputs. */
+  .field-groups { grid-template-columns: 1fr; gap: 14px; }
   #preview-canvas { max-height: 56vh; }
   .timecode { font-size: .8rem; }
   /* Curve + output stack vertically; arrow points down */
