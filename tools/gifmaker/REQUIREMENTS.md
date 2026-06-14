@@ -440,6 +440,9 @@ Optimized for phones (iPhone-first) as well as desktop:
   mid-load image is never stranded when its old blob URL is revoked.
 
 ### Privacy / about
+- A privacy **tagline above the source dropzone** (`.tagline`): "No data is
+  transmitted; all encoding happens on your device." + an "Open source on GitHub"
+  link (no AGPL wording here — the license stays in the collapsed About + footer).
 - A "100% vibed" callout (`#vibe`, no tracking/uploads) links to the GitHub repo
   to star. It is **shown only after the GIFs are generated** (on the Export step
   with results present) — never while choosing or editing, so it isn't nagging.
