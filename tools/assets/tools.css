@@ -78,6 +78,12 @@ h2 { font-size: 1.2rem; margin: 28px 0 12px; font-weight: 600; }
    step-pane in column 2 — so each step fits the 720px-tall viewport without the
    controls dropping below the fold, and the wasted left/right space is reclaimed. */
 .editor { display: block; }
+/* A hidden step-pane must ALWAYS stay hidden. Several wide-screen rules set
+   display:flex/grid on specific panes (e.g. trim, export) to lay them out; those
+   would otherwise beat the [hidden] attribute's default display:none and leave the
+   inactive pane stacked on top of the active one (e.g. the Trim pane covering the
+   Source dropzone so a video can't be added). [hidden] wins, always. */
+.step-pane[hidden] { display: none !important; }
 
 /* Step navigation (non-linear: every step is clickable any time) */
 .steps {
