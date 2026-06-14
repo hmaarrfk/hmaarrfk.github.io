@@ -793,18 +793,13 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
 /* Reclaim vertical budget on the 720px target: the topbar + step bar otherwise
    eat ~145px before any control. Tighten the header band on short screens. */
 @media (max-height: 760px) {
-  /* The .wrap's 80px bottom padding plus the always-rendered "About & license"
-     details, the "100% vibed" callout and the legal footer sit BELOW the editor
-     and pushed total page height ~178px past the 720px fold on every step,
-     guaranteeing a scrollbar even when the editor itself fits. They are
-     secondary chrome (license is still linked from the footer text / About when
-     the screen is tall); hide them while editing on a short screen and shrink
-     the bottom padding so each step truly fits one screen. */
+  /* Tighten the header band so the editor itself fits the short viewport. The
+     About & license details (collapsed) and the legal footer stay visible just
+     below the editor — reachable with a small scroll — rather than being hidden,
+     so the license is always accessible. */
   .wrap { padding-top: 16px; padding-bottom: 16px; }
   .steps { margin-bottom: 10px; }
   .stepbtn { padding: 7px 12px; }
-  details.about,
-  footer.legal { display: none; }
   /* P1 (round 4) — the "100% vibed / Star on GitHub" promo (#vibe) renders below
      the editor only after a GIF is generated, and was the tallest contributor
      pushing the Download buttons past the 720px fold. It's promotional, not part
@@ -931,12 +926,8 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .step-pane[data-pane="crop"] .field-groups { margin-top: 8px; gap: 10px; }
   .step-pane[data-pane="crop"] #crop-info { margin-top: 4px; font-size: .76rem; }
   .step-pane[data-pane="crop"] > .controls[style] { margin-bottom: 10px !important; }
-  /* Once a video is loaded the always-rendered About & license details + legal
-     footer add ~130px below the editor on every step; hide them while editing so
-     the lighter steps approach one-screen (they reappear before a video is
-     chosen / the license stays linked when the tall-screen rules don't hide it). */
-  .wrap:has(#stage:not([hidden])) details.about,
-  .wrap:has(#stage:not([hidden])) footer.legal { display: none; }
+  /* About & license + footer remain visible below the editor (collapsed details
+     is small; a short scroll reaches them) so the license is always accessible. */
 
   /* P0 (round 4, iPhone) — root cause of every editing step overflowing 844px is
      the #stage block (preview + transport + timeline) eating ~48% of the viewport
