@@ -245,9 +245,15 @@ function drawPreview(force = false) {
   const styleVisible = stylePane && !stylePane.hidden;
   if (styleVisible) computeHistograms(previewCtx, out.w, out.h);  // from the raw frame
   if (colormapActive() || curveActive()) {
-    const id = previewCtx.getImageData(0, 0, out.w, out.h);
-    applyPixelEffects(id);
-    previewCtx.putImageData(id, 0, 0);
+    const glOut = glPixelEffects(previewCanvas, out.w, out.h);
+    if (glOut) {
+      previewCtx.clearRect(0, 0, out.w, out.h);
+      previewCtx.drawImage(glOut, 0, 0);
+    } else {
+      const id = previewCtx.getImageData(0, 0, out.w, out.h);
+      applyPixelEffects(id);
+      previewCtx.putImageData(id, 0, 0);
+    }
   }
   // The logo lives inside the cropped region; place it there on the full-frame preview.
   if (logoBitmap && crop) {
@@ -410,6 +416,155 @@ function buildCurveLut() {
   }
   curveIdentity = identity;
 }
+// ---- WebGL2 pixel-effect pass (colormap + tone curve) ------------------
+// Vendored, dependency-free. Runs the exact semantics of applyPixelEffects on
+// the GPU: one offscreen WebGL2 canvas + program, created lazily once. Falls
+// back permanently to the CPU path (applyColormap/applyCurveRGB, untouched) if
+// WebGL2 is missing or any GL step fails.
+const GL_VS = `#version 300 es
+in vec2 p; out vec2 uv;
+void main(){ uv = vec2((p.x+1.0)*0.5, (1.0-p.y)*0.5); gl_Position = vec4(p,0.0,1.0); }`;
+const GL_FS = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D uSrc, uCurve, uCmap;
+uniform int uColormapOn, uCurveOn, uChannel; // channel: 0=r 1=g 2=b 3=luma
+float lutAt(sampler2D t, float v){ return texture(t, vec2((v*255.0+0.5)/256.0, 0.5)).r; }
+void main(){
+  vec4 s = texture(uSrc, uv);
+  if (uColormapOn == 1) {
+    float v;
+    if (uChannel == 0) v = s.r;
+    else if (uChannel == 1) v = s.g;
+    else if (uChannel == 2) v = s.b;
+    else v = floor(s.r*255.0*0.299 + s.g*255.0*0.587 + s.b*255.0*0.114)/255.0;
+    v = clamp(v, 0.0, 1.0);
+    if (uCurveOn == 1) v = lutAt(uCurve, v);          // llut applied before colormap
+    vec3 c = texture(uCmap, vec2((v*255.0+0.5)/256.0, 0.5)).rgb;
+    o = vec4(c, s.a);
+  } else {
+    // curve-only: apply curve LUT per RGB channel
+    o = vec4(lutAt(uCurve, s.r), lutAt(uCurve, s.g), lutAt(uCurve, s.b), s.a);
+  }
+}`;
+let GL = null;            // { canvas, gl, prog, u, tex... } once initialised
+let glDead = false;       // permanent fall-back flag
+let glCurveKey = '';      // last curve LUT uploaded (cache key)
+let glCmapKey  = '';      // last colormap LUT uploaded (cache key)
+function glCompile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh) || 'shader');
+  return sh;
+}
+function glLut1D(gl) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function glInit() {
+  if (GL || glDead) return !glDead;
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, alpha: true });
+    if (!gl) throw new Error('no webgl2');
+    const prog = gl.createProgram();
+    gl.attachShader(prog, glCompile(gl, gl.VERTEX_SHADER, GL_VS));
+    gl.attachShader(prog, glCompile(gl, gl.FRAGMENT_SHADER, GL_FS));
+    gl.bindAttribLocation(prog, 0, 'p');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link');
+    gl.useProgram(prog);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const srcTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const u = {
+      src: gl.getUniformLocation(prog, 'uSrc'),
+      curve: gl.getUniformLocation(prog, 'uCurve'),
+      cmap: gl.getUniformLocation(prog, 'uCmap'),
+      colormapOn: gl.getUniformLocation(prog, 'uColormapOn'),
+      curveOn: gl.getUniformLocation(prog, 'uCurveOn'),
+      channel: gl.getUniformLocation(prog, 'uChannel'),
+    };
+    gl.uniform1i(u.src, 0); gl.uniform1i(u.curve, 1); gl.uniform1i(u.cmap, 2);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    GL = { canvas, gl, prog, u, srcTex, curveTex: glLut1D(gl), cmapTex: glLut1D(gl) };
+    if (gl.getError() !== gl.NO_ERROR) throw new Error('gl error during init');
+    return true;
+  } catch (e) {
+    glDead = true; GL = null;
+    return false;
+  }
+}
+// True if the GPU pixel-effect pass is usable. Feature-detect once.
+function glAvailable() { return glInit(); }
+// Upload curveLut (always; identity LUT is fine) and the active colormap LUT,
+// only when they change. Cheap 256×1 NEAREST RGBA textures.
+function glUploadLuts() {
+  const gl = GL.gl;
+  const cKey = curveIdentity ? 'id' : curveLut.join(',');
+  if (cKey !== glCurveKey) {
+    const px = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) { px[i * 4] = curveLut[i]; px[i * 4 + 3] = 255; }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, GL.curveTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    glCurveKey = cKey;
+  }
+  const cm = ALL_CM[colormapKey];
+  const mKey = colormapKey;
+  if (cm && mKey !== glCmapKey) {
+    const px = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      const c = cm.lut[i];
+      px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255;
+    }
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, GL.cmapTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    glCmapKey = mKey;
+  }
+}
+// Run the pixel-effect pass over `src` (a canvas/video/ImageBitmap of size w×h)
+// and leave the result in GL.canvas. Returns the GL canvas, or null on failure.
+function glPixelEffects(src, w, h) {
+  if (!glAvailable()) return null;
+  try {
+    const gl = GL.gl;
+    if (GL.canvas.width !== w) GL.canvas.width = w;
+    if (GL.canvas.height !== h) GL.canvas.height = h;
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(GL.prog);
+    glUploadLuts();
+    const chn = channelSel.value;
+    const ch = chn === 'r' ? 0 : chn === 'g' ? 1 : chn === 'b' ? 2 : 3;
+    gl.uniform1i(GL.u.colormapOn, colormapActive() ? 1 : 0);
+    gl.uniform1i(GL.u.curveOn, curveActive() ? 1 : 0);
+    gl.uniform1i(GL.u.channel, ch);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, GL.srcTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (gl.getError() !== gl.NO_ERROR) throw new Error('gl error during draw');
+    return GL.canvas;
+  } catch (e) {
+    glDead = true; GL = null;
+    return null;
+  }
+}
+
 // Recolour each pixel by looking up its chosen channel (optionally levels-
 // adjusted first) in the colormap LUT.
 function applyColormap(imageData, llut) {
@@ -469,9 +624,15 @@ function drawLogoInto(ctx, x, y, w, h) {
 // Apply colormap + logo to a finished output frame and read it back.
 function finishFrame(g, w, h) {
   if (colormapActive() || curveActive()) {
-    const id = g.getImageData(0, 0, w, h);
-    applyPixelEffects(id);
-    g.putImageData(id, 0, 0);
+    const glOut = glPixelEffects(g.canvas, w, h);
+    if (glOut) {
+      g.clearRect(0, 0, w, h);
+      g.drawImage(glOut, 0, 0);
+    } else {
+      const id = g.getImageData(0, 0, w, h);
+      applyPixelEffects(id);
+      g.putImageData(id, 0, 0);
+    }
   }
   if (logoBitmap) drawLogoInto(g, 0, 0, w, h);
   return g.getImageData(0, 0, w, h);
