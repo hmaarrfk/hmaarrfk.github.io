@@ -129,9 +129,10 @@ control panels switch. (Video-only tool — the images path was removed.)
   to move; "Reset crop" restores the full frame. Two nudge d-pads: **Fine**
   (1 source px) and **GIF-pixel** (1 output px = `crop.w/finalW` source px —
   useful when the source is much higher-res than the GIF).
-- **Tap to recenter**: tapping the image (the dimmed area outside the box) moves
-  the crop's centre to that point — easier than dragging on touch. (Taps on the
-  box/handles keep their own move/resize behaviour.)
+- **Tap to recenter**: tapping **anywhere on the image** — inside or outside the
+  box — moves the crop's centre to that point (easier than dragging on touch). A
+  tap vs. drag is distinguished by an 8px threshold: a drag inside the box moves
+  it, a drag on a handle resizes; a tap recenters (`recenterCropTo`).
 - **Touch scroll lock**: on the crop-editable steps (Source/Trim/Crop) the
   preview surface (`#preview-wrap` + `#preview-canvas`) gets `touch-action: none`
   so dragging the crop box — including over the dimmed area — never scrolls the

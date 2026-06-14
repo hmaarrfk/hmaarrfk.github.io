@@ -1391,6 +1391,14 @@ function wrapToFull(e) {
     y: clamp((e.clientY - r.top) / r.height, 0, 1) * f.h,
   };
 }
+// Move the crop so its centre is at point p ({x,y} in displayed source px).
+function recenterCropTo(p) {
+  if (!crop) return;
+  const f = fullDims();
+  crop.x = clamp(p.x - crop.w / 2, 0, f.w - crop.w);
+  crop.y = clamp(p.y - crop.h / 2, 0, f.h - crop.h);
+  afterCropChange({ keepFinal: false });
+}
 function resizeFromHandle(h, p, start) {
   const f = fullDims(), MIN = 8, ar = aspectRatio();
   let l = start.x, t = start.y, r = start.x + start.w, b = start.y + start.h;
@@ -1420,13 +1428,17 @@ function resizeFromHandle(h, p, start) {
 cropRectEl.addEventListener('pointerdown', (e) => {
   if (!crop) return;
   const mode = e.target.classList.contains('ch') ? e.target.dataset.h : 'move';
-  cropDrag = { mode, start: { ...crop }, p0: wrapToFull(e) };
+  cropDrag = { mode, start: { ...crop }, p0: wrapToFull(e), p0c: { x: e.clientX, y: e.clientY }, moved: false };
   try { cropRectEl.setPointerCapture(e.pointerId); } catch {}
   e.preventDefault(); e.stopPropagation();
 });
 cropRectEl.addEventListener('pointermove', (e) => {
   if (!cropDrag) return;
   e.preventDefault();
+  // Treat sub-threshold movement as a tap (recenter on release); only start an
+  // actual move/resize once the finger has clearly moved.
+  if (!cropDrag.moved && Math.hypot(e.clientX - cropDrag.p0c.x, e.clientY - cropDrag.p0c.y) <= 8) return;
+  cropDrag.moved = true;
   const p = wrapToFull(e), f = fullDims();
   if (cropDrag.mode === 'move') {
     crop.x = clamp(cropDrag.start.x + (p.x - cropDrag.p0.x), 0, f.w - cropDrag.start.w);
@@ -1437,21 +1449,20 @@ cropRectEl.addEventListener('pointermove', (e) => {
     resizeFromHandle(cropDrag.mode, p, cropDrag.start);
   }
 });
-const endCropDrag = () => { cropDrag = null; };
-cropRectEl.addEventListener('pointerup', endCropDrag);
-cropRectEl.addEventListener('pointercancel', endCropDrag);
+cropRectEl.addEventListener('pointerup', () => {
+  // A tap inside the box (no drag) recenters the crop on the tapped point, so
+  // positioning works anywhere on the image — inside or outside the box.
+  if (cropDrag && !cropDrag.moved && cropDrag.mode === 'move') recenterCropTo(cropDrag.p0);
+  cropDrag = null;
+});
+cropRectEl.addEventListener('pointercancel', () => { cropDrag = null; });
 
 // Tap the image (the area outside the crop box) to move the crop's CENTRE there
 // — easier than dragging on touch. Only while the crop box is editable. Taps on
 // the box/handles are handled by their own listeners (they stop propagation).
 previewWrap.addEventListener('pointerdown', (e) => {
   if (!crop || roiView()) return;
-  const f = fullDims(), r = previewWrap.getBoundingClientRect();
-  const cx = clamp((e.clientX - r.left) / r.width, 0, 1) * f.w;
-  const cy = clamp((e.clientY - r.top) / r.height, 0, 1) * f.h;
-  crop.x = clamp(cx - crop.w / 2, 0, f.w - crop.w);
-  crop.y = clamp(cy - crop.h / 2, 0, f.h - crop.h);
-  afterCropChange({ keepFinal: false });
+  recenterCropTo(wrapToFull(e));   // tap on the dimmed area (outside the box)
   e.preventDefault();
 });
 
