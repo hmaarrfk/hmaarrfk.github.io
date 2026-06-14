@@ -42,9 +42,17 @@ WebAssembly tools under `/tools/`.
 | `vendor/pkg/gifski_wasm.js` | wasm-bindgen glue |
 | `vendor/pkg/gifski_wasm_bg.wasm` | gifski compiled to WASM (~293 KB) |
 | `vendor/LICENSE` | AGPL-3.0 text |
+| `vendor/README.md` | Provenance + how to re-vendor gifski-wasm |
+| `vendor/update-vendor.sh` | Helper: `npm pack`s a pinned gifski-wasm and copies the 4 files in |
 | `REQUIREMENTS.md` | This file |
 
 Pinned upstream: **`gifski-wasm@2.2.0`** (single-thread default export).
+**Vendoring strategy:** the four `vendor/` files are **checked-in copies** (no git
+submodule, no package manager, nothing fetched at build/runtime). Only the
+single-thread build is vendored (the multi-thread build needs SharedArrayBuffer →
+COOP/COEP, which GitHub Pages can't set). To update, run `vendor/update-vendor.sh
+[version]` then bump the pinned version here + in `vendor/README.md`. Re-vendoring
+2.2.0 reproduces byte-identical files (verified).
 
 ## Encoder API (vendored)
 
