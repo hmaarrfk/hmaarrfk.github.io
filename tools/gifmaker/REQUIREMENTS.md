@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (Export keeps the preview visible until you press Create GIF, then collapses to the output + star ask; star-on-GitHub ask shown only after generating; duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -277,12 +277,16 @@ Optimized for phones (iPhone-first) as well as desktop:
 
 ### Privacy / about
 - A "100% vibed" callout (`#vibe`, no tracking/uploads) links to the GitHub repo
-  to star. It is **shown only on the Source (choose) step and the Generate/Export
-  (download) step** — hidden while editing, so it isn't nagging the whole time.
-- **Generate is a focused step**: on the Export step the input-video stage is
-  collapsed (`#stage.collapsed` — kept `display:block`, only the visible preview
-  UI hidden, so the decode-source `<video>` stays rendered for iOS extraction),
-  leaving just the encode controls + output GIFs + the star ask.
+  to star. It is **shown only after the GIFs are generated** (on the Export step
+  with results present) — never while choosing or editing, so it isn't nagging.
+- **The Export step focuses once generated** (`updateGenerateView()`): *before*
+  pressing Create GIF the input-video preview stays visible (so you can still
+  watch it); *after* a successful render the stage collapses (`#stage.collapsed`
+  — kept `display:block`, only the visible preview UI hidden, so the
+  decode-source `<video>` stays rendered for iOS extraction) and the output GIFs
+  + star ask take over. Editing anything (`markStale`) clears the results, which
+  un-collapses the preview and hides the star again. The focus state is derived
+  from `currentStep === 'export' && variants.length > 0`.
 - The **About & license** panel (AGPL notice + "Built on" / "Inspired by" links —
   gifski, gifski-wasm, matplotlib/Turbo/ColorBrewer, Squoosh, ffmpeg.wasm, Claude
   Code, …) is a **collapsed `<details class="about">`** (closed by default) so it

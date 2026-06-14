@@ -129,6 +129,7 @@ function markStale() {
   result.classList.remove('show');
   revokeVariantUrls();
   variants = [];
+  updateGenerateView();  // un-collapse stage, hide star
 }
 
 // Timeline editing state (seconds)
@@ -900,16 +901,18 @@ function showStep(name) {
   previewWrap.style.touchAction = ta;
   previewCanvas.style.touchAction = ta;
   if (preview.videoWidth) renderTimeline();  // full (edit) ⇄ compressed timeline
-  // The Generate (export) step is a focused view: collapse the input-video stage
-  // so only the output (+ the star ask) shows. Uses a class (not display:none on
-  // #stage) so the decode-source <video> inside stays rendered — iOS needs it
-  // rendered to extract frames during encoding.
-  stage.classList.toggle('collapsed', name === 'export');
-  // The "star us on GitHub" ask appears only on the first (choose) screen and at
-  // download time — not while editing.
-  vibePanel.hidden = !(name === 'source' || name === 'export');
+  updateGenerateView();
   updateOvalUI();
   drawPreview();  // switch full-frame ⇄ ROI-only view for the new step
+}
+// Once the GIFs are generated, the Export step becomes a focused view: collapse
+// the input-video stage (kept display:block via a class so the decode-source
+// <video> stays rendered) and reveal the "star us on GitHub" ask alongside the
+// output. Before generating, the preview stays visible and the star ask hidden.
+function updateGenerateView() {
+  const focus = currentStep === 'export' && variants.length > 0;
+  stage.classList.toggle('collapsed', focus);
+  vibePanel.hidden = !focus;
 }
 stepBtns.forEach((b) => b.addEventListener('click', () => showStep(b.dataset.step)));
 
@@ -1900,6 +1903,7 @@ encodeBtn.addEventListener('click', async () => {
     setProgress(1);
 
     applyMetadata({ rebuild: true });
+    updateGenerateView();   // now generated: collapse the preview, reveal the star ask
     setStatus('Done — pick a size to download. Speed & loop update instantly.');
     result.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
