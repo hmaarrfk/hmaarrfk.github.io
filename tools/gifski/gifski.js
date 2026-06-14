@@ -1335,15 +1335,28 @@ async function framesFromVideo(fps, tf) {
     if (times.length < 2) throw new Error('The kept range is too short for 2 frames.');
 
     const frames = [];
+    // During extraction the preview is a throttled passthrough of the freshly
+    // encoded frame (the scratch canvas) rather than a full re-run of the
+    // drawPreview pipeline: that frame is already the WYSIWYG output, so we just
+    // blit it. Size the preview canvas to the scratch canvas once up front.
+    if (previewCanvas.width !== fw) previewCanvas.width = fw;
+    if (previewCanvas.height !== fh) previewCanvas.height = fh;
+    let lastPreviewAt = 0;
     for (let i = 0; i < times.length; i++) {
       await seekFor(v, times[i]);
       paint(fullCtx, v, content.w, content.h, full.w, full.h, tf.rotation, tf.flip, tf.filterStr);
       g.clearRect(0, 0, fw, fh);
       g.drawImage(fullCanvas, c.x * s, c.y * s, c.w * s, c.h * s, 0, 0, fw, fh);
       frames.push(finishFrame(g, fw, fh));
-      // Keep the preview + timeline cursor moving along as we render.
+      // Keep the timeline cursor + progress moving every iteration (near-free
+      // DOM text/style writes); throttle the on-screen frame blit to ~30fps so
+      // it never stalls extraction. No extra paint/GL/getImageData here.
       setPlayhead();
-      drawPreview(true);
+      const now = performance.now();
+      if (now - lastPreviewAt >= 33) {
+        previewCtx.drawImage(scratchCanvas, 0, 0, fw, fh, 0, 0, previewCanvas.width, previewCanvas.height);
+        lastPreviewAt = now;
+      }
       setProgress((i + 1) / times.length * 0.6);
       setStatus(`Extracting frames… ${i + 1}/${times.length}`);
     }
