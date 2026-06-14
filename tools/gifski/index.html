@@ -9,7 +9,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>gifski — high-quality GIF maker (runs in your browser)</title>
+  <title>GIF Maker — high-quality GIFs in your browser</title>
   <meta name="description" content="Turn videos and image sequences into high-quality animated GIFs entirely in your browser. Powered by gifski compiled to WebAssembly. Nothing is uploaded.">
   <link rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/tools/assets/tools.css">
@@ -17,53 +17,101 @@
 <body>
   <div class="topbar">
     <a href="/tools/">&larr; Tools</a>
-    <span class="spacer"></span>
+    <span class="title">GIF Maker</span>
     <a class="brand" href="/">Mark Harfouche</a>
   </div>
 
   <div class="wrap">
-    <h1>gifski &mdash; GIF maker</h1>
-    <p class="lede">
-      Turn a video or a set of images into a high-quality animated GIF.
-      Everything runs locally in your browser through WebAssembly &mdash;
-      your files are never uploaded anywhere.
-    </p>
+    <!-- Step navigation through the rendering process -->
+    <nav class="steps" id="steps">
+      <button class="stepbtn active" data-step="source" type="button"><b>1</b> Source</button>
+      <button class="stepbtn" data-step="trim" type="button"><b>2</b> Trim</button>
+      <button class="stepbtn" data-step="crop" type="button"><b>3</b> Crop &amp; size</button>
+      <button class="stepbtn" data-step="style" type="button"><b>4</b> Style</button>
+      <button class="stepbtn" data-step="logo" type="button"><b>5</b> Logo</button>
+      <button class="stepbtn" data-step="export" type="button"><b>6</b> Export</button>
+    </nav>
 
-    <div class="tabs">
-      <div class="tab active" data-mode="video">From a video</div>
-      <div class="tab" data-mode="images">From images</div>
-    </div>
-
-    <!-- VIDEO MODE -->
-    <div class="panel" id="panel-video">
-      <div class="drop" id="drop-video">
-        <input type="file" id="file-video" accept="video/*">
-        <p><strong>Drop a video here</strong> or click to choose</p>
-        <p class="small muted">MP4, WebM, MOV &mdash; anything your browser can play</p>
-      </div>
-
-      <!-- Timeline editor, revealed once a video is loaded -->
-      <div id="editor" style="display:none">
-        <video id="preview" playsinline muted crossorigin="anonymous"></video>
+    <!-- Persistent preview, shown once a source is loaded. The canvas mirrors the
+         video through the same pipeline as the output (WYSIWYG); the <video> is
+         the hidden source. The crop box sits on top in displayed pixel space. -->
+    <div class="panel" id="stage" hidden>
+      <div class="video-only">
+        <div id="preview-wrap">
+          <canvas id="preview-canvas"></canvas>
+          <div id="crop-rect" hidden>
+            <span class="ch nw" data-h="nw"></span>
+            <span class="ch n"  data-h="n"></span>
+            <span class="ch ne" data-h="ne"></span>
+            <span class="ch e"  data-h="e"></span>
+            <span class="ch se" data-h="se"></span>
+            <span class="ch s"  data-h="s"></span>
+            <span class="ch sw" data-h="sw"></span>
+            <span class="ch w"  data-h="w"></span>
+          </div>
+        </div>
+        <video id="preview" playsinline muted crossorigin="anonymous" style="display:none"></video>
 
         <div class="transport">
-          <button class="tbtn" data-act="toIn"     title="Jump to start (Home)">&#x23ee;</button>
-          <button class="tbtn" data-act="prevFrame" title="Previous frame (&larr;)">&#x25c0;|</button>
-          <button class="tbtn play" data-act="play" title="Play / pause (Space)">&#x25b6;</button>
-          <button class="tbtn" data-act="nextFrame" title="Next frame (&rarr;)">|&#x25b6;</button>
-          <button class="tbtn" data-act="toOut"    title="Jump to end (End)">&#x23ed;</button>
+          <button class="tbtn" data-act="toIn" title="Jump to start (Home)" aria-label="Jump to start">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h2.4v14H7z"/><path d="M20 5L9.6 12 20 19z"/></svg>
+          </button>
+          <button class="tbtn" data-act="prevFrame" title="Previous frame (Left arrow)" aria-label="Previous frame">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6.5L9 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="tbtn play" data-act="play" title="Play / pause (Space)" aria-label="Play or pause">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <button class="tbtn" data-act="nextFrame" title="Next frame (Right arrow)" aria-label="Next frame">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 6.5L15 12l-5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="tbtn" data-act="toOut" title="Jump to end (End)" aria-label="Jump to end">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.6 5H17v14h-2.4z"/><path d="M4 5l10.4 7L4 19z"/></svg>
+          </button>
           <span class="timecode" id="timecode">0:00.00 / 0:00.00</span>
         </div>
 
         <div class="timeline" id="timeline">
           <div class="tl-track" id="tl-track">
             <div class="tl-regions" id="tl-regions"></div>
+            <div class="tl-pending" id="tl-pending"></div>
             <div class="tl-handle in"  id="handle-in"  title="Crop start &mdash; drag"></div>
             <div class="tl-handle out" id="handle-out" title="Crop end &mdash; drag"></div>
             <div class="tl-playhead" id="playhead"></div>
           </div>
         </div>
+      </div>
+      <div class="images-only" hidden>
+        <div class="thumbs" id="thumbs"></div>
+        <p class="muted small">Frames play in this order (sorted by filename).</p>
+      </div>
+    </div>
 
+    <!-- STEP 1 · SOURCE -->
+    <section class="panel step-pane" data-pane="source">
+      <h2 style="margin-top:0">1 &middot; Add your source</h2>
+      <div class="drop noclick" id="drop-any">
+        <p><strong>Drag &amp; drop a video or images here</strong></p>
+        <p class="small muted">Videos (MP4, WebM, MOV) or images (PNG, JPEG, WebP) &mdash; the type is detected automatically.</p>
+        <p class="small muted" style="margin-bottom:0">
+          Turn them into a high-quality animated GIF, entirely in your browser via WebAssembly.
+          Your files are never uploaded anywhere.
+        </p>
+      </div>
+      <p class="muted small" style="margin:14px 0 8px">&hellip;or pick files yourself:</p>
+      <div class="source-pick">
+        <button type="button" class="btn secondary" id="pick-video">Choose a video&hellip;</button>
+        <button type="button" class="btn secondary" id="pick-images">Choose images&hellip;</button>
+      </div>
+      <input type="file" id="file-video" accept="video/*" hidden>
+      <input type="file" id="file-images" accept="image/*" multiple hidden>
+      <div id="video-info" class="status"></div>
+    </section>
+
+    <!-- STEP 2 · TRIM -->
+    <section class="panel step-pane" data-pane="trim" hidden>
+      <h2 style="margin-top:0">2 &middot; Trim &amp; cut</h2>
+      <div class="video-only">
         <div class="tl-actions">
           <button class="btn secondary small-btn" data-act="setIn"  title="Set crop start (I)">Set start &#x21e4;</button>
           <button class="btn secondary small-btn" data-act="setOut" title="Set crop end (O)">&#x21e5; Set end</button>
@@ -74,57 +122,89 @@
           <span id="cut-info" class="muted small"></span>
         </div>
         <p class="muted small" style="margin:10px 0 0">
-          Click or drag the timeline to scrub. Step <strong>frame&#8209;by&#8209;frame</strong> with the
-          &larr;/&rarr; buttons or arrow keys. Drag the green handles to crop the ends; mark a
-          cut start then &ldquo;Remove section&rdquo; to delete a middle part (or click a red strip to undo it).
+          Use the timeline above: click or drag to scrub, step <strong>frame&#8209;by&#8209;frame</strong> with the
+          &larr;/&rarr; keys, drag the green handles to crop the ends, and mark a cut start then
+          &ldquo;Remove section&rdquo; to delete a middle part (click a red strip to undo).
           The GIF is built from the kept (green) parts, played back&#8209;to&#8209;back.
         </p>
-        <div id="video-info" class="status"></div>
       </div>
-    </div>
+      <p class="images-only muted" hidden>Trimming applies to videos. Image frames come from your selection in step&nbsp;1.</p>
+    </section>
 
-    <!-- IMAGES MODE -->
-    <div class="panel" id="panel-images" style="display:none">
-      <div class="drop" id="drop-images">
-        <input type="file" id="file-images" accept="image/*" multiple>
-        <p><strong>Drop images here</strong> or click to choose</p>
-        <p class="small muted">PNG, JPEG, WebP &mdash; select several; they become the frames in order</p>
-      </div>
-      <div class="thumbs" id="thumbs"></div>
-    </div>
-
-    <!-- SETTINGS -->
-    <div class="panel">
-      <h2 style="margin-top:0">Settings</h2>
-      <div class="controls">
-        <div class="field" id="field-fps">
-          <label for="fps">Frames per second</label>
-          <input type="number" id="fps" value="15" min="1" max="50" step="1">
-          <span class="hint">Higher = smoother &amp; larger</span>
+    <!-- STEP 3 · CROP & SIZE -->
+    <section class="panel step-pane" data-pane="crop" hidden>
+      <h2 style="margin-top:0">3 &middot; Crop &amp; output size</h2>
+      <div class="video-only">
+        <div class="controls">
+          <div class="field">
+            <label for="crop-aspect">Aspect ratio</label>
+            <select id="crop-aspect">
+              <option value="free">Free</option>
+              <option value="orig" selected>Original (whole frame)</option>
+              <option value="1:1">1:1 &mdash; square</option>
+              <option value="4:3">4:3</option>
+              <option value="3:4">3:4 &mdash; tall</option>
+              <option value="3:2">3:2</option>
+              <option value="2:3">2:3 &mdash; tall</option>
+              <option value="16:9">16:9 &mdash; wide</option>
+              <option value="9:16">9:16 &mdash; tall</option>
+            </select>
+            <span class="hint">presets keep this shape while you resize</span>
+          </div>
+          <div class="field">
+            <label>Fine nudge</label>
+            <div class="nudge" data-unit="source">
+              <button type="button" class="ndg" data-nudge="up" title="Move up 1 source px" aria-label="Move up">&#x25b2;</button>
+              <div class="nudge-row">
+                <button type="button" class="ndg" data-nudge="left" title="Move left 1 source px" aria-label="Move left">&#x25c0;</button>
+                <button type="button" class="ndg" data-nudge="center" title="Re-center" aria-label="Center">&#x2316;</button>
+                <button type="button" class="ndg" data-nudge="right" title="Move right 1 source px" aria-label="Move right">&#x25b6;</button>
+              </div>
+              <button type="button" class="ndg" data-nudge="down" title="Move down 1 source px" aria-label="Move down">&#x25bc;</button>
+            </div>
+            <span class="hint">by 1 source pixel</span>
+          </div>
+          <div class="field">
+            <label>GIF-pixel nudge</label>
+            <div class="nudge" data-unit="output">
+              <button type="button" class="ndg" data-nudge="up" title="Move up 1 output px" aria-label="Move up">&#x25b2;</button>
+              <div class="nudge-row">
+                <button type="button" class="ndg" data-nudge="left" title="Move left 1 output px" aria-label="Move left">&#x25c0;</button>
+                <button type="button" class="ndg" data-nudge="center" title="Re-center" aria-label="Center">&#x2316;</button>
+                <button type="button" class="ndg" data-nudge="right" title="Move right 1 output px" aria-label="Move right">&#x25b6;</button>
+              </div>
+              <button type="button" class="ndg" data-nudge="down" title="Move down 1 output px" aria-label="Move down">&#x25bc;</button>
+            </div>
+            <span class="hint">by 1 pixel of the final GIF</span>
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button type="button" class="btn secondary small-btn" id="crop-reset">Reset crop to full frame</button>
+          </div>
         </div>
-        <div class="field">
+        <div class="controls" style="margin-top:14px">
+          <div class="field"><label for="crop-x">Crop X &middot; source px</label><input type="number" id="crop-x" min="0" step="1"></div>
+          <div class="field"><label for="crop-y">Crop Y &middot; source px</label><input type="number" id="crop-y" min="0" step="1"></div>
+          <div class="field"><label for="crop-w">Crop width &middot; source px</label><input type="number" id="crop-w" min="1" step="1"></div>
+          <div class="field"><label for="crop-h">Crop height &middot; source px</label><input type="number" id="crop-h" min="1" step="1"></div>
+          <div class="field"><label for="final-w">Final width &middot; output px</label><input type="number" id="final-w" min="1" step="1"></div>
+          <div class="field"><label for="final-h">Final height &middot; output px</label><input type="number" id="final-h" min="1" step="1"></div>
+        </div>
+        <p class="muted small" id="crop-info" style="margin:10px 0 0"></p>
+      </div>
+      <div class="images-only controls" hidden>
+        <div class="field" id="field-maxw">
           <label for="maxw">Max width (px)</label>
           <input type="number" id="maxw" value="480" min="16" max="2000" step="16">
           <span class="hint">Frames scale down to fit; 0 = original</span>
         </div>
-        <div class="field">
-          <label for="quality">Quality: <span id="quality-val">80</span></label>
-          <input type="range" id="quality" value="80" min="1" max="100" step="1">
-          <span class="hint">gifski quality (1&ndash;100)</span>
-        </div>
-        <div class="field">
-          <label for="speed">Speed</label>
-          <select id="speed">
-            <option value="0.25">0.25&times; (slow-mo)</option>
-            <option value="0.5">0.5&times;</option>
-            <option value="1" selected>1&times; (normal)</option>
-            <option value="1.5">1.5&times;</option>
-            <option value="2">2&times;</option>
-            <option value="3">3&times;</option>
-            <option value="4">4&times; (fast)</option>
-          </select>
-          <span class="hint">plays the GIF faster/slower</span>
-        </div>
+      </div>
+    </section>
+
+    <!-- STEP 4 · STYLE -->
+    <section class="panel step-pane" data-pane="style" hidden>
+      <h2 style="margin-top:0">4 &middot; Style</h2>
+      <div class="controls">
         <div class="field">
           <label for="rotate">Rotate</label>
           <select id="rotate">
@@ -157,6 +237,136 @@
           </select>
         </div>
         <div class="field">
+          <label for="colormap-search">Colormap</label>
+          <div class="combo" id="colormap-combo">
+            <input type="text" id="colormap-search" placeholder="None" autocomplete="off"
+                   role="combobox" aria-expanded="false" aria-autocomplete="list">
+            <div class="combo-list" id="colormap-list" hidden></div>
+          </div>
+          <span class="hint">type to search; false-colour a channel</span>
+        </div>
+        <div class="field">
+          <label for="channel">Colormap input</label>
+          <select id="channel">
+            <option value="lum" selected>Luminance</option>
+            <option value="r">Red channel</option>
+            <option value="g">Green channel</option>
+            <option value="b">Blue channel</option>
+          </select>
+          <span class="hint">value fed into the colormap</span>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top:16px">
+        <div class="row" style="justify-content:space-between">
+          <label style="margin:0">Tone curve (contrast)</label>
+          <span class="row" style="gap:14px">
+            <label class="toggle"><input type="checkbox" id="curve-show-output"><span>show output on curve</span></label>
+            <button type="button" class="btn secondary small-btn" id="curve-reset">Reset</button>
+          </span>
+        </div>
+        <div class="curve-wrap">
+          <canvas id="curve-canvas" width="256" height="256"></canvas>
+          <canvas id="hist-out" width="256" height="46"></canvas>
+        </div>
+        <span class="hint">
+          Drag points for brightness/contrast/gamma; click the line to add a point, double-click one to remove.
+          Histogram is the cropped region — input sits behind the curve, the strip below is the live output
+          (before the GIF's own colour quantization). Applies to the colormap input, or to RGB with no colormap.
+        </span>
+      </div>
+      <p class="muted small" style="margin:12px 0 0">
+        A colormap recolours the image: each pixel&rsquo;s chosen channel (0&ndash;255) is looked up in the
+        colormap. Great for heatmaps and scientific data. Colormaps from
+        <a href="https://matplotlib.org/" target="_blank" rel="noopener">matplotlib</a>.
+      </p>
+    </section>
+
+    <!-- STEP 5 · LOGO -->
+    <section class="panel step-pane" data-pane="logo" hidden>
+      <h2 style="margin-top:0">5 &middot; Logo / watermark</h2>
+      <div class="drop" id="drop-logo">
+        <input type="file" id="file-logo" accept="image/*">
+        <p><strong>Drop a logo image</strong> or click to choose</p>
+        <p class="small muted">A PNG with transparency works best &mdash; optional</p>
+      </div>
+      <div class="controls" style="margin-top:14px">
+        <div class="field">
+          <label for="logo-pos">Position</label>
+          <select id="logo-pos">
+            <option value="br" selected>Bottom-right</option>
+            <option value="bl">Bottom-left</option>
+            <option value="tr">Top-right</option>
+            <option value="tl">Top-left</option>
+            <option value="center">Center</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="logo-size">Size: <span id="logo-size-val">20</span>% of width</label>
+          <input type="range" id="logo-size" min="2" max="60" value="20" step="1">
+        </div>
+        <div class="field">
+          <label for="logo-opacity">Opacity: <span id="logo-opacity-val">100</span>%</label>
+          <input type="range" id="logo-opacity" min="0" max="100" value="100" step="1">
+          <span class="hint">lower = subtle watermark</span>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" class="btn secondary small-btn" id="logo-clear">Remove logo</button>
+        </div>
+      </div>
+      <div id="logo-info" class="status"></div>
+    </section>
+
+    <!-- STEP 6 · EXPORT -->
+    <section class="panel step-pane" data-pane="export" hidden>
+      <h2 style="margin-top:0">6 &middot; Export</h2>
+      <div class="controls">
+        <div class="field" id="field-fps">
+          <label for="fps">Frames per second</label>
+          <input type="number" id="fps" value="15" min="1" max="50" step="1">
+          <span class="hint">Higher = smoother &amp; larger</span>
+        </div>
+        <div class="field">
+          <label for="quality">Quality: <span id="quality-val">80</span></label>
+          <input type="range" id="quality" value="80" min="1" max="100" step="1">
+          <span class="hint">gifski quality (1&ndash;100)</span>
+        </div>
+        <div class="field">
+          <label for="timing-mode">Timing</label>
+          <select id="timing-mode">
+            <option value="speed" selected>By speed</option>
+            <option value="duration">By total duration</option>
+          </select>
+          <span class="hint">instant &mdash; no re-encode</span>
+        </div>
+        <div class="field" id="field-speed">
+          <label for="speed">Speed</label>
+          <select id="speed">
+            <option value="0.25">0.25&times; (slow-mo)</option>
+            <option value="0.5">0.5&times;</option>
+            <option value="1" selected>1&times; (normal)</option>
+            <option value="1.5">1.5&times;</option>
+            <option value="2">2&times;</option>
+            <option value="3">3&times;</option>
+            <option value="4">4&times; (fast)</option>
+          </select>
+          <span class="hint">relative to the captured rate</span>
+        </div>
+        <div class="field" id="field-duration" hidden>
+          <label for="duration">Total duration</label>
+          <select id="duration">
+            <option value="1">1 second</option>
+            <option value="2">2 seconds</option>
+            <option value="3" selected>3 seconds</option>
+            <option value="5">5 seconds</option>
+            <option value="10">10 seconds</option>
+            <option value="custom">Custom&hellip;</option>
+          </select>
+          <input type="number" id="duration-custom" min="0.1" step="0.1" value="3" hidden>
+          <span class="hint">spread all frames evenly over this time</span>
+        </div>
+        <div class="field">
           <label for="loop">Looping</label>
           <select id="loop">
             <option value="-1" selected>Loop forever</option>
@@ -168,19 +378,31 @@
 
       <div style="margin-top:20px; display:flex; gap:12px; flex-wrap:wrap;">
         <button class="btn" id="encode-btn" disabled>Create GIF</button>
-        <button class="btn secondary" id="reset-btn">Reset</button>
+        <button class="btn secondary" id="reset-btn">Start over</button>
       </div>
 
       <div class="progress" id="progress"><div></div></div>
       <div class="status" id="status"></div>
-    </div>
 
-    <!-- RESULT -->
-    <div class="panel result" id="result">
-      <h2 style="margin-top:0">Your GIF</h2>
-      <img id="result-img" alt="resulting GIF">
-      <div class="meta" id="result-meta"></div>
-      <a class="btn good" id="download-btn" download="output.gif">Download GIF</a>
+      <div class="result" id="result">
+        <h2>Your GIF</h2>
+        <img id="result-img" alt="resulting GIF">
+        <div class="meta" id="result-meta"></div>
+        <a class="btn good" id="download-btn" download="output.gif">Download GIF</a>
+      </div>
+    </section>
+
+    <div class="panel vibe">
+      <h2>🤖 100% vibed</h2>
+      <p style="margin:0 0 4px">
+        No tracking. No uploads. No sign-up. No ads. This whole thing was vibe-coded with
+        <a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude Code</a>
+        and runs entirely on your device.
+      </p>
+      <p class="muted small" style="margin:0 0 4px">
+        If it saved you a trip to some sketchy online converter, give it a&nbsp;⭐.
+      </p>
+      <a class="btn good" href="https://github.com/hmaarrfk/hmaarrfk.github.io" target="_blank" rel="noopener">⭐ Star it on GitHub</a>
     </div>
 
     <div class="panel">
@@ -205,6 +427,27 @@
         gifski and gifski-wasm repositories linked above, and the full source of this page is on
         <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/gifski" target="_blank" rel="noopener">GitHub</a>.
       </p>
+
+      <h3 style="margin:22px 0 10px">Built on</h3>
+      <ul class="refs muted">
+        <li><a href="https://github.com/ImageOptim/gifski" target="_blank" rel="noopener">gifski</a> &mdash; the GIF encoder (Kornel Lesi&nbsp;ński)</li>
+        <li><a href="https://github.com/jamsinclair/gifski-wasm" target="_blank" rel="noopener">gifski-wasm</a> &mdash; the WebAssembly build</li>
+        <li><a href="https://rustwasm.github.io/wasm-bindgen/" target="_blank" rel="noopener">wasm-bindgen</a> &amp; <a href="https://www.rust-lang.org/" target="_blank" rel="noopener">Rust</a> &rarr; WebAssembly</li>
+        <li><a href="https://matplotlib.org/stable/users/explain/colors/colormaps.html" target="_blank" rel="noopener">matplotlib colormaps</a> (viridis, plasma, &hellip;)</li>
+        <li><a href="https://research.google/blog/turbo-an-improved-rainbow-colormap-for-visualization/" target="_blank" rel="noopener">Turbo colormap</a> (Google)</li>
+        <li><a href="https://colorbrewer2.org/" target="_blank" rel="noopener">ColorBrewer</a> (Cynthia Brewer) &mdash; Reds/Blues/&hellip;</li>
+        <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API" target="_blank" rel="noopener">Canvas</a> &amp; <a href="https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement" target="_blank" rel="noopener">HTML media</a> APIs</li>
+      </ul>
+
+      <h3 style="margin:18px 0 10px">Inspired by</h3>
+      <ul class="refs muted">
+        <li><a href="https://squoosh.app/" target="_blank" rel="noopener">Squoosh</a> &mdash; Google&rsquo;s in-browser image compressor; the gold standard for client-side WASM tools</li>
+        <li><a href="https://github.com/ffmpegwasm/ffmpeg.wasm" target="_blank" rel="noopener">ffmpeg.wasm</a> &mdash; FFmpeg in the browser</li>
+        <li><a href="https://github.com/renzhezhilu/gifsicle-wasm-browser" target="_blank" rel="noopener">gifsicle-wasm-browser</a></li>
+        <li><a href="https://ezgif.com/" target="_blank" rel="noopener">ezgif</a> &mdash; the classic online GIF toolbox (server-side)</li>
+        <li>The <a href="https://localfirstweb.dev/" target="_blank" rel="noopener">local-first</a> / privacy-respecting web-tools movement</li>
+        <li>Vibe-coded with <a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude Code</a> (Anthropic)</li>
+      </ul>
     </div>
 
     <footer class="legal">
