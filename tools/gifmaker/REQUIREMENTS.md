@@ -164,9 +164,10 @@ Optimized for phones (iPhone-first) as well as desktop:
   ellipse composite (`applyOvalMask`) applied in `finishFrame` **after** the
   colormap/curve but **before** the logo, so a logo/watermark still draws on top
   of the masked frame. The same mask is shown live in the ROI preview, with a
-  dashed ellipse guide on the crop box (`.crop-oval`) during the Crop step and a
-  checkerboard behind the preview (`#preview-canvas.masked`) so transparent
-  corners read as transparent. Toggling it `markStale()`s (needs a re-encode).
+  dashed ellipse guide on the crop box (`.crop-oval`) during the Crop step; the
+  preview canvas drops its black backing (`#preview-canvas.masked`) so the
+  masked-out corners are genuinely transparent (you see the panel/page behind).
+  Toggling it `markStale()`s (needs a re-encode).
 - Exact numeric entry in **both spaces**: crop X/Y/W/H in source px, and final
   W/H in output px (final follows the crop aspect).
 - **Rotation/flip carry the crop** (transform its extents, don't reset); a

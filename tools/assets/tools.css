@@ -253,11 +253,9 @@ input[type="range"] { width: 100%; }
   background: #000;
   border-radius: var(--radius);
 }
-/* With the oval mask on, show a checkerboard so transparent corners read as
-   transparent (not black). */
-#preview-canvas.masked {
-  background: repeating-conic-gradient(#3a4047 0% 25%, #2e3338 0% 50%) 50% / 22px 22px;
-}
+/* With the oval mask on, drop the black backing so the masked-out corners are
+   genuinely transparent — you see the page/panel behind the preview. */
+#preview-canvas.masked { background: transparent; }
 
 /* Crop box overlaid on the preview (positioned in % of the displayed frame) */
 #crop-rect {
