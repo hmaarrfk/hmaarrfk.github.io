@@ -26,7 +26,7 @@
     <nav class="steps" id="steps">
       <button class="stepbtn active" data-step="source" type="button"><b>1</b> Source</button>
       <button class="stepbtn" data-step="trim" type="button"><b>2</b> Trim</button>
-      <button class="stepbtn" data-step="crop" type="button"><b>3</b> Crop &amp; size</button>
+      <button class="stepbtn" data-step="crop" type="button"><b>3</b> Crop</button>
       <button class="stepbtn" data-step="style" type="button"><b>4</b> Style</button>
       <button class="stepbtn" data-step="logo" type="button"><b>5</b> Logo</button>
       <button class="stepbtn" data-step="export" type="button"><b>6</b> Export</button>
@@ -188,18 +188,17 @@
             </div>
             <span class="hint">by 1 pixel of the final GIF</span>
           </div>
-          <div class="field">
-            <label>&nbsp;</label>
+          <div class="field action">
             <button type="button" class="btn secondary small-btn" id="crop-reset">Reset crop to full frame</button>
           </div>
         </div>
-        <div class="controls" style="margin-top:14px">
-          <div class="field"><label for="crop-x">Crop X &middot; source px</label><input type="number" id="crop-x" min="0" step="1"></div>
-          <div class="field"><label for="crop-y">Crop Y &middot; source px</label><input type="number" id="crop-y" min="0" step="1"></div>
-          <div class="field"><label for="crop-w">Crop width &middot; source px</label><input type="number" id="crop-w" min="1" step="1"></div>
-          <div class="field"><label for="crop-h">Crop height &middot; source px</label><input type="number" id="crop-h" min="1" step="1"></div>
-          <div class="field"><label for="final-w">Final width &middot; output px</label><input type="number" id="final-w" min="1" step="1"></div>
-          <div class="field"><label for="final-h">Final height &middot; output px</label><input type="number" id="final-h" min="1" step="1"></div>
+        <div class="controls cols-2" style="margin-top:14px">
+          <div class="field"><label for="crop-x">Crop X <span class="lu">source px</span></label><input type="number" id="crop-x" min="0" step="1"></div>
+          <div class="field"><label for="crop-y">Crop Y <span class="lu">source px</span></label><input type="number" id="crop-y" min="0" step="1"></div>
+          <div class="field"><label for="crop-w">Width <span class="lu">source px</span></label><input type="number" id="crop-w" min="1" step="1"></div>
+          <div class="field"><label for="crop-h">Height <span class="lu">source px</span></label><input type="number" id="crop-h" min="1" step="1"></div>
+          <div class="field"><label for="final-w">Final width <span class="lu">output px</span></label><input type="number" id="final-w" min="1" step="1"></div>
+          <div class="field"><label for="final-h">Final height <span class="lu">output px</span></label><input type="number" id="final-h" min="1" step="1"></div>
         </div>
         <p class="muted small" id="crop-info" style="margin:10px 0 0"></p>
       </div>
@@ -245,9 +244,9 @@
       </div>
 
       <div class="field" style="margin-top:16px">
-        <div class="row" style="justify-content:space-between">
+        <div class="curve-head">
           <label style="margin:0">Tone curve (contrast)</label>
-          <span class="row" style="gap:14px">
+          <span class="curve-toggles">
             <label class="toggle"><input type="checkbox" id="invert-input"><span>invert input</span></label>
             <label class="toggle"><input type="checkbox" id="reverse-colormap"><span>reverse colormap</span></label>
             <label class="toggle"><input type="checkbox" id="hist-log"><span>log scale</span></label>
@@ -312,8 +311,7 @@
           <input type="range" id="logo-opacity" min="0" max="100" value="100" step="1">
           <span class="hint">lower = subtle watermark</span>
         </div>
-        <div class="field">
-          <label>&nbsp;</label>
+        <div class="field action">
           <button type="button" class="btn secondary small-btn" id="logo-clear">Remove logo</button>
         </div>
       </div>
@@ -390,10 +388,12 @@
       <div class="status" id="status"></div>
 
       <div class="result" id="result">
-        <h2>Your GIF</h2>
-        <img id="result-img" alt="resulting GIF">
-        <div class="meta" id="result-meta"></div>
-        <a class="btn good" id="download-btn" download="output.gif">Download GIF</a>
+        <h2>Your GIFs</h2>
+        <p class="muted small" style="margin:0 0 8px">
+          Four sizes from one render — pick whichever is small enough. Speed &amp; loop
+          changes update all of them instantly.
+        </p>
+        <div class="results-grid" id="results-grid"></div>
       </div>
     </section>
 

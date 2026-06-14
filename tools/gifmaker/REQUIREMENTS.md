@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (compressed timeline after Trim + skip-playback; iOS preview decode fix; crop touch-scroll lock; instant scrub cursor; video-only)._
+_Last updated: 2026-06-14 (four size/quality variants per render from one frame-extraction pass; touch/layout optimizations — single-column controls on phones, even step grid, larger tap targets, no-zoom inputs; compressed timeline after Trim; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -66,6 +66,22 @@ The UI is organised as a non-linear step bar: **Source → Trim → Crop & size 
 Style → Logo → Export**. Every step is always clickable (editing isn't linear).
 The video **preview is persistent** above the tabs (the `#stage` panel); only the
 control panels switch. (Video-only tool — the images path was removed.)
+
+### Responsive / touch layout
+Optimized for phones (iPhone-first) as well as desktop:
+- `.controls` collapse to **one column at ≤640px** (verbose labels/inputs no
+  longer overflow); the crop number fields keep **two columns** (`.controls.cols-2`)
+  since they're short, paired X/Y and W/H. On desktop they flow via
+  `auto-fit minmax(180px, 1fr)`.
+- The step bar becomes an **even 3×2 grid** on phones (not an uneven flex-wrap);
+  the step-3 label is abbreviated to **"Crop"**.
+- The tone-curve header (label + invert/reverse/log toggles + Reset) is a
+  `.curve-head` flex row that **wraps** instead of overflowing.
+- Action-only fields use `.field.action` (full-width button, bottom-aligned)
+  instead of an empty `<label>` spacer.
+- `@media (pointer: coarse)`: **16px** form text (stops iOS focus-zoom),
+  **≥44px** tap targets (buttons, selects, inputs, d-pad, crop handles), bigger
+  checkboxes/toggles.
 
 ### Input
 - A single **video** (drag/drop or click the dropzone). Any format the browser
@@ -190,15 +206,27 @@ control panels switch. (Video-only tool — the images path was removed.)
 - **Timing** (metadata-only, instant): either **By speed** (0.25×–4×) or **By
   total duration** (1/2/3/5/10 s or custom) — duration spreads all frames evenly,
   intuitive when there are few frames. **Looping** forever/once/n.
-- **Metadata patching**: the base GIF is encoded once at 1× / infinite loop;
-  changing timing or loop rewrites the GIF's per-frame delays / Netscape loop
-  block **in place** (`patchGif`) — no re-encode. Any change that alters the
-  actual frames (`markStale()`) invalidates the base so the next Create GIF
-  re-encodes. Frame *rate* (sampling) genuinely needs re-encode; playback timing
-  does not.
-- Inline GIF preview on a checkerboard, a meta line (`W×H · N frames · fps ·
-  size`), and a **Download** button (named after the source video, else
-  `animation.gif`).
+- **Four size/quality variants per render** (`VARIANT_DEFS`): one "Create GIF"
+  extracts every frame **once** (shared), then encodes up to four GIFs and shows
+  them side by side so the user picks the smallest acceptable one:
+  1. **Requested** — the requested fps & quality.
+  2. **¼ frame rate** — every 4th frame (`frames.filter((_,i)=>i%4===0)`), same quality.
+  3. **¾ quality** — full frame rate, quality × 0.75.
+  4. **¼ rate + ¾ quality** — both reductions combined (smallest).
+  Variants that subsample below 2 frames, or that would duplicate another
+  variant's (frame-count, quality) pair, are skipped. Each is rendered as a
+  `.result-card` (preview, label, meta, **Download** named
+  `<source>-<key>.gif`). Frame *rate* (sampling) and quality genuinely need a
+  re-encode; that's why all four are produced up front in the single pass.
+- **Metadata patching**: each variant's base GIF is encoded once at 1× / infinite
+  loop; changing timing or loop rewrites every variant's per-frame delays /
+  Netscape loop block **in place** (`patchGif`, then `refreshResultCards`
+  updates the cards) — no re-encode. In **duration** mode each variant's delay is
+  `totalDuration / its own frame count`, so all variants share the same total
+  runtime despite different frame counts. Any change that alters the actual frames
+  (`markStale()`) invalidates all variants so the next Create GIF re-encodes.
+  Card `<img>`/links are updated in place (not rebuilt) on metadata patches so a
+  mid-load image is never stranded when its old blob URL is revoked.
 
 ### Privacy / about
 - A "100% vibed" callout (no tracking/uploads) links to the GitHub repo to star.
@@ -213,9 +241,13 @@ control panels switch. (Video-only tool — the images path was removed.)
 2. For each frame, `paint()` rotation + flip + color filter; for video, crop +
    scale to the final size; then `finishFrame()` applies the colormap (per-pixel
    LUT) and composites the logo, and reads back `ImageData`.
-3. `encode()` the `ImageData[]` with constant `frameDurations = 1000/(fps×speed)`
-   and the chosen `quality`/`repeat`.
-4. Wrap the returned bytes in a `Blob('image/gif')`, show + offer download.
+3. Build the variant specs from the single `frames[]` (subsample for ¼-rate
+   variants, scale quality for ¾-quality variants), then `encode()` each as an
+   `ImageData[]` at 1× / infinite loop with constant `frameDurations` and its
+   quality.
+4. Patch each base GIF's timing/loop (`patchGif`), wrap the bytes in a
+   `Blob('image/gif')`, and render the variant cards (preview + per-variant
+   download).
 
 ## Local preview
 
@@ -257,7 +289,11 @@ CPU/2D fallback (feature-detected; the vendored gifski WASM encode is unchanged)
 
 - `window.__gifskiTest(opts)` runs the full transform+encode on synthetic
   frames (no file picker) and returns the GIF header/size/dims — used to verify
-  rotate/flip/filter/speed/loop produce valid `GIF89a`s.
+  rotate/flip/filter/speed/loop/**quality** produce valid `GIF89a`s.
+- The four-variant flow is exercised end-to-end with a synthetic in-page video
+  (canvas → `MediaRecorder` → `File` → the real `#file-video` input), then
+  asserting four `.result-card`s render with monotonically decreasing sizes and
+  that speed/loop/duration changes patch all cards with **zero console errors**.
 - `window.__keepRangesTest(duration, cropStart, cropEnd, cuts)` exposes the
   keep-range solver for unit checks (crop, single/multiple/overlapping cuts).
 - Manual/automated browser checks use a **WebM (VP9)** sample — headless

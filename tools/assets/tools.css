@@ -144,7 +144,12 @@ h2 { font-size: 1.2rem; margin: 28px 0 12px; font-weight: 600; }
 }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: .85rem; color: var(--muted); font-weight: 600; }
+.field label .lu { font-weight: 400; color: #7a8590; font-size: .78rem; }
 .field .hint { font-size: .75rem; color: #7a8590; }
+/* A field that holds only an action button: push it to the bottom so it lines
+   up with neighbouring inputs (replaces an empty <label> spacer). */
+.field.action { justify-content: flex-end; }
+.field.action .btn { width: 100%; }
 input[type="number"], input[type="text"], select {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -186,11 +191,30 @@ input[type="range"] { width: 100%; }
 .status.error { color: var(--danger); }
 
 /* Result */
-.result { text-align: center; display: none; }
+.result { display: none; }
 .result.show { display: block; }
-.result img { max-width: 100%; border-radius: var(--radius); border: 1px solid var(--border); background:
-  repeating-conic-gradient(#3a4047 0% 25%, #2e3338 0% 50%) 50% / 22px 22px; }
 .result .meta { color: var(--muted); margin: 12px 0; }
+
+/* Four size/quality variants from a single render. */
+.results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+.result-card {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+}
+.result-card img {
+  max-width: 100%; border-radius: var(--radius); border: 1px solid var(--border); background:
+  repeating-conic-gradient(#3a4047 0% 25%, #2e3338 0% 50%) 50% / 22px 22px; }
+.result-card .rc-label { font-weight: 600; }
+.result-card .rc-meta { color: var(--muted); font-size: .8rem; line-height: 1.4; }
+.result-card .small-btn { padding: 8px 12px; font-size: .9rem; margin-top: auto; }
 
 /* ---- Video timeline editor ---- */
 /* The decode source <video>: rendered (so iOS decodes frames for the canvas)
@@ -391,6 +415,8 @@ input[type="range"] { width: 100%; }
 .combo-empty { padding: 9px 10px; color: var(--muted); font-size: .88rem; }
 
 /* Tone curve editor: [input + curve]  →  [output] */
+.curve-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+.curve-toggles { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
 .curve-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
 .curve-col { display: flex; flex-direction: column; gap: 4px; flex: 1 1 220px; min-width: 150px; max-width: 300px; }
 .curve-col canvas {
@@ -423,10 +449,14 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .wrap { padding: 14px 12px 56px; }
   .panel { padding: 14px; }
   h1 { font-size: 1.5rem; }
-  .steps { gap: 6px; }
-  .stepbtn { flex: 1 1 28%; padding: 8px 6px; font-size: .78rem; gap: 5px; }
+  /* Even 3×2 grid of step buttons instead of an uneven flex-wrap. */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .stepbtn { flex: none; padding: 8px 6px; font-size: .78rem; gap: 5px; }
   .stepbtn b { width: 18px; height: 18px; font-size: .72rem; }
-  .controls { grid-template-columns: 1fr 1fr; gap: 12px; }
+  /* One control per row — verbose labels/inputs no longer overflow on phones.
+     The crop number fields keep two columns (they're short, paired X/Y, W/H). */
+  .controls { grid-template-columns: 1fr; gap: 12px; }
+  .controls.cols-2 { grid-template-columns: 1fr 1fr; }
   #preview-canvas { max-height: 56vh; }
   .timecode { font-size: .8rem; }
   /* Curve + output stack vertically; arrow points down */
@@ -434,17 +464,20 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .curve-arrow { transform: rotate(90deg); }
   .tl-actions { gap: 6px; }
   .tl-actions .small-btn { flex: 1 1 auto; }
-}
-@media (max-width: 380px) {
-  .controls { grid-template-columns: 1fr; }
+  .tl-sep { display: none; }   /* dividers add nothing once the buttons wrap */
 }
 
 /* ---- Bigger hit targets on touch devices ---- */
 @media (pointer: coarse) {
+  /* 16px form text stops iOS Safari from zooming in when a field is focused;
+     44px min height/width meets the Apple touch-target guideline. */
+  input[type="number"], input[type="text"], select { font-size: 16px; min-height: 44px; }
+  .btn, .small-btn { min-height: 44px; }
+  .checkbox input, .toggle input { width: 22px; height: 22px; }
   .tbtn { width: 50px; height: 46px; }
   .tbtn svg { width: 22px; height: 22px; }
   .tbtn.play { width: 60px; }
-  .ndg { width: 40px; height: 36px; }
+  .ndg { width: 44px; height: 40px; }
   .tl-track { height: 56px; }
   .tl-handle { width: 18px; }
   /* enlarge crop handles and re-center them on the corners/edges */
@@ -457,5 +490,4 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .ch.s  { bottom: -11px; margin-left: -11px; }
   .ch.sw { left: -11px; bottom: -11px; }
   .ch.w  { left: -11px; margin-top: -11px; }
-  .toggle input { width: 20px; height: 20px; }
 }

@@ -73,9 +73,7 @@ const progressBar = progress.firstElementChild;
 const status      = $('status');
 
 const result      = $('result');
-const resultImg   = $('result-img');
-const resultMeta  = $('result-meta');
-const downloadBtn = $('download-btn');
+const resultsGrid = $('results-grid');
 
 const scratchCanvas = $('scratch-canvas');
 const previewCanvas = $('preview-canvas');
@@ -110,15 +108,15 @@ const PAUSE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.4
 
 // ---- State -------------------------------------------------------------
 let videoFile = null;        // File
-let lastObjectUrl = null;    // result blob URL, revoked on reset
 
-// Base encode (speed 1×, infinite loop) kept so speed/loop become instant
-// metadata patches instead of a full re-encode. Invalidated when anything that
-// affects the actual frames changes.
-let lastBaseGif = null;      // Uint8Array of the base GIF
-let baseDelayCs = 0;         // base per-frame delay in centiseconds (= 100/fps)
-let baseInfo = null;         // { frames, w, h, fps }
-function markStale() { lastBaseGif = null; }
+// On "Create GIF" we extract frames once and encode four size/quality variants,
+// each kept as a base GIF (1× speed, infinite loop) so speed/loop are instant
+// metadata patches. Invalidated when anything affecting the frames changes.
+// Each variant: { key, label, baseGif, baseDelayCs, frames, w, h, effFps,
+//                 quality, outUrl, outSize, delayCs }
+let variants = [];
+function revokeVariantUrls() { variants.forEach((v) => { if (v.outUrl) URL.revokeObjectURL(v.outUrl); }); }
+function markStale() { revokeVariantUrls(); variants = []; }
 
 // Timeline editing state (seconds)
 let duration = 0;
@@ -1555,10 +1553,10 @@ async function framesFromVideo(fps, tf) {
 
 
 // ---- Encode ------------------------------------------------------------
-async function runEncode(frames, w, h, durationMs, repeat) {
+async function runEncode(frames, w, h, durationMs, repeat, quality = 80) {
   const frameDurations = new Array(frames.length).fill(Math.max(1, Math.round(durationMs)));
   return encode({ frames, width: w, height: h, frameDurations,
-    quality: Math.min(100, Math.max(1, parseInt(qualityIn.value, 10) || 80)), repeat });
+    quality: Math.min(100, Math.max(1, quality)), repeat });
 }
 
 // Rewrite a GIF's per-frame delay (centiseconds) and loop count in place — no
@@ -1628,43 +1626,69 @@ function patchGif(src, delayCs, loop) {
   return out;
 }
 
-// Show a GIF blob as the result + download, with a meta line for the current speed.
-function showResult(bytes) {
-  const blob = new Blob([bytes], { type: 'image/gif' });
-  if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
-  lastObjectUrl = URL.createObjectURL(blob);
-  resultImg.src = lastObjectUrl;
-  downloadBtn.href = lastObjectUrl;
-  downloadBtn.download = (videoFile
-    ? videoFile.name.replace(/\.[^.]+$/, '') : 'animation') + '.gif';
-  const delayCs = Math.round(currentDelayCs());
-  const fps = 100 / delayCs, total = baseInfo.frames * delayCs / 100;
-  resultMeta.textContent =
-    `${baseInfo.w}×${baseInfo.h} · ${baseInfo.frames} frames · ${fps.toFixed(1)} fps · ${total.toFixed(1)}s · ${humanSize(blob.size)}`;
-  result.classList.add('show');
-}
-
 // Per-frame delay (centiseconds) from the current timing mode (speed or duration).
 function currentDuration() {
   const v = durationSel.value;
   if (v === 'custom') return Math.max(0.05, parseFloat(durationCustom.value) || 3);
   return parseFloat(v) || 3;
 }
-function currentDelayCs() {
-  if (!baseInfo) return baseDelayCs;
-  if (timingMode.value === 'duration') return Math.max(1, currentDuration() * 100 / baseInfo.frames);
-  const speed = parseFloat(speedSel.value) || 1;
-  return Math.max(1, baseDelayCs / speed);
+function variantDelayCs(v) {
+  if (timingMode.value === 'duration') return Math.max(1, currentDuration() * 100 / v.frames);
+  return Math.max(1, v.baseDelayCs / (parseFloat(speedSel.value) || 1));
 }
 
-// Apply the current timing + loop to the base GIF as a metadata-only patch.
-function applyMetadata() {
-  if (!lastBaseGif) return false;
+// Build the variant cards once per encode (structure only). Each card's <img>,
+// meta and download link are kept on `v.el` and updated in place by later
+// metadata patches, so we never detach a mid-load <img> (which would error when
+// its blob URL is revoked).
+function buildResultCards() {
+  resultsGrid.innerHTML = '';
+  const base = videoFile ? videoFile.name.replace(/\.[^.]+$/, '') : 'animation';
+  variants.forEach((v) => {
+    const card = document.createElement('div'); card.className = 'result-card';
+    const img = document.createElement('img'); img.alt = v.label;
+    const lab = document.createElement('div'); lab.className = 'rc-label'; lab.textContent = v.label;
+    const meta = document.createElement('div'); meta.className = 'rc-meta';
+    const dl = document.createElement('a'); dl.className = 'btn good small-btn';
+    dl.textContent = 'Download'; dl.download = `${base}-${v.key}.gif`;
+    card.append(img, lab, meta, dl);
+    resultsGrid.appendChild(card);
+    v.el = { img, meta, dl };
+  });
+  result.classList.add('show');
+}
+// Update the existing cards' image/meta/link to the current variant URLs.
+function refreshResultCards() {
+  variants.forEach((v) => {
+    if (!v.el) return;
+    const fps = v.delayCs ? 100 / v.delayCs : v.effFps;
+    const total = v.frames * (v.delayCs || 0) / 100;
+    v.el.img.src = v.outUrl;       // reassigning src cancels any pending load cleanly
+    v.el.dl.href = v.outUrl;
+    v.el.meta.textContent =
+      `${v.w}×${v.h} · ${v.frames}f · ${fps.toFixed(1)}fps · ${total.toFixed(1)}s · q${v.quality} · ${humanSize(v.outSize)}`;
+  });
+}
+
+// Apply the current timing + loop to every variant base GIF (metadata-only
+// patch). Pass { rebuild: true } after an encode to (re)create the cards.
+function applyMetadata({ rebuild = false } = {}) {
+  if (!variants.length) return false;
   const loop = parseInt(loopSelect.value, 10);
-  const delayCs = Math.max(1, Math.round(currentDelayCs()));
   try {
-    showResult(patchGif(lastBaseGif, delayCs, loop));
-    setStatus('Updated speed/loop instantly (no re-encode).');
+    if (rebuild) buildResultCards();
+    const stale = [];
+    variants.forEach((v) => {
+      const delayCs = Math.max(1, Math.round(variantDelayCs(v)));
+      const blob = new Blob([patchGif(v.baseGif, delayCs, loop)], { type: 'image/gif' });
+      if (v.outUrl) stale.push(v.outUrl);
+      v.outUrl = URL.createObjectURL(blob);
+      v.outSize = blob.size; v.delayCs = delayCs;
+    });
+    refreshResultCards();
+    // The cards now point at the fresh URLs; revoking the previous ones can't
+    // strand a visible <img>.
+    stale.forEach((u) => URL.revokeObjectURL(u));
     return true;
   } catch (err) {
     console.warn('GIF metadata patch failed; will re-encode.', err);
@@ -1673,30 +1697,64 @@ function applyMetadata() {
   }
 }
 
+// The four size/quality variants produced on every "Create GIF". They share a
+// single frame-extraction pass; the smaller ones subsample frames (¼ frame rate)
+// and/or lower gifski's quality (¾). The user picks which to download.
+const VARIANT_DEFS = [
+  { key: 'requested',  label: 'Requested',         fpsDiv: 1, qMul: 1 },
+  { key: 'quarterfps', label: '¼ frame rate',      fpsDiv: 4, qMul: 1 },
+  { key: 'lowquality', label: '¾ quality',         fpsDiv: 1, qMul: 0.75 },
+  { key: 'smallest',   label: '¼ rate + ¾ quality', fpsDiv: 4, qMul: 0.75 },
+];
+
 encodeBtn.addEventListener('click', async () => {
   encodeBtn.disabled = true; resetBtn.disabled = true;
   result.classList.remove('show');
+  markStale();
   setStatus('Preparing…'); setProgress(0);
   try {
     const fps = captureFps();
     const tf = readTransform();
+    const Q = parseInt(qualityIn.value, 10) || 80;
 
+    // Extract every frame once at full rate; variants reuse this set.
     const { frames, w, h } = await framesFromVideo(fps, tf);
 
-    setStatus(`Encoding ${frames.length} frames with gifski…`);
-    setProgress(0.7);
-    await new Promise((r) => setTimeout(r, 30));
+    // Build distinct variant specs (skip any that subsample below 2 frames or
+    // duplicate another variant's frame-count + quality combination).
+    const specs = [];
+    const seen = new Set();
+    for (const def of VARIANT_DEFS) {
+      const sub = def.fpsDiv > 1 ? frames.filter((_, i) => i % def.fpsDiv === 0) : frames;
+      if (sub.length < 2) continue;
+      const quality = Math.max(1, Math.min(100, Math.round(Q * def.qMul)));
+      const sig = sub.length + ':' + quality;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      specs.push({ ...def, sub, quality, effFps: fps / def.fpsDiv });
+    }
 
-    // Encode the base at 1× speed and infinite loop; speed/loop are applied as
-    // instant metadata patches afterwards (and on later changes).
-    const gif = await runEncode(frames, w, h, 1000 / fps, -1);
+    variants = [];
+    for (let i = 0; i < specs.length; i++) {
+      const sp = specs[i];
+      setStatus(`Encoding ${sp.label} — ${sp.sub.length} frames with gifski…`);
+      setProgress(0.6 + 0.4 * (i / specs.length));
+      await new Promise((r) => setTimeout(r, 20));
+      // Each base GIF is 1× speed + infinite loop; speed/loop become instant
+      // metadata patches afterwards (and on later timing/loop changes).
+      const gif = await runEncode(sp.sub, w, h, 1000 / sp.effFps, -1, sp.quality);
+      variants.push({
+        key: sp.key, label: sp.label,
+        baseGif: new Uint8Array(gif),
+        baseDelayCs: 100 / sp.effFps,
+        frames: sp.sub.length, w, h, effFps: sp.effFps,
+        quality: sp.quality, outUrl: null, outSize: 0, delayCs: 0,
+      });
+    }
     setProgress(1);
 
-    lastBaseGif = new Uint8Array(gif.buffer ? gif : gif);
-    baseDelayCs = 100 / fps;
-    baseInfo = { frames: frames.length, w, h, fps };
-    applyMetadata();
-    setStatus('Done. Speed & loop now update instantly — no re-encode.');
+    applyMetadata({ rebuild: true });
+    setStatus('Done — pick a size to download. Speed & loop update instantly.');
     result.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     console.error(err);
@@ -1718,7 +1776,7 @@ function updateTimingFields() {
 }
 function onTimingChange() {
   updateTimingFields();
-  if (lastBaseGif) applyMetadata();
+  if (variants.length) applyMetadata();
 }
 timingMode.addEventListener('change', onTimingChange);
 speedSel.addEventListener('change', onTimingChange);
@@ -1737,14 +1795,14 @@ resetBtn.addEventListener('click', () => {
   stopPreviewLoop(); extracting = false;
   previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
   if (preview.src) { URL.revokeObjectURL(preview.src); preview.removeAttribute('src'); preview.load(); }
-  if (lastObjectUrl) { URL.revokeObjectURL(lastObjectUrl); lastObjectUrl = null; }
+  markStale();
   duration = cropStart = cropEnd = 0; cuts = []; pendingCutStart = null;
   crop = null; cropRectEl.hidden = true; cropInfo.textContent = '';
   clearLogo();
   selectColormap('none');
   curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
   invertInput.checked = false; reverseCmap.checked = false; buildCurveLut(); refreshCurveUI();
-  lastBaseGif = null; baseInfo = null;
+  resultsGrid.innerHTML = '';
   stage.hidden = true;
   result.classList.remove('show');
   setStatus(''); setProgress(null);
@@ -1758,7 +1816,7 @@ refreshReady();
 // ---- Test hook ---------------------------------------------------------
 // Exercises the full transform + encode pipeline without the OS file picker.
 window.__gifskiTest = async ({ n = 3, w = 64, h = 48, rotation = 0, flip = 'none',
-  filter = 'none', speed = 1, captureFps = 10, repeat = -1 } = {}) => {
+  filter = 'none', speed = 1, captureFps = 10, repeat = -1, quality = 80 } = {}) => {
   const fit = { w, h };
   const out = outputDims(fit.w, fit.h, rotation);
   scratchCanvas.width = out.w; scratchCanvas.height = out.h;
@@ -1772,7 +1830,7 @@ window.__gifskiTest = async ({ n = 3, w = 64, h = 48, rotation = 0, flip = 'none
     paint(g, src, fit.w, fit.h, out.w, out.h, rotation, flip, FILTERS[filter] || 'none');
     frames.push(g.getImageData(0, 0, out.w, out.h));
   }
-  const gif = await runEncode(frames, out.w, out.h, 1000 / (captureFps * speed), repeat);
+  const gif = await runEncode(frames, out.w, out.h, 1000 / (captureFps * speed), repeat, quality);
   const bytes = new Uint8Array(gif.buffer || gif);
   return { header: String.fromCharCode(...bytes.slice(0, 6)), bytes: bytes.length,
     w: out.w, h: out.h, frames: frames.length };
