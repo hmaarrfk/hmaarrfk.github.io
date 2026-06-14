@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -240,11 +240,19 @@ Optimized for phones (iPhone-first) as well as desktop:
   within the crop region.
 
 ### Export step + common
-- **Frames per second** (capture/sample rate — changing it re-extracts/re-encodes),
+- **Frames per second** (output frame rate; changing it re-extracts/re-encodes),
   **Quality** (1–100).
-- **Timing** (metadata-only, instant): either **By speed** (0.25×–4×) or **By
-  total duration** (1/2/3/5/10 s or custom) — duration spreads all frames evenly,
-  intuitive when there are few frames. **Looping** forever/once/n.
+- **Timing**: either **By speed** (0.25×–4×) or **By total duration**
+  (1/2/3/5/10 s or custom). **Looping** forever/once/n.
+  - **Frame count depends on the mode** (set at "Create GIF"): in **duration**
+    mode the GIF is exactly `round(fps × duration)` frames sampled evenly across
+    the kept content (so 3 s @ 15 fps → 45 frames, not the whole source); in
+    **speed** mode the kept content is sampled at the capture rate (`fps ×
+    kept-seconds` frames) and speed only changes the playback delay.
+  - Speed & loop are **instant metadata patches** (no re-encode). Changing the
+    duration value re-times the existing frames instantly too (their total plays
+    over the new duration); the frame *count* only re-samples on the next Create
+    GIF.
 - **Three size/quality variants per render** (`VARIANT_DEFS`): one "Create GIF"
   extracts every frame **once** (shared), then encodes the variants and shows them
   side by side so the user picks the smallest acceptable one:

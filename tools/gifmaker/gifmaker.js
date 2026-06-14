@@ -119,7 +119,17 @@ let videoFile = null;        // File
 //                 quality, outUrl, outSize, delayCs }
 let variants = [];
 function revokeVariantUrls() { variants.forEach((v) => { if (v.outUrl) URL.revokeObjectURL(v.outUrl); }); }
-function markStale() { revokeVariantUrls(); variants = []; }
+function markStale() {
+  // Clear each card image's src FIRST (cancels any in-flight blob load cleanly),
+  // then drop the cards and revoke the URLs. Otherwise detaching a mid-load <img>
+  // and revoking its blob logs ERR_FILE_NOT_FOUND. The shown results are stale
+  // anyway once the frames change.
+  variants.forEach((v) => { if (v.el && v.el.img) v.el.img.removeAttribute('src'); });
+  resultsGrid.innerHTML = '';
+  result.classList.remove('show');
+  revokeVariantUrls();
+  variants = [];
+}
 
 // Timeline editing state (seconds)
 let duration = 0;
@@ -1627,10 +1637,20 @@ async function framesFromVideo(fps, tf) {
     scratchCanvas.width = fw; scratchCanvas.height = fh;
     const g = scratchCanvas.getContext('2d', { willReadFrequently: true });
 
-    const dt = 1 / fps;
+    const ranges = keepRanges();
+    const total = ranges.reduce((a, r) => a + (r.end - r.start), 0);
     const times = [];
-    for (const r of keepRanges()) {
-      for (let t = r.start; t < r.end - 1e-4; t += dt) times.push(t);
+    if (timingMode.value === 'duration') {
+      // The output is exactly fps × duration frames, sampled evenly across the
+      // kept content (so a 3 s @ 15 fps GIF extracts 45 frames, not the whole
+      // source). fromOutputTime maps compressed time → source video time.
+      const n = Math.max(2, Math.round(fps * currentDuration()));
+      for (let i = 0; i < n; i++) times.push(fromOutputTime(total * (i + 0.5) / n));
+    } else {
+      // Speed mode: sample the kept content at the capture rate (1/fps apart);
+      // speed just changes the playback delay afterwards.
+      const dt = 1 / fps;
+      for (const r of ranges) for (let t = r.start; t < r.end - 1e-4; t += dt) times.push(t);
     }
     if (times.length < 2) throw new Error('The kept range is too short for 2 frames.');
 
