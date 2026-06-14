@@ -754,7 +754,53 @@ function keepRanges() {
 
 function pct(t) { return duration ? (t / duration) * 100 : 0; }
 
+// After the Trim step the timeline is "compressed": it represents only the kept
+// content (trim + cuts removed), mapped to one continuous bar. These convert
+// between real video time and compressed output time.
+function keptDurationTotal() { return keepRanges().reduce((a, r) => a + (r.end - r.start), 0); }
+function toOutputTime(t) {                     // video time → compressed time
+  let acc = 0;
+  for (const r of keepRanges()) {
+    if (t <= r.start) break;
+    if (t >= r.end) acc += r.end - r.start;
+    else { acc += t - r.start; break; }
+  }
+  return acc;
+}
+function fromOutputTime(o) {                    // compressed time → video time
+  const ranges = keepRanges();
+  let acc = 0;
+  for (const r of ranges) {
+    const d = r.end - r.start;
+    if (o <= acc + d) return r.start + (o - acc);
+    acc += d;
+  }
+  return ranges.length ? ranges[ranges.length - 1].end : 0;
+}
+function timelineCompressed() { return currentStep !== 'source' && currentStep !== 'trim'; }
+function playheadPct(t) {
+  if (timelineCompressed()) { const k = keptDurationTotal(); return k ? toOutputTime(t) / k * 100 : 0; }
+  return pct(t);
+}
+
+// Compressed timeline (steps after Trim): one continuous kept bar, no handles/cuts.
+function renderCompressedTimeline() {
+  handleIn.hidden = true; handleOut.hidden = true;
+  tlRegions.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'tl-region keep';
+  el.style.left = '0%'; el.style.width = '100%';
+  tlRegions.appendChild(el);
+  tlPending.style.display = 'none';
+  cutInfo.textContent = '';
+  const removeBtn = document.querySelector('[data-act="cutEnd"]');
+  if (removeBtn) removeBtn.classList.remove('armed');
+  setPlayhead();
+}
+
 function renderTimeline() {
+  if (timelineCompressed()) { renderCompressedTimeline(); return; }
+  handleIn.hidden = false; handleOut.hidden = false;
   handleIn.style.left  = pct(cropStart) + '%';
   handleOut.style.left = pct(cropEnd) + '%';
 
@@ -805,10 +851,16 @@ function updatePending() {
 // Position the cursor/timecode at an explicit time (used during scrubbing so the
 // cursor tracks the finger immediately, without waiting for the slow video seek).
 function renderPlayhead(t) {
-  playhead.style.left = pct(t) + '%';
+  playhead.style.left = playheadPct(t) + '%';
   const fps = captureFps();
-  timecode.textContent = `${fmtTime(t)} / ${fmtTime(duration)} · frame ${Math.round((t || 0) * fps)}`;
-  updatePending();
+  if (timelineCompressed()) {
+    const o = toOutputTime(t), k = keptDurationTotal();
+    timecode.textContent = `${fmtTime(o)} / ${fmtTime(k)} · frame ${Math.round(o * fps)}`;
+    tlPending.style.display = 'none';
+  } else {
+    timecode.textContent = `${fmtTime(t)} / ${fmtTime(duration)} · frame ${Math.round((t || 0) * fps)}`;
+    updatePending();
+  }
 }
 function setPlayhead() { renderPlayhead(preview.currentTime || 0); }
 
@@ -828,6 +880,7 @@ function showStep(name) {
   const ta = ROI_STEPS.has(name) ? '' : 'none';
   previewWrap.style.touchAction = ta;
   previewCanvas.style.touchAction = ta;
+  if (preview.videoWidth) renderTimeline();  // full (edit) ⇄ compressed timeline
   drawPreview();  // switch full-frame ⇄ ROI-only view for the new step
 }
 stepBtns.forEach((b) => b.addEventListener('click', () => showStep(b.dataset.step)));
@@ -1229,6 +1282,12 @@ function tFromEvent(e) {
   const r = tlTrack.getBoundingClientRect();
   return clamp((e.clientX - r.left) / r.width, 0, 1) * duration;
 }
+// Scrub target in video time, accounting for the compressed timeline after Trim.
+function scrubTimeFromEvent(e) {
+  const r = tlTrack.getBoundingClientRect();
+  const frac = clamp((e.clientX - r.left) / r.width, 0, 1);
+  return timelineCompressed() ? fromOutputTime(frac * keptDurationTotal()) : frac * duration;
+}
 let dragging = null; // 'in' | 'out' | 'scrub'
 // Coalesce seeks while scrubbing: video seeking is slow (esp. on mobile), so
 // only issue a new seek once the previous one finishes, always to the latest
@@ -1241,7 +1300,7 @@ function startDrag(kind, e) {
   if (!duration) return;
   dragging = kind;
   try { tlTrack.setPointerCapture(e.pointerId); } catch {}
-  if (kind === 'scrub') { preview.pause(); const t = tFromEvent(e); renderPlayhead(t); requestSeek(t); }
+  if (kind === 'scrub') { preview.pause(); const t = scrubTimeFromEvent(e); renderPlayhead(t); requestSeek(t); }
   e.preventDefault();
 }
 handleIn.addEventListener('pointerdown',  (e) => { e.stopPropagation(); startDrag('in', e); });
@@ -1252,10 +1311,9 @@ tlTrack.addEventListener('pointerdown', (e) => {
 });
 tlTrack.addEventListener('pointermove', (e) => {
   if (!dragging) return;
-  const t = tFromEvent(e);
-  if (dragging === 'in')  { cropStart = clamp(t, 0, cropEnd - frameStep()); renderTimeline(); renderPlayhead(cropStart); requestSeek(cropStart); }
-  else if (dragging === 'out') { cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); renderPlayhead(cropEnd); requestSeek(cropEnd); }
-  else { renderPlayhead(t); requestSeek(t); }
+  if (dragging === 'in')  { const t = tFromEvent(e); cropStart = clamp(t, 0, cropEnd - frameStep()); renderTimeline(); renderPlayhead(cropStart); requestSeek(cropStart); }
+  else if (dragging === 'out') { const t = tFromEvent(e); cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); renderPlayhead(cropEnd); requestSeek(cropEnd); }
+  else { const t = scrubTimeFromEvent(e); renderPlayhead(t); requestSeek(t); }
 });
 const endDrag = () => { dragging = null; };
 tlTrack.addEventListener('pointerup', endDrag);

@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (removed the images path — video-only tool)._
+_Last updated: 2026-06-14 (compressed timeline after Trim + skip-playback; iOS preview decode fix; crop touch-scroll lock; instant scrub cursor; video-only)._
 
 ## Purpose
 
@@ -75,10 +75,16 @@ control panels switch. (Video-only tool — the images path was removed.)
 - **WYSIWYG canvas preview**: the visible preview is a `<canvas>` rendered
   through the same `paint()` pipeline as the output, so rotation (incl. the
   90/270 dimension swap), flip, and colour filter are shown live and update the
-  instant a control changes. The `<video>` is the hidden decode source; an rAF
-  loop redraws the canvas during playback. Backing store capped at
-  `PREVIEW_MAX` (854 px wide) for smoothness. During encoding the preview +
-  timeline cursor advance frame-by-frame so you can watch it render.
+  instant a control changes. The `<video>` is the decode source; an rAF loop
+  redraws the canvas during playback. Backing store capped at `PREVIEW_MAX`
+  (854 px wide) for smoothness. During encoding the preview + timeline cursor
+  advance frame-by-frame so you can watch it render.
+  - **iOS Safari**: the `<video>` must NOT be `display:none`/`visibility:hidden`
+    or iOS draws a black frame to the canvas; it's kept rendered-but-invisible
+    via `.decode-src` (fixed 2px, `opacity:.01`). On load, `primeDecode()` does a
+    muted `play()`→rAF→`pause()` so a frame exists before the first draw.
+  - The scrub **cursor follows the finger immediately** (`renderPlayhead(t)` on
+    pointerdown/move) while the seek catches up async.
 - **Two preview modes** (`roiView()`): Source/Trim/Crop show the **full frame
   with the editable crop box**; from **Style onward (Style/Logo/Export)** the
   preview shows **only the cropped ROI, scaled up to fill, with the crop box
@@ -104,8 +110,15 @@ control panels switch. (Video-only tool — the images path was removed.)
   bar+triangle, frame step as bold chevrons, play/pause swaps shape) — no icon
   font dependency, crisp and aligned at any size.
 - **Kept ranges** = `[cropStart, cropEnd]` minus all cuts; the GIF is built from
-  these in order, played back-to-back. Preview playback skips cuts and stops at
-  the out point.
+  these in order, played back-to-back. Preview playback **skips** the removed
+  regions (the `timeupdate` handler seeks past each cut and stops at the out
+  point), so you preview exactly the GIF content.
+- **Compressed timeline after Trim** (`timelineCompressed()` — true on
+  Crop/Style/Logo/Export): the track collapses to one continuous **kept** bar
+  with no handles/cut strips, and the playhead + timecode use *compressed/output*
+  time. `toOutputTime()` / `fromOutputTime()` map between real video time and
+  compressed time; scrubbing maps the bar fraction → output time → video time.
+  On Source/Trim the timeline is the full editable view (handles + cut strips).
 - **Keyboard**: Space = play/pause, ←/→ = frame step, Home/End = in/out,
   I/O = set in/out, X = arm/commit a cut.
 
@@ -116,6 +129,10 @@ control panels switch. (Video-only tool — the images path was removed.)
   to move; "Reset crop" restores the full frame. Two nudge d-pads: **Fine**
   (1 source px) and **GIF-pixel** (1 output px = `crop.w/finalW` source px —
   useful when the source is much higher-res than the GIF).
+- **Touch scroll lock**: on the crop-editable steps (Source/Trim/Crop) the
+  preview surface (`#preview-wrap` + `#preview-canvas`) gets `touch-action: none`
+  so dragging the crop box — including over the dimmed area — never scrolls the
+  page; normal scrolling is restored on Style/Logo/Export.
 - **Aspect presets**: free / original / 1:1 / 4:3 / 3:2 / 16:9 / 3:4 / 9:16.
 - Exact numeric entry in **both spaces**: crop X/Y/W/H in source px, and final
   W/H in output px (final follows the crop aspect).
