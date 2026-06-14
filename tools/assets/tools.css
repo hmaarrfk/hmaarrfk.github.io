@@ -17,6 +17,9 @@
   --danger: #e74c3c;
   --radius: 10px;
   --maxw: 880px;
+  /* Wider cap for the two-column editor on big screens so the recovered
+     horizontal space is actually used instead of left as dead margin. */
+  --maxw-editor: 1240px;
 }
 
 * { box-sizing: border-box; }
@@ -67,6 +70,14 @@ h2 { font-size: 1.2rem; margin: 28px 0 12px; font-weight: 600; }
   padding: 20px;
   margin-bottom: 20px;
 }
+
+/* ---- Two-column editor shell (wide screens) ----
+   By default (narrow / single column) the editor is a plain block: the preview
+   stage stacks above the active step controls, exactly as before. At a min-width
+   breakpoint it becomes a CSS grid — preview stage in column 1, the active
+   step-pane in column 2 — so each step fits the 720px-tall viewport without the
+   controls dropping below the fold, and the wasted left/right space is reclaimed. */
+.editor { display: block; }
 
 /* Step navigation (non-linear: every step is clickable any time) */
 .steps {
@@ -166,6 +177,22 @@ h2 { font-size: 1.2rem; margin: 28px 0 12px; font-weight: 600; }
 .fg-item { display: flex; align-items: center; gap: 8px; margin: 0; }
 .fg-item .fg-l { width: 1.1em; flex: none; text-align: center; color: var(--muted); font-weight: 600; font-size: .9rem; }
 .fg-item input { width: 100%; min-width: 0; }
+/* 3-digit crop/output values (480, 320) were clipped to "4:" / "3:" in the
+   narrow ~50px grid cells because the native number spinner + generous padding
+   ate the right edge. Drop the spinner (the d-pad / typing covers stepping) and
+   tighten the horizontal padding so the full digits show in the same cell. */
+.fg-item input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+.fg-item input[type="number"]::-webkit-outer-spin-button,
+.fg-item input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
 input[type="number"], input[type="text"], select {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -484,6 +511,305 @@ details.about h3 { font-size: .95rem; }
 .small { font-size: .85rem; }
 footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; }
 
+/* ---- Wide-screen two-column editor (desktops / 1280×720 target) ----
+   Optimised for a 1080p Windows screen at 150% scaling (≈1280×720 CSS px) and
+   plain 1920×1080. The preview stage sits beside the active step controls so the
+   short steps fit one screen, and the heaviest step (Style) only needs minimal
+   scroll. Phones keep the single-column layout (the ≤640px rules below). */
+@media (min-width: 820px) {
+  /* Widen the page only here so the editor can use the recovered horizontal
+     space; the step bar / standalone panels stay centred at the old width.
+     Use min(--maxw-editor, 96vw) so at the 1280px target the wrap grows to fill
+     all but a thin symmetric gutter (was capped at 1240 → a 40px right gutter)
+     while still capping on truly wide screens. */
+  .wrap { max-width: min(var(--maxw-editor), 96vw); }
+  .steps,
+  .vibe,
+  details.about,
+  footer.legal { max-width: var(--maxw); margin-inline: auto; }
+
+  .editor {
+    display: grid;
+    /* col 1 = preview (flexes, but bounded), col 2 = controls (fixed-ish). */
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 440px);
+    gap: 24px;
+    align-items: start;
+  }
+  /* Preview stage lives in column 1 and sticks so it stays in view while the
+     column-2 controls (which may be taller on Style) scroll. */
+  #stage {
+    grid-column: 1;
+    grid-row: 1;
+    position: sticky;
+    top: 12px;
+    margin-bottom: 0;
+  }
+  /* All step-panes share column 2 / row 1 (only one is ever un-hidden), so they
+     stack in the same cell beside the preview rather than below it. */
+  .step-pane {
+    grid-column: 2;
+    grid-row: 1;
+    margin-bottom: 0;
+    /* NB: deliberately NOT overflow:auto here — the colormap combobox dropdown
+       (.combo-list) is absolutely positioned and would be clipped. The preview
+       cap + density reductions keep the pane within the viewport; the heaviest
+       step (Style) may scroll the page slightly, which is acceptable. */
+  }
+  /* Let the preview grow into its (wide) column instead of rendering small and
+     left-aligned with ~220px of dead space to its right. The canvas fills the
+     column width but stays height-capped so the stage + transport + timeline fit
+     the 720px viewport; height:auto keeps its aspect ratio (a tall/portrait video
+     binds on max-height instead and shrinks its width). The wrap hugs the canvas
+     (width:fit-content) and is centred, so the absolutely-positioned crop box —
+     which is sized in % of the wrap — stays aligned to the canvas exactly. */
+  .video-only { text-align: center; }
+  /* Drive the preview by HEIGHT, not width, so it upscales past the source's
+     native pixel width into the wide column instead of rendering small and
+     left-aligned with ~220px dead space. The canvas takes a fixed display height
+     (capped so the stage + transport + timeline still fit 720px); width:auto
+     follows the aspect ratio (e.g. a 3:2 video → ~605px wide at 403px tall,
+     filling the column). max-width:100% reins in a tall/portrait video that would
+     otherwise overflow the column (reducing its height). The wrap hugs the canvas
+     (width:fit-content) and is centred, so the absolutely-positioned crop box —
+     sized in % of the wrap — stays exactly aligned to the canvas. */
+  #preview-wrap {
+    width: fit-content;
+    max-width: 100%;
+    margin-inline: auto;
+  }
+  #preview-canvas {
+    height: min(56vh, 460px);
+    width: auto;
+    max-width: 100%;
+    max-height: none;
+  }
+
+  /* Before a video is loaded the stage is [hidden]; and when the Export step is
+     focused (results shown) the stage collapses. In both cases drop to a single
+     column so the controls / output GIFs span the full width instead of being
+     stranded in the narrow column 2 beside an empty/zero column 1. */
+  #editor:has(#stage[hidden]),
+  #editor:has(#stage.collapsed) { grid-template-columns: 1fr; }
+  #stage.collapsed { grid-column: 1 / -1; }
+  #editor:has(#stage[hidden]) .step-pane,
+  #editor:has(#stage.collapsed) .step-pane { grid-column: 1 / -1; }
+  /* Pre-video the Source pane is the only single-column state; constrain it so
+     the drop card isn't stranded as a very wide/tall panel beside dead space. */
+  #editor:has(#stage[hidden]) .step-pane[data-pane="source"] {
+    max-width: 880px; margin-inline: auto;
+  }
+  /* P2 (round 4) — pre-load the dashed dropzone occupied only the top third of a
+     tall panel. Make it the hero: give it real vertical presence and centre the
+     call-to-action so the empty Source screen looks intentional, not unbalanced. */
+  #editor:has(#stage[hidden]) .step-pane[data-pane="source"] .drop {
+    min-height: 300px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 28px 20px;
+  }
+
+  /* Export: keep the primary CTA (Create GIF / Start over) pinned to the bottom
+     of the pane so it's reachable without hunting below the controls. */
+  .step-pane[data-pane="export"] .action-row {
+    position: sticky;
+    bottom: 0;
+    margin: 16px -20px -20px;
+    padding: 14px 20px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+
+  /* ---- Crop step: pack the controls dense so the whole pane clears 720px ----
+     The default auto-fit grid wraps the two nudge d-pads + Reset + aspect onto
+     several rows; force a tight 2-up grid, shrink the d-pad keys, drop the
+     per-field hints (the labels are self-explanatory at this step) and tighten
+     the field gaps. This brings the Crop pane from ~782px down under the fold. */
+  /* First controls row (Rotate / Flip) stays 2-up; trim its inline 16px bottom
+     margin so the Crop pane (which sat exactly at the 720 fold) clears it. */
+  .step-pane[data-pane="crop"] .controls { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .step-pane[data-pane="crop"] > .controls[style] { margin-bottom: 10px !important; }
+  /* The SECOND controls block (aspect + the two nudge d-pads + Reset) is the
+     tallest part of the pane when it wraps to two rows of ~110px. Re-flow it:
+     Aspect spans the full top row, then the two compact d-pads + the Reset button
+     share the row below. Collapses ~227px → ~140px while keeping every control
+     visible inside the 440px column (the earlier single-row variant pushed Reset
+     past the right edge). */
+  .step-pane[data-pane="crop"] .video-only .controls {
+    grid-template-columns: auto auto 1fr;
+    align-items: end;
+    gap: 10px 14px;
+  }
+  .step-pane[data-pane="crop"] .video-only .controls > .field:first-child { grid-column: 1 / -1; }
+  .step-pane[data-pane="crop"] .video-only .controls .field.action { align-self: center; justify-self: start; min-width: 0; }
+  .step-pane[data-pane="crop"] .video-only .controls .field.action .btn { width: auto; white-space: nowrap; }
+  .step-pane[data-pane="crop"] .field { gap: 4px; }
+  .step-pane[data-pane="crop"] .hint { display: none; }
+  .step-pane[data-pane="crop"] .ndg { width: 26px; height: 26px; }
+  .step-pane[data-pane="crop"] .nudge { gap: 2px; }
+  .step-pane[data-pane="crop"] .nudge-row { gap: 2px; }
+  .step-pane[data-pane="crop"] .checkbox { font-size: .82rem; }
+  /* The oval-mask checkbox carries an inline margin-bottom:14px; trim it (and the
+     other gaps below) so the Crop pane clears the 720px fold with headroom. */
+  .step-pane[data-pane="crop"] .oval-check { margin-bottom: 8px !important; }
+  .step-pane[data-pane="crop"] .field-groups { margin-top: 8px; gap: 12px; }
+  /* The "Keeping WxH → output …" summary is non-essential while fitting; shrink it. */
+  .step-pane[data-pane="crop"] #crop-info { margin-top: 4px; font-size: .78rem; }
+  .step-pane[data-pane="crop"] h2 { margin-bottom: 8px; }
+
+  /* ---- Style step: keep the two 256² tone-curve / histogram canvases side by
+     side (no wrap) and shorter, so the pane fits one screen instead of stacking
+     them into a ~1040px tower in the narrow control column. ---- */
+  .step-pane[data-pane="style"] .curve-row { flex-wrap: nowrap; }
+  .step-pane[data-pane="style"] .curve-col { flex: 1 1 0; min-width: 0; max-width: none; }
+  .step-pane[data-pane="style"] #curve-canvas,
+  .step-pane[data-pane="style"] #hist-out { max-height: 132px; }
+  /* The "How the tone curve & colormaps work" disclosure sat right at the fold;
+     shave its top margin so the Style pane clears 700px. */
+  .step-pane[data-pane="style"] .help-details { margin-top: 8px; }
+  /* Tighten the tone-curve header (label + invert/reverse/log toggles + Reset)
+     so it wraps to fewer rows in the narrow control column. */
+  .step-pane[data-pane="style"] .curve-head { gap: 6px 10px; }
+  .step-pane[data-pane="style"] .curve-toggles { gap: 6px 10px; }
+  /* Input / Colormap / Colour-filter: 2-up grid (a 3-up row squeezes the
+     searchable colormap combobox too narrow, forcing its hint to wrap tall). The
+     per-field hints are dropped here to save the rows' height — the labels are
+     self-explanatory and the workflow is described in the intro line. */
+  .step-pane[data-pane="style"] .controls { grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .step-pane[data-pane="style"] .controls .hint { display: none; }
+  .step-pane[data-pane="style"] h2 { margin-bottom: 6px; }
+  /* The "Applied left → right …" intro paragraph + the tone-curve field's top
+     margin are generous; tighten both to recover vertical room. */
+  .step-pane[data-pane="style"] > p.muted { margin: 0 0 8px; }
+  .step-pane[data-pane="style"] .curve-row { margin-top: 6px; }
+  .step-pane[data-pane="style"] .curve-head { margin-top: 4px; }
+
+  /* P2 (round 4) — the Trim controls panel is short (Set start/end + cut buttons
+     + one paragraph), leaving ~270px of dead height beside the 567px preview.
+     Vertically centre the pane in its grid cell so the controls sit level with
+     the middle of the preview instead of floating at the top of an empty column. */
+  .step-pane[data-pane="trim"] { align-self: stretch; display: flex; flex-direction: column; justify-content: center; }
+}
+
+/* Very wide monitors (e.g. 1920×1080 @100%): raise the editor cap so the
+   recovered horizontal space grows the preview column instead of becoming dead
+   outer margin. The step bar / vibe / about / footer stay centred at --maxw.
+   The controls column is allowed to grow a little too (440 → 520px) so the
+   recovered width feeds BOTH columns rather than only the preview. */
+@media (min-width: 1500px) {
+  .wrap { max-width: min(1760px, 95vw); }
+  .editor { grid-template-columns: minmax(0, 1fr) minmax(380px, 520px); }
+}
+
+/* After encoding, the stage collapses and the page goes single-column; three
+   full-width ~370px result GIFs then sit below the controls and need scrolling.
+   On the short 720px target, cap the result thumbnails and force 3-up so all
+   three variants + their Download buttons review within roughly one screen. */
+@media (min-width: 820px) and (max-height: 760px) {
+  .results-grid { grid-template-columns: repeat(3, 1fr); }
+  .result-card img,
+  .result-card canvas { max-height: 230px; object-fit: contain; }
+
+  /* P0 (round 4) — post-encode Export must fit 720px without scrolling to the
+     Download buttons. The generic `#editor:has(#stage.collapsed){1fr}` rule drops
+     the page to one column, then the export controls row + "Your GIFs" heading +
+     three cards + the #vibe panel stack to ~1125px (a ~405px overflow). Instead,
+     on this short-screen target re-lay the EXPORT pane itself as a two-column
+     grid: the FPS/Quality/Timing controls (+ the sticky Create/Start-over row) in
+     a narrow right column, and the results (the three GIF cards + their Download
+     buttons) filling the wide left column beside them — so everything reviews in
+     one screen height. The collapsed #stage stays display:block (decode <video>
+     rendered) but takes no space. */
+  #editor:has(#stage.collapsed) {
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+    column-gap: 24px;
+  }
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+    grid-template-areas:
+      "head    head"
+      "result  controls"
+      "result  action"
+      "result  status";
+    column-gap: 24px;
+    row-gap: 8px;
+    align-items: start;
+  }
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] > h2 { grid-area: head; }
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] > .controls { grid-area: controls; grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* Its own row under the controls — NOT the same grid cell, which overlapped the
+     Create/Start buttons on top of the FPS field. */
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] > .action-row { grid-area: action; }
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] > .progress,
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] > .status { grid-area: status; }
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] > .result { grid-area: result; }
+  /* The action row was sticky-pinned to the pane bottom for the tall single-column
+     layout; in this side-by-side layout let it sit under the controls so the two
+     columns balance and nothing floats below the fold. */
+  #editor:has(#stage.collapsed) .step-pane[data-pane="export"] .action-row {
+    position: static; margin: 12px 0 0; padding: 0; background: none; border: 0;
+  }
+  /* Results now fill the wide left column: keep 3-up but let the cards use the
+     available width with shorter thumbnails so the block stays under ~560px. */
+  #editor:has(#stage.collapsed) #results-grid { gap: 10px; }
+  #editor:has(#stage.collapsed) .result-card img,
+  #editor:has(#stage.collapsed) .result-card canvas { max-height: 200px; }
+  #editor:has(#stage.collapsed) .result > h2 { margin: 0 0 6px; }
+}
+
+/* Reclaim vertical budget on the 720px target: the topbar + step bar otherwise
+   eat ~145px before any control. Tighten the header band on short screens. */
+@media (max-height: 760px) {
+  /* The .wrap's 80px bottom padding plus the always-rendered "About & license"
+     details, the "100% vibed" callout and the legal footer sit BELOW the editor
+     and pushed total page height ~178px past the 720px fold on every step,
+     guaranteeing a scrollbar even when the editor itself fits. They are
+     secondary chrome (license is still linked from the footer text / About when
+     the screen is tall); hide them while editing on a short screen and shrink
+     the bottom padding so each step truly fits one screen. */
+  .wrap { padding-top: 16px; padding-bottom: 16px; }
+  .steps { margin-bottom: 10px; }
+  .stepbtn { padding: 7px 12px; }
+  details.about,
+  footer.legal { display: none; }
+  /* P1 (round 4) — the "100% vibed / Star on GitHub" promo (#vibe) renders below
+     the editor only after a GIF is generated, and was the tallest contributor
+     pushing the Download buttons past the 720px fold. It's promotional, not part
+     of the flow, so slim it hard on the short target: tight padding, drop the
+     secondary blurb line, and shrink the heading so it adds ~70px instead of
+     ~180px below the results. */
+  /* NB: a bare `display:flex` would override the [hidden] attribute's
+     display:none and make #vibe occupy space on every step (it's only un-hidden
+     after a GIF is generated). Scope the flex layout to the un-hidden state. */
+  .vibe:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px; }
+  .vibe { padding: 8px 16px; margin-top: 8px; }
+  .vibe h2 { font-size: 1rem; margin: 0; }
+  /* Keep only the heading + the star button on the short export screen; the two
+     promo paragraphs are what pushed it past the fold. The full blurb still shows
+     on taller screens. */
+  .vibe p { display: none; }
+  .vibe .btn { margin: 0; }
+}
+
+/* The Style help text is collapsed by default into a small disclosure so the
+   heavy Style pane fits; it reads the same as the old always-on paragraphs. */
+.help-details { margin-top: 12px; }
+.help-details > summary {
+  cursor: pointer; list-style: none;
+  font-size: .8rem; font-weight: 600; color: var(--muted);
+}
+.help-details > summary::-webkit-details-marker { display: none; }
+.help-details > summary::before { content: '▸'; margin-right: 6px; }
+.help-details[open] > summary::before { content: '▾'; }
+.help-details[open] > summary { margin-bottom: 8px; }
+
+/* Constrain the tone-curve / output-histogram canvases so the Style pane is
+   shorter on every layout. */
+#curve-canvas, #hist-out { max-height: 240px; }
+
 /* ---- Responsive (phones / tablets) ---- */
 @media (max-width: 640px) {
   html, body { font-size: 16px; }
@@ -493,22 +819,142 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .wrap { padding: 14px 12px 56px; }
   .panel { padding: 14px; }
   h1 { font-size: 1.5rem; }
-  /* Even 3×2 grid of step buttons instead of an uneven flex-wrap. */
-  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-  .stepbtn { flex: none; padding: 8px 6px; font-size: .78rem; gap: 5px; }
-  .stepbtn b { width: 18px; height: 18px; font-size: .72rem; }
+  /* Even 3×2 grid of step buttons instead of an uneven flex-wrap; compact so the
+     bar eats less of the short screen. */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-bottom: 10px; }
+  .stepbtn { flex: none; padding: 6px 4px; font-size: .72rem; gap: 4px; }
+  .stepbtn b { width: 18px; height: 18px; font-size: .7rem; }
   /* One control per row — verbose labels/inputs no longer overflow on phones. */
   .controls { grid-template-columns: 1fr; gap: 12px; }
-  /* Crop region / Output size groups stack; each keeps its inner 2-up inputs. */
-  .field-groups { grid-template-columns: 1fr; gap: 14px; }
-  #preview-canvas { max-height: 56vh; }
+  /* But pack the densest step-panes two-up so they don't tower under the preview. */
+  .step-pane[data-pane="crop"] .controls,
+  .step-pane[data-pane="style"] .controls { grid-template-columns: 1fr 1fr; gap: 10px; }
+  /* Crop region / Output size groups keep their 2-up inner inputs side by side. */
+  .field-groups { grid-template-columns: 1fr 1fr; gap: 12px; }
+  /* Smaller preview so controls get above the fold on the 720–844px-tall screens. */
+  #preview-canvas { max-height: 42vh; }
   .timecode { font-size: .8rem; }
-  /* Curve + output stack vertically; arrow points down */
+  /* Cap the curve + output histogram height so the Style pane stays short. They
+     stack vertically at this width (arrow points down); the cap is the main
+     height saver. */
   .curve-col { flex-basis: 100%; max-width: none; }
   .curve-arrow { transform: rotate(90deg); }
+  #curve-canvas, #hist-out { max-height: 180px; }
+  /* Two result cards per row with smaller previews — comparable at a glance. */
+  .results-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .result-card { padding: 8px; }
+  .result-card img { max-height: 130px; object-fit: contain; }
   .tl-actions { gap: 6px; }
   .tl-actions .small-btn { flex: 1 1 auto; }
   .tl-sep { display: none; }   /* dividers add nothing once the buttons wrap */
+
+  /* Export step (before encoding): on the single-column phone layout the full
+     preview + transport + timeline stays expanded above the controls, pushing
+     FPS / Quality / Timing / "Create GIF" below the fold (the preview is least
+     useful at the moment you're about to encode). Collapse the stage's visible
+     UI while the Export pane is active so the controls sit near the top. The
+     <video> decode-source is a sibling of #preview-wrap (not inside it) so it
+     stays rendered for iOS extraction; #stage itself is never display:none. */
+  #editor:has(.step-pane[data-pane="export"]:not([hidden])) #stage {
+    padding: 0; margin: 0; border: 0; background: none;
+  }
+  #editor:has(.step-pane[data-pane="export"]:not([hidden])) #preview-wrap,
+  #editor:has(.step-pane[data-pane="export"]:not([hidden])) .transport,
+  #editor:has(.step-pane[data-pane="export"]:not([hidden])) .timeline {
+    display: none;
+  }
+  /* Logo dropzone is over-sized for an optional feature; shrink it so the
+     Position / size / opacity controls sit closer to the fold. */
+  .step-pane[data-pane="logo"] .drop { padding: 16px; }
+  .step-pane[data-pane="logo"] .drop p { margin: 4px 0; }
+  /* Tighten the phone preview cap so controls start higher on every step. */
+  #preview-canvas { max-height: 38vh; }
+  /* Lay the two tone-curve canvases SIDE BY SIDE on phone too (they stacked into
+     a ~360px tower); rotate the arrow back to horizontal and cap shorter. */
+  .step-pane[data-pane="style"] .curve-row { flex-wrap: nowrap; }
+  .step-pane[data-pane="style"] .curve-col { flex: 1 1 0; min-width: 0; max-width: none; }
+  .step-pane[data-pane="style"] .curve-arrow { transform: none; }
+  .step-pane[data-pane="style"] #curve-canvas,
+  .step-pane[data-pane="style"] #hist-out { max-height: 120px; }
+  /* Crop step: two separate nudge d-pads (source-px + GIF-px) are redundant on a
+     phone; keep the source-pixel pad and hide the GIF-pixel one to shorten the
+     pane. Exact numeric entry is still available via the Output-size fields. */
+  .step-pane[data-pane="crop"] .nudge[data-unit="output"] { display: none; }
+  .step-pane[data-pane="crop"] .field:has(.nudge[data-unit="output"]) { display: none; }
+  /* P0 (round 4, iPhone) — the crop pane is the worst overflow; pack it like the
+     desktop reflow so it loses ~80px. The second controls block (Aspect + the
+     kept source-px d-pad + Reset) goes Aspect-full-width-then-row-below; per-field
+     hints drop, the d-pad keys shrink, and the oval-mask / field-group / crop-info
+     gaps tighten. The crop box stays % of #preview-wrap, so alignment is intact. */
+  .step-pane[data-pane="crop"] .video-only .controls {
+    grid-template-columns: auto 1fr; align-items: end; gap: 8px 12px;
+  }
+  .step-pane[data-pane="crop"] .video-only .controls > .field:first-child { grid-column: 1 / -1; }
+  .step-pane[data-pane="crop"] .video-only .controls .field.action { align-self: center; justify-self: start; }
+  .step-pane[data-pane="crop"] .video-only .controls .field.action .btn { width: auto; }
+  .step-pane[data-pane="crop"] .field { gap: 4px; }
+  .step-pane[data-pane="crop"] .hint { display: none; }
+  .step-pane[data-pane="crop"] .ndg { width: 30px; height: 28px; }
+  .step-pane[data-pane="crop"] .nudge { gap: 2px; }
+  .step-pane[data-pane="crop"] .nudge-row { gap: 2px; }
+  .step-pane[data-pane="crop"] .oval-check { margin-bottom: 8px !important; }
+  .step-pane[data-pane="crop"] .field-groups { margin-top: 8px; gap: 10px; }
+  .step-pane[data-pane="crop"] #crop-info { margin-top: 4px; font-size: .76rem; }
+  .step-pane[data-pane="crop"] > .controls[style] { margin-bottom: 10px !important; }
+  /* Once a video is loaded the always-rendered About & license details + legal
+     footer add ~130px below the editor on every step; hide them while editing so
+     the lighter steps approach one-screen (they reappear before a video is
+     chosen / the license stays linked when the tall-screen rules don't hide it). */
+  .wrap:has(#stage:not([hidden])) details.about,
+  .wrap:has(#stage:not([hidden])) footer.legal { display: none; }
+
+  /* P0 (round 4, iPhone) — root cause of every editing step overflowing 844px is
+     the #stage block (preview + transport + timeline) eating ~48% of the viewport
+     ABOVE the controls. Slim the stage chrome so ~150px of controls move above the
+     fold on every step: tighter panel padding, a shorter timeline track, and a
+     smaller transport gap. (The decode <video> is a sibling, untouched.) */
+  #stage { padding: 10px; margin-bottom: 12px; }
+  .transport { margin: 10px 0 8px; }
+  .timeline { padding: 4px 0; }
+  .tl-track { height: 40px; }
+
+  /* Cap the preview HARDER on the heavy editing steps (Crop/Style/Logo) where the
+     controls are dense and the preview is secondary — 32vh frees ~60px over the
+     38vh default. TRIM keeps a larger preview (40vh): there the timeline IS the
+     primary control, so the frame must stay readable while scrubbing. The crop box
+     stays % of #preview-wrap (which hugs the canvas), so alignment is unaffected. */
+  #editor:has(.step-pane[data-pane="crop"]:not([hidden])) #preview-canvas,
+  #editor:has(.step-pane[data-pane="style"]:not([hidden])) #preview-canvas,
+  #editor:has(.step-pane[data-pane="logo"]:not([hidden])) #preview-canvas { max-height: 32vh; }
+  #editor:has(.step-pane[data-pane="trim"]:not([hidden])) #preview-canvas { max-height: 40vh; }
+
+  /* Trim: the 5-line help paragraph + the cut buttons wrap past the fold. Collapse
+     the verbose hint (the buttons + timeline are self-explanatory) and let the
+     action buttons flow tight so they fit one or two short rows. */
+  .step-pane[data-pane="trim"] .video-only > p.muted { display: none; }
+  .tl-actions .small-btn { padding: 7px 10px; font-size: .82rem; }
+
+  /* Logo: place Position + Size side-by-side and tighten field gaps so the Size
+     slider clears the fold with the preview capped at 32vh. */
+  .step-pane[data-pane="logo"] .controls { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .step-pane[data-pane="logo"] .field { gap: 4px; }
+  /* Style: drop the per-field hints on phone too (desktop already does) to shave
+     the rows that pushed the curve canvases below the fold. */
+  .step-pane[data-pane="style"] .controls .hint { display: none; }
+
+  /* Very short phones (landscape / small devices): shrink the step bar a touch
+     more to reclaim ~20px for content. */
+  .stepbtn { padding: 6px 4px; }
+}
+
+/* On short *single-column* screens (phones / narrow laptops, where the preview
+   stacks ABOVE the controls) trim the preview so controls clear the fold. On the
+   wide two-column editor the preview is sticky in its own column and shrinking it
+   doesn't help the control column — there it should fill its column width
+   instead (see the min(56vh,460px) cap in the ≥820px block), so scope this to
+   <820px only. */
+@media (max-height: 760px) and (max-width: 819px) {
+  #preview-canvas { max-height: 44vh; }
 }
 
 /* ---- Bigger hit targets on touch devices ---- */

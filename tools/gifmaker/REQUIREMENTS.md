@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (Export keeps the preview visible until you press Create GIF, then collapses to the output + star ask; star-on-GitHub ask shown only after generating; duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-14 (Round 4 — **post-encode Export now fits one screen at 1280×720 (the round-3 one-screen failure).** After Create GIF the stage collapses; the generic single-column fallback used to stack the export controls + "Your GIFs" + three ~363px cards + the #vibe promo to ~1125px (≈405px below the fold, Download buttons unreachable). Under `@media (min-width:820px) and (max-height:760px)`, the collapsed-stage export pane is now re-laid as its own two-column grid (`grid-template-areas: head / "result controls" / "result status"`): the three GIF cards + Download buttons fill the WIDE LEFT column (cards capped 200px) while FPS/Quality/Timing/Speed/Looping + the Create/Start-over row sit in a narrow right column — measured post-encode scrollHeight === 720 (was 1125), Download buttons at y=557, 0 overflow, 0 console errors. The Export `.action-row` reverts from sticky to static in this side-by-side layout. The **#vibe promo is slimmed on the short export screen** (heading + Star button only, both promo `<p>`s hidden, flex one-row) so it adds ~68px instead of ~161px — guarded `.vibe:not([hidden])` so the `display:flex` never overrides the `[hidden]` attribute and leaks onto other steps. **Symmetric minimal gutters at 1280:** `.wrap{max-width:min(--maxw-editor,96vw)}` so the 1240px cap no longer leaves a one-sided 40px right gutter (now 26px each side). **Trim right column balanced:** the short Trim pane is `display:flex;justify-content:center` so its controls sit level with the preview middle instead of floating atop ~270px of dead column. **Source pre-load dropzone is now the hero** (`min-height:300px`, centred CTA) so the empty first screen looks intentional. **iPhone density pass (≤640px):** stage chrome slimmed (`#stage{padding:10px}`, `.tl-track{height:40px}`, tighter transport) freeing ~150px of controls above the fold; preview capped 32vh on Crop/Style/Logo and 40vh on Trim (where the timeline IS the control); the desktop crop reflow (Aspect full-width then compact source-px d-pad + Reset, hints hidden, tighter field-groups) ported to mobile; verbose Trim hint hidden, Logo Position/Size 2-up, Style hints hidden. Net iPhone scrollHeight: trim 906→844 (fits), logo 1104→887, style 1244→1106, crop 1295→1161 (crop box still pixel-aligned with the canvas). The remaining iPhone overflow on Crop/Style is inherent to the single-column stack (preview above tall controls); the clean fix is a JS "hide preview" toggle reusing `#stage.collapsed`, deferred to keep JS risk-free. 1920×1080 unchanged (wrap 1760, 80px symmetric margins, 0 overflow). Round 3 — true one-screen fit at 1280×720 + much-reduced phone scroll. **Page chrome no longer steals the 720px budget:** under `@media (max-height:760px)` the always-rendered About & license `<details>`, the legal footer and the `.wrap`'s 80px bottom padding (reduced to 16px) are removed while editing — page scrollHeight dropped from a constant 898px (≈178px of forced scroll on every step) to ≤736px (Crop) / 722px (Style) / 720px (the rest). **Crop/Output number inputs no longer clip:** the 3-digit values (480/320) were cut to "4:"/"3:" by the native spinner in the ~50px grid cells; the spinner is now removed (`appearance:textfield` + `::-webkit-*-spin-button{appearance:none}`) with tighter centred padding so the digits show in full. **iPhone (390×844) scroll cut hard on every step** (source 1161→992, trim 1030→906, crop 1568→1295, style 1725→1244 [−481px], logo 1371→1104, **export 1177→844 = exactly one screen**): the two tone-curve canvases now sit side-by-side on phone too (was a ~360px vertical tower), the redundant GIF-pixel nudge pad is hidden on phone (one source-px pad kept), the logo dropzone is shrunk, the phone preview cap is 38vh, and About/footer are hidden once a video is loaded (`.wrap:has(#stage:not([hidden]))`). On the phone single-column Export step the preview stage's visible UI collapses pre-encode (`#editor:has(.step-pane[data-pane="export"]:not([hidden]))`, the `<video>` decode-source stays rendered) so FPS/Quality/Create-GIF sit near the top — desktop keeps the preview visible since its controls are already beside it. **1920×1080 side margins cut ~210px→80px each side:** the editor cap is raised to `min(1760px,95vw)` at ≥1500px and the controls column grows there (440→520px) so the recovered width feeds both columns; preview 690×460, crop box still pixel-aligned. The short-screen results-grid is capped 3-up with 230px thumbnails. Round 2 baseline: One-screen fit at 1280×720: every step (Source/Trim/Crop/Style/Logo/Export) now fits — or is within a few px of — the 720px-tall viewport. Crop overflow went from +419px to ~+8px and Style from +677px to ~+2px by compacting their control columns (see "One-screen density" below); the preview is now HEIGHT-driven on wide screens (`#preview-canvas{height:min(56vh,460px);width:auto}`, wrap `width:fit-content` centred) so it upscales past the source's native pixel width to fill its column — at 1280×720 a 3:2 video renders ~605×403 (was 475×317), and the wrap hugs the canvas so the % crop box stays exactly aligned; the editor cap is raised to 1500px at ≥1500px so the recovered space grows the preview column instead of becoming dead outer margin (1920×1080 side margin ~340→~210px, preview ~690×460); the header band is tightened under `@media (max-height:760px)` (`.wrap` pad-top 16px, smaller step buttons) to reclaim ~25px; the short-screen preview cap (`44vh`) is now scoped to `<820px` so it only applies to the single-column phone/narrow layout. Earlier: Wide-screen two-column editor: at ≥820px the preview stage and the active step's controls sit side by side in a CSS grid (`.editor` wrapping `#stage` + the `.step-pane`s), reclaiming the old empty left/right margins and getting each step's controls beside — not below — the preview so the short steps fit a 1280×720 viewport; page widened to 1240px only here while step bar / vibe / about / footer stay centred at 880px; sticky preview keeps the frame in view while taller controls scroll; Export CTA row pinned sticky to the pane bottom; on Export-focus / before-load the grid drops to one column so results/controls span full width; Style help text collapsed into a `<details>` and curve/histogram canvases capped at 240px; phone density: Crop & Style controls now 2-up, field-groups stay 2-up, results-grid 2-up with 130px previews, compact step bar; preview shrunk so controls clear the fold — Crop/Style phone heights cut ~340/650px. Export keeps the preview visible until you press Create GIF, then collapses to the output + star ask; star-on-GitHub ask shown only after generating; duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
@@ -67,10 +67,162 @@ Style → Logo → Export**. Every step is always clickable (editing isn't linea
 The video **preview is persistent** above the tabs (the `#stage` panel); only the
 control panels switch. (Video-only tool — the images path was removed.)
 
+### Layout (wide-screen two-column editor)
+The preview stage (`#stage`) and the per-step controls (`.step-pane`s) are wrapped
+in an `.editor` (`#editor`) element. By default (and on phones) `.editor` is a plain
+block, so the preview stacks **above** the active controls (the original single
+column). At **≥820px** `.editor` becomes a **CSS grid**: the preview stage in
+**column 1** and the active step's controls in **column 2** (`grid-template-columns:
+minmax(0,1fr) minmax(360px,440px)`). All `.step-pane`s share column 2 / row 1 (only
+one is ever un-hidden), so the controls sit **beside** the preview instead of below
+it — letting the short steps fit a 720px-tall viewport and reclaiming the old empty
+side margins.
+- The page (`.wrap`) widens to `--maxw-editor` (1240px) **at ≥820px** and to **1500px
+  at ≥1500px** (a second `@media` step); the step bar, `#vibe`, `details.about` and the
+  legal footer stay centred at `--maxw` (880px) so they don't look stranded. Raising the
+  cap on big monitors lets the *preview column* grow instead of leaving dead outer
+  margin (1920×1080 side margins drop from ~340px to ~210px).
+- `#stage` is `position:sticky; top:12px` so the frame stays visible while a taller
+  controls column (Style) scrolls.
+- **Preview sizing is HEIGHT-driven on wide screens** so it upscales past the source's
+  native pixel width and fills its (wide) column instead of rendering small and
+  left-aligned with ~220px dead space to its right: `#preview-canvas{height:min(56vh,460px);
+  width:auto;max-width:100%}` (a 3:2 video → ~605×403 at 1280×720, ~690×460 at 1920;
+  `max-width:100%` reins in a portrait video by reducing its height). The wrap is
+  `width:fit-content; margin-inline:auto` so it **hugs the canvas** and centres it —
+  critical because the crop box (`#crop-rect`) is absolutely positioned in **% of the
+  wrap**, so wrap==canvas keeps the box exactly aligned at any size. The canvas backing
+  store is unchanged (`previewSize()`, capped 854px); CSS only scales the displayed size,
+  so upscaling stays crisp. On phones / single-column the preview still stacks above the
+  controls and is capped at `42vh` (and `44vh` under `@media (max-height:760px) and
+  (max-width:819px)` — scoped to <820px because shrinking the *sticky* preview on the
+  wide layout doesn't help the separate control column).
+- **One-screen density (≥820px).** Crop and Style were the only steps overflowing 720px;
+  both are packed denser **only** in the wide block:
+  - *Crop:* `.controls` 2-up, per-field `.hint`s hidden, nudge d-pad keys shrunk to 26px
+    with 2px gaps, the oval-mask label shortened. The second controls block (aspect + the
+    two nudge pads + Reset) is re-flowed as `grid-template-columns:auto auto 1fr` with the
+    aspect select spanning the full top row and the two compact d-pads + the (shortened
+    "Reset crop") button on the row below — collapsing it from ~227px to ~130px. Crop pane
+    overflow: +419 → ~+8px.
+  - *Style:* the Input/Colormap/Colour-filter selects are 2-up with their hints hidden;
+    the two 256² tone-curve / output-histogram canvases are kept **side by side**
+    (`.curve-row{flex-wrap:nowrap}`, `.curve-col{flex:1 1 0;min-width:0}`) and capped at
+    `max-height:144px` (instead of stacking into a ~1040px tower); the intro line, curve
+    header gaps and toggles are tightened. Style pane overflow: +677 → ~+2px.
+- The `.step-pane`s deliberately do **NOT** use `overflow:auto` in the grid — the
+  colormap combobox dropdown (`.combo-list`) is absolutely positioned and would be
+  clipped. Density reductions + the preview cap keep panes within the viewport; only
+  the heaviest step (Style) needs a little page scroll.
+- **Export-focus / before-load fallback:** when `#stage` is `[hidden]` (no video yet)
+  or `.collapsed` (results shown), `#editor:has(...)` drops the grid to a single
+  column and the pane/results span full width (so output GIFs aren't cramped). Uses
+  the CSS `:has()` selector (fine for this modern static page).
+- **Export CTA** ("Create GIF" / "Start over") is wrapped in `.action-row`, pinned
+  `position:sticky; bottom:0` at the bottom of the Export pane on wide screens so the
+  primary action stays reachable.
+- The Style help text moved into a `<details class="help-details">` ("How the tone
+  curve & colormaps work"), and `#curve-canvas`/`#hist-out` are capped at 240px, so
+  the heaviest pane is much shorter.
+- **Page chrome is hidden on short screens (`@media (max-height:760px)`).** The
+  always-rendered About & license `<details>` + legal footer and the `.wrap`'s 80px
+  bottom padding (cut to 16px) sat *below* the editor and forced ~178px of scroll on
+  every step even when the editor itself fit. They are `display:none` on short screens
+  (the license stays linked in the page source / appears on taller screens). This is
+  what makes each step actually fit one 720px screen rather than just *almost* fit.
+- **Crop / Output number inputs no longer clip.** In the narrow ~50px `.fg-grid`
+  cells the native number spinner ate the right edge so 3-digit values (480, 320)
+  showed as "4:" / "3:". `.fg-item input[type=number]` now drops the spinner
+  (`appearance:textfield` + `::-webkit-outer/inner-spin-button{appearance:none}`) and
+  uses tighter, centred padding, so the full digits are readable in the same cell.
+- **1920×1080:** the editor cap is `min(1760px, 95vw)` at ≥1500px (was 1500px) and the
+  controls column grows there too (`minmax(380px,520px)`, was 440px), so the recovered
+  width feeds *both* columns. Side margins drop from ~210px to ~80px each side; the
+  preview is 690×460 and the crop box stays pixel-aligned.
+- **Short-screen results grid (post-encode):** capped 3-up
+  (`@media (min-width:820px) and (max-height:760px)`) with `.result-card img/canvas
+  {max-height:230px}` so all three variants + their Download buttons review within
+  roughly one screen after Create GIF.
+- **Post-encode Export two-column layout (round 4, the round-3 one-screen failure).**
+  After Create GIF, `#stage` gets `.collapsed` and the generic
+  `#editor:has(#stage.collapsed){grid-template-columns:1fr}` fallback dropped the
+  page to one column, stacking the export controls + "Your GIFs" + three ~363px
+  cards + the `#vibe` promo to ~1125px (≈405px past the 720px fold — the Download
+  buttons sat below the fold). Under `@media (min-width:820px) and (max-height:760px)`
+  this is overridden: the editor keeps two columns and the **export pane itself
+  becomes a grid** (`grid-template-areas: "head head" / "result controls" /
+  "result status"`, `grid-template-columns: minmax(0,1fr) minmax(320px,400px)`) so
+  the **three GIF cards + their Download buttons fill the wide LEFT column** (cards
+  capped `max-height:200px`) while FPS/Quality/Timing/Speed/Looping (`.controls`
+  2-up) + the Create/Start-over `.action-row` + the status sit in the narrow right
+  column. The `.action-row` reverts from `position:sticky` to `static` here (no
+  longer pinned, since the two columns balance). Measured post-encode scrollHeight
+  === 720 (was 1125), Download buttons at y≈557, 0 overflow. The collapsed `#stage`
+  stays `display:block` (decode `<video>` rendered) and occupies no space.
+- **#vibe promo slimmed on the short Export screen.** It was the tallest contributor
+  below the editor; on `@media (max-height:760px)` it becomes a single centred flex
+  row (heading + Star button, both promo `<p>`s `display:none`), ~68px instead of
+  ~161px. **Important:** the flex rule is `.vibe:not([hidden])` — a bare
+  `display:flex` on `.vibe` would override the `[hidden]` attribute's `display:none`
+  (`#vibe` is only un-hidden after a GIF is generated) and add ~77px to *every*
+  step. Same `[hidden]`-override gotcha already documented for `.field[hidden]`.
+- **Trim right column balance (round 4).** The Trim controls pane is short (Set
+  start/end + cut buttons + one paragraph); on the wide grid it is
+  `display:flex;flex-direction:column;justify-content:center` so its controls sit
+  level with the middle of the preview instead of floating at the top of an empty
+  column (~270px of dead height beside a 567px preview).
+- **Symmetric gutter at 1280 (round 4).** `.wrap{max-width:min(--maxw-editor,96vw)}`
+  (was a flat `--maxw-editor`=1240). At 1280×720 the wrap is 1229px with **26px
+  symmetric side margins** (was capped at 1240 → a one-sided 40px right gutter);
+  the ≥1500px override (`min(1760px,95vw)`) is unaffected so 1920 still has 80px
+  symmetric margins.
+- **Source pre-load dropzone as hero (round 4).** Before a video is chosen the
+  Source pane's dashed dropzone is `min-height:300px; display:flex; justify-content:
+  center` so the call-to-action fills the panel and the empty first screen looks
+  intentional rather than the dropzone occupying only the top third.
+
 ### Responsive / touch layout
 Optimized for phones (iPhone-first) as well as desktop:
+- **Phones keep the single column** (the `.editor` grid is gated behind
+  `@media (min-width:820px)` only — never applied ≤640px), so the touch layout is not
+  regressed. The densest panes are packed tighter: **Crop & Style `.controls` go
+  2-up** at ≤640px, `.field-groups` stay 2-up, the **results-grid is 2-up** (130px
+  card previews), and the step bar is more compact.
 - `.controls` collapse to **one column at ≤640px** (verbose labels/inputs no
   longer overflow).
+- **Phone one-screen-fit pass (≤640px).** The single-column stack puts the preview
+  above the controls, so the densest steps are shortened: the two tone-curve canvases
+  go **side by side** on phone too (was a ~360px vertical tower; `.curve-row` nowrap +
+  horizontal arrow, capped 120px); the **GIF-pixel nudge pad is hidden** (one
+  source-px pad kept — exact entry still via the Output-size fields); the logo dropzone
+  is shrunk; the preview cap is `38vh`; and the About & license details + legal footer
+  are **hidden once a video is loaded** (`.wrap:has(#stage:not([hidden]))`). On the
+  **Export** step the preview stage's visible UI collapses *before* encoding
+  (`#editor:has(.step-pane[data-pane="export"]:not([hidden]))` → hide `#preview-wrap`/
+  `.transport`/`.timeline`; the `<video>` decode-source is a *sibling* of
+  `#preview-wrap`, never `display:none`, so iOS extraction is unaffected) so FPS /
+  Quality / Create GIF sit near the top. Net phone scrollHeight: source 992 / trim 906
+  / crop 1295 / style 1244 / logo 1104 / **export 844** (was 1161/1030/1568/1725/1371/
+  1177). This collapse-on-export is **CSS-only and scoped to ≤640px**; the wide
+  two-column layout keeps the preview visible since its controls already sit beside it.
+- **iPhone density pass (round 4, ≤640px).** The single-column stack puts the
+  ~450px `#stage` (preview + transport + timeline) above the controls — the root
+  cause of every editing step overflowing 844px. Mitigations: stage chrome slimmed
+  (`#stage{padding:10px;margin-bottom:12px}`, `.tl-track{height:40px}`,
+  `.timeline{padding:4px 0}`, tighter `.transport`), freeing ~150px of controls
+  above the fold; the preview is capped **32vh on Crop/Style/Logo** and **40vh on
+  Trim** (the one step where the timeline IS the primary control) via
+  `#editor:has(.step-pane[data-pane="…"]:not([hidden])) #preview-canvas`; the
+  desktop **crop reflow is ported to mobile** (Aspect spans the row, then the kept
+  source-px d-pad + Reset below, hints hidden, d-pad keys 30×28, tighter
+  field-groups / crop-info) — crop box stays % of `#preview-wrap` so it remains
+  pixel-aligned with the canvas; the verbose Trim help paragraph is hidden and the
+  cut buttons flow tighter; Logo Position/Size go 2-up; Style per-field hints
+  dropped. Net iPhone scrollHeight (small synthetic video): trim 906→**844 (fits)**,
+  logo 1104→887, style 1244→1106, crop 1295→1161, export **844 (fits)**. The
+  residual Crop/Style overflow is inherent to the stacked single column; the clean
+  fix is a JS "hide preview" toggle reusing `#stage.collapsed`, deferred to keep JS
+  risk-free.
 - The crop number fields are **grouped subsections** (`.field-groups`): a titled
   **"Crop region · source px"** block (X/Y/W/H in a 2-up grid with single-letter
   labels) and an **"Output size · output px"** block (W/H). The two groups sit
