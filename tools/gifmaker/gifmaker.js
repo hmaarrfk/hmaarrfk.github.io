@@ -1441,6 +1441,20 @@ const endCropDrag = () => { cropDrag = null; };
 cropRectEl.addEventListener('pointerup', endCropDrag);
 cropRectEl.addEventListener('pointercancel', endCropDrag);
 
+// Tap the image (the area outside the crop box) to move the crop's CENTRE there
+// — easier than dragging on touch. Only while the crop box is editable. Taps on
+// the box/handles are handled by their own listeners (they stop propagation).
+previewWrap.addEventListener('pointerdown', (e) => {
+  if (!crop || roiView()) return;
+  const f = fullDims(), r = previewWrap.getBoundingClientRect();
+  const cx = clamp((e.clientX - r.left) / r.width, 0, 1) * f.w;
+  const cy = clamp((e.clientY - r.top) / r.height, 0, 1) * f.h;
+  crop.x = clamp(cx - crop.w / 2, 0, f.w - crop.w);
+  crop.y = clamp(cy - crop.h / 2, 0, f.h - crop.h);
+  afterCropChange({ keepFinal: false });
+  e.preventDefault();
+});
+
 // ---- Frame extraction --------------------------------------------------
 function seekFor(video, t) {
   return new Promise((resolve, reject) => {
