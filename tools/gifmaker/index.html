@@ -50,7 +50,9 @@
             <span class="ch w"  data-h="w"></span>
           </div>
         </div>
-        <video id="preview" playsinline muted crossorigin="anonymous" style="display:none"></video>
+        <!-- Kept rendered (NOT display:none) so iOS Safari will decode frames we
+             can draw to the canvas; hidden via the .decode-src class. -->
+        <video id="preview" playsinline muted preload="auto" crossorigin="anonymous" class="decode-src"></video>
 
         <div class="transport">
           <button class="tbtn" data-act="toIn" title="Jump to start (Home)" aria-label="Jump to start">

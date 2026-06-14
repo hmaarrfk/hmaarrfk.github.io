@@ -193,6 +193,13 @@ input[type="range"] { width: 100%; }
 .result .meta { color: var(--muted); margin: 12px 0; }
 
 /* ---- Video timeline editor ---- */
+/* The decode source <video>: rendered (so iOS decodes frames for the canvas)
+   but effectively invisible. Must NOT be display:none / visibility:hidden. */
+.decode-src {
+  position: fixed; left: 0; bottom: 0;
+  width: 2px; height: 2px; opacity: 0.01;
+  pointer-events: none; z-index: 0;
+}
 #preview-wrap {
   position: relative;
   display: block;

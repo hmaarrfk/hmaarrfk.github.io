@@ -884,13 +884,20 @@ function loadVideo(file) {
     updateAspectLockUI();
     initCropForVideo();
     renderTimeline();
-    seek(0);
-    setPlayhead();
     showStep('trim');
     refreshReady();
+    // iOS Safari won't draw a video frame to a canvas until the (rendered) video
+    // has actually played once. Prime it (muted playsinline autoplay is allowed),
+    // then snap back to the start and paint the first frame.
+    primeDecode().then(() => { seek(0); setPlayhead(); drawPreview(); });
   };
   preview.onerror = () =>
     setStatus('Could not load that video — your browser may not support its format.', true);
+}
+function primeDecode() {
+  return Promise.resolve(preview.play())
+    .then(() => new Promise((res) => requestAnimationFrame(() => { preview.pause(); res(); })))
+    .catch(() => { try { preview.pause(); } catch {} });
 }
 
 // Preview playback honours crop + cuts: skip over cut sections, stop at the end.
