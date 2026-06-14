@@ -124,12 +124,13 @@ side margins.
 - The Style help text moved into a `<details class="help-details">` ("How the tone
   curve & colormaps work"), and `#curve-canvas`/`#hist-out` are capped at 240px, so
   the heaviest pane is much shorter.
-- **Page chrome is hidden on short screens (`@media (max-height:760px)`).** The
-  always-rendered About & license `<details>` + legal footer and the `.wrap`'s 80px
-  bottom padding (cut to 16px) sat *below* the editor and forced ~178px of scroll on
-  every step even when the editor itself fit. They are `display:none` on short screens
-  (the license stays linked in the page source / appears on taller screens). This is
-  what makes each step actually fit one 720px screen rather than just *almost* fit.
+- **Header band tightened on short screens (`@media (max-height:760px)`)** — the
+  `.wrap`'s top/bottom padding is cut to 16px and the step bar slimmed so the
+  *editor itself* fits a 720px viewport. The About & license `<details>` and legal
+  footer are **kept visible** below the editor (they were briefly `display:none`'d
+  here to force zero page-scroll, but that made the About/license unreachable on
+  short windows); a collapsed About is small, so they're reached with a short
+  scroll and the license stays accessible.
 - **Crop / Output number inputs no longer clip.** In the narrow ~50px `.fg-grid`
   cells the native number spinner ate the right edge so 3-digit values (480, 320)
   showed as "4:" / "3:". `.fg-item input[type=number]` now drops the spinner
