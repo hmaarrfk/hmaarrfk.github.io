@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<!--
+  gifski in the browser — converts videos or image sequences into high-quality
+  animated GIFs. Everything runs locally via WebAssembly; no file ever leaves
+  your machine. This page deliberately carries no Jekyll front matter so its
+  JavaScript is copied verbatim and never processed by Liquid.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gifski — high-quality GIF maker (runs in your browser)</title>
+  <meta name="description" content="Turn videos and image sequences into high-quality animated GIFs entirely in your browser. Powered by gifski compiled to WebAssembly. Nothing is uploaded.">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/tools/assets/tools.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/tools/">&larr; Tools</a>
+    <span class="spacer"></span>
+    <a class="brand" href="/">Mark Harfouche</a>
+  </div>
+
+  <div class="wrap">
+    <h1>gifski &mdash; GIF maker</h1>
+    <p class="lede">
+      Turn a video or a set of images into a high-quality animated GIF.
+      Everything runs locally in your browser through WebAssembly &mdash;
+      your files are never uploaded anywhere.
+    </p>
+
+    <div class="tabs">
+      <div class="tab active" data-mode="video">From a video</div>
+      <div class="tab" data-mode="images">From images</div>
+    </div>
+
+    <!-- VIDEO MODE -->
+    <div class="panel" id="panel-video">
+      <div class="drop" id="drop-video">
+        <input type="file" id="file-video" accept="video/*">
+        <p><strong>Drop a video here</strong> or click to choose</p>
+        <p class="small muted">MP4, WebM, MOV &mdash; anything your browser can play</p>
+      </div>
+
+      <!-- Timeline editor, revealed once a video is loaded -->
+      <div id="editor" style="display:none">
+        <video id="preview" playsinline muted crossorigin="anonymous"></video>
+
+        <div class="transport">
+          <button class="tbtn" data-act="toIn"     title="Jump to start (Home)">&#x23ee;</button>
+          <button class="tbtn" data-act="prevFrame" title="Previous frame (&larr;)">&#x25c0;|</button>
+          <button class="tbtn play" data-act="play" title="Play / pause (Space)">&#x25b6;</button>
+          <button class="tbtn" data-act="nextFrame" title="Next frame (&rarr;)">|&#x25b6;</button>
+          <button class="tbtn" data-act="toOut"    title="Jump to end (End)">&#x23ed;</button>
+          <span class="timecode" id="timecode">0:00.00 / 0:00.00</span>
+        </div>
+
+        <div class="timeline" id="timeline">
+          <div class="tl-track" id="tl-track">
+            <div class="tl-regions" id="tl-regions"></div>
+            <div class="tl-handle in"  id="handle-in"  title="Crop start &mdash; drag"></div>
+            <div class="tl-handle out" id="handle-out" title="Crop end &mdash; drag"></div>
+            <div class="tl-playhead" id="playhead"></div>
+          </div>
+        </div>
+
+        <div class="tl-actions">
+          <button class="btn secondary small-btn" data-act="setIn"  title="Set crop start (I)">Set start &#x21e4;</button>
+          <button class="btn secondary small-btn" data-act="setOut" title="Set crop end (O)">&#x21e5; Set end</button>
+          <span class="tl-sep"></span>
+          <button class="btn secondary small-btn" data-act="cutStart" title="Mark cut start (X)">Mark cut start</button>
+          <button class="btn secondary small-btn" data-act="cutEnd" title="Remove section up to playhead (X)">Remove section &#x2702;</button>
+          <button class="btn secondary small-btn" data-act="clearCuts">Clear cuts</button>
+          <span id="cut-info" class="muted small"></span>
+        </div>
+        <p class="muted small" style="margin:10px 0 0">
+          Click or drag the timeline to scrub. Step <strong>frame&#8209;by&#8209;frame</strong> with the
+          &larr;/&rarr; buttons or arrow keys. Drag the green handles to crop the ends; mark a
+          cut start then &ldquo;Remove section&rdquo; to delete a middle part (or click a red strip to undo it).
+          The GIF is built from the kept (green) parts, played back&#8209;to&#8209;back.
+        </p>
+        <div id="video-info" class="status"></div>
+      </div>
+    </div>
+
+    <!-- IMAGES MODE -->
+    <div class="panel" id="panel-images" style="display:none">
+      <div class="drop" id="drop-images">
+        <input type="file" id="file-images" accept="image/*" multiple>
+        <p><strong>Drop images here</strong> or click to choose</p>
+        <p class="small muted">PNG, JPEG, WebP &mdash; select several; they become the frames in order</p>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="panel">
+      <h2 style="margin-top:0">Settings</h2>
+      <div class="controls">
+        <div class="field" id="field-fps">
+          <label for="fps">Frames per second</label>
+          <input type="number" id="fps" value="15" min="1" max="50" step="1">
+          <span class="hint">Higher = smoother &amp; larger</span>
+        </div>
+        <div class="field">
+          <label for="maxw">Max width (px)</label>
+          <input type="number" id="maxw" value="480" min="16" max="2000" step="16">
+          <span class="hint">Frames scale down to fit; 0 = original</span>
+        </div>
+        <div class="field">
+          <label for="quality">Quality: <span id="quality-val">80</span></label>
+          <input type="range" id="quality" value="80" min="1" max="100" step="1">
+          <span class="hint">gifski quality (1&ndash;100)</span>
+        </div>
+        <div class="field">
+          <label for="speed">Speed</label>
+          <select id="speed">
+            <option value="0.25">0.25&times; (slow-mo)</option>
+            <option value="0.5">0.5&times;</option>
+            <option value="1" selected>1&times; (normal)</option>
+            <option value="1.5">1.5&times;</option>
+            <option value="2">2&times;</option>
+            <option value="3">3&times;</option>
+            <option value="4">4&times; (fast)</option>
+          </select>
+          <span class="hint">plays the GIF faster/slower</span>
+        </div>
+        <div class="field">
+          <label for="rotate">Rotate</label>
+          <select id="rotate">
+            <option value="0" selected>None</option>
+            <option value="90">90&deg; clockwise</option>
+            <option value="180">180&deg;</option>
+            <option value="270">270&deg; (90&deg; ccw)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="flip">Flip</label>
+          <select id="flip">
+            <option value="none" selected>None</option>
+            <option value="h">Horizontal (mirror)</option>
+            <option value="v">Vertical</option>
+            <option value="hv">Both</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="filter">Color filter</label>
+          <select id="filter">
+            <option value="none" selected>None</option>
+            <option value="grayscale">Grayscale</option>
+            <option value="sepia">Sepia</option>
+            <option value="invert">Invert</option>
+            <option value="contrast">High contrast</option>
+            <option value="warm">Warm</option>
+            <option value="cool">Cool</option>
+            <option value="vintage">Vintage</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="loop">Looping</label>
+          <select id="loop">
+            <option value="-1" selected>Loop forever</option>
+            <option value="0">Play once</option>
+            <option value="3">Repeat 3&times;</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:20px; display:flex; gap:12px; flex-wrap:wrap;">
+        <button class="btn" id="encode-btn" disabled>Create GIF</button>
+        <button class="btn secondary" id="reset-btn">Reset</button>
+      </div>
+
+      <div class="progress" id="progress"><div></div></div>
+      <div class="status" id="status"></div>
+    </div>
+
+    <!-- RESULT -->
+    <div class="panel result" id="result">
+      <h2 style="margin-top:0">Your GIF</h2>
+      <img id="result-img" alt="resulting GIF">
+      <div class="meta" id="result-meta"></div>
+      <a class="btn good" id="download-btn" download="output.gif">Download GIF</a>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin-top:0">About &amp; license</h2>
+      <p class="muted small" style="margin-top:0">
+        Everything here runs locally in your browser through
+        <a href="https://developer.mozilla.org/en-US/docs/WebAssembly" target="_blank" rel="noopener">WebAssembly</a>.
+        Your video and images are never uploaded &mdash; no server ever sees them.
+      </p>
+      <p class="muted small">
+        The GIF encoder is <a href="https://github.com/ImageOptim/gifski" target="_blank" rel="noopener">gifski</a>
+        by Kornel Lesi&nbsp;ński, compiled to WebAssembly via
+        <a href="https://github.com/jamsinclair/gifski-wasm" target="_blank" rel="noopener">gifski-wasm</a>
+        and bundled directly with this page.
+      </p>
+      <p class="muted small">
+        <strong>License:</strong> gifski and gifski-wasm are licensed under the
+        <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU Affero General Public License v3.0 (AGPL-3.0)</a>.
+        Because this page distributes the gifski WebAssembly binary to you over a network, the AGPL requires that the
+        corresponding source remain available to you. The bundled copy of the license is
+        <a href="vendor/LICENSE" target="_blank" rel="noopener">included here</a>, the encoder source is at the
+        gifski and gifski-wasm repositories linked above, and the full source of this page is on
+        <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/gifski" target="_blank" rel="noopener">GitHub</a>.
+      </p>
+    </div>
+
+    <footer class="legal">
+      gifski &amp; gifski-wasm &mdash; AGPL-3.0. This page &mdash;
+      <a href="https://github.com/hmaarrfk/hmaarrfk.github.io" target="_blank" rel="noopener">source on GitHub</a>.
+      No data is transmitted; all encoding happens on your device.
+    </footer>
+  </div>
+
+  <!-- Hidden canvas used for drawing frames during extraction -->
+  <canvas id="scratch-canvas" style="display:none"></canvas>
+
+  <script type="module" src="/tools/gifski/gifski.js"></script>
+</body>
+</html>

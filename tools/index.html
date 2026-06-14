@@ -1,0 +1,56 @@
+---
+title: Tools
+layout: default
+---
+
+<p>
+  Small, self-contained utilities that run entirely in your browser.
+  Nothing is uploaded &mdash; the heavy lifting happens locally via
+  <a href="https://developer.mozilla.org/en-US/docs/WebAssembly">WebAssembly</a>,
+  so your files never leave your machine.
+</p>
+
+<style>
+  .tool-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 20px;
+    margin: 30px 0 60px;
+  }
+  .tool-card {
+    display: block;
+    padding: 22px;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px;
+    background: rgba(255,255,255,.03);
+    color: inherit;
+    transition: transform .12s, border-color .12s;
+  }
+  .tool-card:hover {
+    text-decoration: none;
+    transform: translateY(-3px);
+    border-color: #375a7f;
+  }
+  .tool-card h3 { margin: 0 0 8px; }
+  .tool-card p { margin: 0; opacity: .8; }
+  .tool-card .tag {
+    display: inline-block;
+    font-size: .72rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    background: #375a7f;
+    color: #fff;
+    border-radius: 4px;
+    padding: 2px 7px;
+    margin-bottom: 12px;
+  }
+</style>
+
+<div class="tool-grid">
+  <a class="tool-card" href="{{ '/tools/gifski/' | prepend: site.baseurl }}">
+    <span class="tag">WebAssembly</span>
+    <h3>gifski &mdash; GIF maker</h3>
+    <p>Turn a video or a stack of images into a high-quality animated GIF, all in your browser.</p>
+  </a>
+  <!-- Add more tools here as cards. Each tool lives in its own folder under /tools/. -->
+</div>
