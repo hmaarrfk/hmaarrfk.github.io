@@ -21,16 +21,11 @@ const stepPanes   = document.querySelectorAll('.step-pane');
 const stage       = $('stage');
 
 const fileVideo   = $('file-video');
-const fileImages  = $('file-images');
-const dropAny     = $('drop-any');
-const pickVideo   = $('pick-video');
-const pickImages  = $('pick-images');
+const dropVideo   = $('drop-video');
 const preview     = $('preview');
 const videoInfo   = $('video-info');
-const thumbs      = $('thumbs');
 
 const fpsInput    = $('fps');
-const maxwInput   = $('maxw');
 const qualityIn   = $('quality');
 const qualityVal  = $('quality-val');
 const speedSel    = $('speed');
@@ -94,7 +89,6 @@ const cropXIn = $('crop-x'), cropYIn = $('crop-y'), cropWIn = $('crop-w'), cropH
 const finalWIn = $('final-w'), finalHIn = $('final-h');
 const cropReset = $('crop-reset');
 const cropInfo  = $('crop-info');
-const fieldMaxw = $('field-maxw');
 
 // Offscreen canvas used to render the full transformed frame before cropping.
 const fullCanvas = document.createElement('canvas');
@@ -115,9 +109,7 @@ const PLAY_SVG  = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l
 const PAUSE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z"/></svg>';
 
 // ---- State -------------------------------------------------------------
-let mode = 'video';          // 'video' | 'images'
 let videoFile = null;        // File
-let imageBitmaps = [];       // { bitmap, name }
 let lastObjectUrl = null;    // result blob URL, revoked on reset
 
 // Base encode (speed 1×, infinite loop) kept so speed/loop become instant
@@ -222,12 +214,6 @@ function fmtTime(t) {
 function captureFps() { return Math.max(1, parseInt(fpsInput.value, 10) || 15); }
 function frameStep() { return 1 / captureFps(); }
 
-function fitSize(srcW, srcH) {
-  const cap = parseInt(maxwInput.value, 10) || 0;
-  if (!cap || srcW <= cap) return { w: srcW, h: srcH };
-  const scale = cap / srcW;
-  return { w: Math.round(srcW * scale), h: Math.max(1, Math.round(srcH * scale)) };
-}
 function outputDims(fitW, fitH, rotation) {
   return (rotation === 90 || rotation === 270) ? { w: fitH, h: fitW } : { w: fitW, h: fitH };
 }
@@ -351,7 +337,7 @@ function applyAspectToCrop() {
   roundCrop();
 }
 function defaultFinalFromCrop() {
-  const cap = parseInt(maxwInput.value, 10) || 480;
+  const cap = 480;
   finalW = Math.min(crop.w, cap > 0 ? cap : crop.w);
   finalH = Math.max(1, Math.round(finalW * crop.h / crop.w));
 }
@@ -404,9 +390,7 @@ function afterCropChange({ keepFinal = true } = {}) {
   if (stylePane && !stylePane.hidden) drawPreview();
 }
 function refreshReady() {
-  const ready = (mode === 'video' && videoFile) ||
-                (mode === 'images' && imageBitmaps.length >= 2);
-  encodeBtn.disabled = !ready;
+  encodeBtn.disabled = !videoFile;
 }
 function paint(g, source, contentW, contentH, outW, outH, rotation, flip, filterStr) {
   g.save();
@@ -843,16 +827,8 @@ function showStep(name) {
 }
 stepBtns.forEach((b) => b.addEventListener('click', () => showStep(b.dataset.step)));
 
-// ---- Source mode (auto-detected from the files) ------------------------
-function applyMode() {
-  const isVideo = mode === 'video';
-  document.querySelectorAll('.video-only').forEach((e) => { e.hidden = !isVideo; });
-  document.querySelectorAll('.images-only').forEach((e) => { e.hidden = isVideo; });
-  refreshReady();
-}
-
 // ---- Drag & drop wiring ------------------------------------------------
-// Click-to-open dropzone (used for the optional logo).
+// Click-to-open dropzone (source video + the optional logo).
 function wireDrop(zone, input, onFiles) {
   zone.addEventListener('click', () => input.click());
   input.addEventListener('change', () => onFiles([...input.files]));
@@ -862,30 +838,10 @@ function wireDrop(zone, input, onFiles) {
     zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove('over'); }));
   zone.addEventListener('drop', (e) => onFiles([...e.dataTransfer.files]));
 }
-// Drop-only zone (no click-to-open) for the source.
-function wireDropZone(zone, onFiles) {
-  ['dragenter', 'dragover'].forEach((ev) =>
-    zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add('over'); }));
-  ['dragleave', 'drop'].forEach((ev) =>
-    zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove('over'); }));
-  zone.addEventListener('drop', (e) => onFiles([...e.dataTransfer.files]));
-}
-
-// The source is auto-detected: videos win if present, otherwise images.
-function acceptSource(files) {
-  const vids = files.filter((f) => f.type.startsWith('video/'));
-  const imgs = files.filter((f) => f.type.startsWith('image/'));
-  if (vids.length) loadVideo(vids[0]);
-  else if (imgs.length) loadImages(imgs);
-  else setStatus('Unsupported file — please drop a video or images.', true);
-}
-wireDropZone(dropAny, acceptSource);
-pickVideo.addEventListener('click', () => fileVideo.click());
-pickImages.addEventListener('click', () => fileImages.click());
-fileVideo.addEventListener('change', () => { if (fileVideo.files[0]) loadVideo(fileVideo.files[0]); });
-fileImages.addEventListener('change', () => {
-  const imgs = [...fileImages.files].filter((f) => f.type.startsWith('image/'));
-  if (imgs.length) loadImages(imgs);
+wireDrop(dropVideo, fileVideo, (files) => {
+  const f = files.find((x) => x.type.startsWith('video/')) || files[0];
+  if (f) loadVideo(f);
+  else setStatus('Unsupported file — please choose a video.', true);
 });
 wireDrop(dropLogo, fileLogo, (files) => {
   const f = files.find((x) => x.type.startsWith('image/')) || files[0];
@@ -909,7 +865,6 @@ async function loadLogo(file) {
 
 // ---- Video input -------------------------------------------------------
 function loadVideo(file) {
-  mode = 'video';
   markStale();
   videoFile = file;
   if (preview.src) URL.revokeObjectURL(preview.src);
@@ -931,7 +886,6 @@ function loadVideo(file) {
     renderTimeline();
     seek(0);
     setPlayhead();
-    applyMode();
     showStep('trim');
     refreshReady();
   };
@@ -1209,47 +1163,8 @@ logoClear.addEventListener('click', () => { clearLogo(); markStale(); drawPrevie
 
 // Anything that changes the actual frames invalidates the base GIF (forces a
 // re-encode); timing & loop do not (they patch metadata instantly).
-[fpsInput, maxwInput, qualityIn, rotateSel, flipSel, filterSel].forEach(
+[fpsInput, qualityIn, rotateSel, flipSel, filterSel].forEach(
   (el) => el.addEventListener('change', markStale));
-
-// ---- Image input -------------------------------------------------------
-async function loadImages(files) {
-  mode = 'images';
-  markStale();
-  files.sort((a, b) =>
-    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-  setStatus('Decoding images…');
-  for (const f of files) {
-    try {
-      imageBitmaps.push({ bitmap: await createImageBitmap(f), name: f.name });
-    } catch { setStatus(`Could not decode ${f.name}`, true); }
-  }
-  setStatus('');
-  renderThumbs();
-  stage.hidden = false;
-  applyMode();
-  showStep('crop');
-  refreshReady();
-}
-function renderThumbs() {
-  thumbs.innerHTML = '';
-  imageBitmaps.forEach((item, i) => {
-    const el = document.createElement('div');
-    el.className = 'thumb';
-    const c = document.createElement('canvas');
-    c.width = 78; c.height = 78;
-    const g = c.getContext('2d');
-    const { width: bw, height: bh } = item.bitmap;
-    const s = Math.max(78 / bw, 78 / bh);
-    g.drawImage(item.bitmap, (78 - bw * s) / 2, (78 - bh * s) / 2, bw * s, bh * s);
-    const img = document.createElement('img'); img.src = c.toDataURL();
-    const rm = document.createElement('button');
-    rm.textContent = '×'; rm.title = 'remove';
-    rm.onclick = () => { imageBitmaps.splice(i, 1); renderThumbs(); refreshReady(); };
-    el.append(img, rm);
-    thumbs.appendChild(el);
-  });
-}
 
 // ---- Transport + timeline interaction ----------------------------------
 document.querySelectorAll('.transport .tbtn').forEach((b) =>
@@ -1282,7 +1197,7 @@ function transport(act) {
 
 // Keyboard shortcuts while editing a video
 document.addEventListener('keydown', (e) => {
-  if (mode !== 'video' || !videoFile) return;
+  if (!videoFile) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
   const map = {
@@ -1542,23 +1457,6 @@ async function framesFromVideo(fps, tf) {
   }
 }
 
-function framesFromImages(tf) {
-  const first = imageBitmaps[0].bitmap;
-  const fit = fitSize(first.width, first.height);
-  const out = outputDims(fit.w, fit.h, tf.rotation);
-  scratchCanvas.width = out.w; scratchCanvas.height = out.h;
-  const g = scratchCanvas.getContext('2d', { willReadFrequently: true });
-
-  const frames = [];
-  imageBitmaps.forEach((item, i) => {
-    const b = item.bitmap;
-    const s = Math.min(fit.w / b.width, fit.h / b.height);
-    paint(g, b, b.width * s, b.height * s, out.w, out.h, tf.rotation, tf.flip, tf.filterStr);
-    frames.push(finishFrame(g, out.w, out.h));
-    setProgress((i + 1) / imageBitmaps.length * 0.6);
-  });
-  return { frames, w: out.w, h: out.h };
-}
 
 // ---- Encode ------------------------------------------------------------
 async function runEncode(frames, w, h, durationMs, repeat) {
@@ -1641,7 +1539,7 @@ function showResult(bytes) {
   lastObjectUrl = URL.createObjectURL(blob);
   resultImg.src = lastObjectUrl;
   downloadBtn.href = lastObjectUrl;
-  downloadBtn.download = (mode === 'video' && videoFile
+  downloadBtn.download = (videoFile
     ? videoFile.name.replace(/\.[^.]+$/, '') : 'animation') + '.gif';
   const delayCs = Math.round(currentDelayCs());
   const fps = 100 / delayCs, total = baseInfo.frames * delayCs / 100;
@@ -1687,8 +1585,7 @@ encodeBtn.addEventListener('click', async () => {
     const fps = captureFps();
     const tf = readTransform();
 
-    const { frames, w, h } =
-      mode === 'video' ? await framesFromVideo(fps, tf) : framesFromImages(tf);
+    const { frames, w, h } = await framesFromVideo(fps, tf);
 
     setStatus(`Encoding ${frames.length} frames with gifski…`);
     setProgress(0.7);
@@ -1738,9 +1635,9 @@ updateTimingFields();
 qualityIn.addEventListener('input', () => { qualityVal.textContent = qualityIn.value; });
 
 resetBtn.addEventListener('click', () => {
-  videoFile = null; imageBitmaps = []; thumbs.innerHTML = '';
+  videoFile = null;
   videoInfo.textContent = '';
-  fileVideo.value = ''; fileImages.value = '';
+  fileVideo.value = '';
   stopPreviewLoop(); extracting = false;
   previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
   if (preview.src) { URL.revokeObjectURL(preview.src); preview.removeAttribute('src'); preview.load(); }
@@ -1759,7 +1656,6 @@ resetBtn.addEventListener('click', () => {
   refreshReady();
 });
 
-applyMode();
 showStep('source');
 refreshReady();
 

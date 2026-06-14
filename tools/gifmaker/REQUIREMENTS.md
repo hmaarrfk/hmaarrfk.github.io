@@ -3,11 +3,11 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (responsive/touch: phone layout, coalesced timeline scrub, double-tap curve-point removal, bigger touch targets)._
+_Last updated: 2026-06-14 (removed the images path — video-only tool)._
 
 ## Purpose
 
-Turn a **video** or a **sequence of images** into a high-quality animated GIF,
+Turn a **video** into a high-quality animated GIF,
 **entirely client-side**. It is the first of a planned family of small static
 WebAssembly tools under `/tools/`.
 
@@ -65,17 +65,11 @@ Pinned upstream: **`gifski-wasm@2.2.0`** (single-thread default export).
 The UI is organised as a non-linear step bar: **Source → Trim → Crop & size →
 Style → Logo → Export**. Every step is always clickable (editing isn't linear).
 The video **preview is persistent** above the tabs (the `#stage` panel); only the
-control panels switch. Panes contain `.video-only` / `.images-only` blocks that
-`applyMode()` toggles based on the detected source.
+control panels switch. (Video-only tool — the images path was removed.)
 
-### Inputs
-- **Auto-detected source**: one drop zone (`#drop-any`, no click-to-open) accepts
-  a video *or* images and picks the mode automatically (video wins if present).
-  Two explicit buttons ("Choose a video…", "Choose images…") open the matching
-  file picker. Mode is set by what loads, not a manual toggle.
-- **Video**: any format the browser can play. **Images**: many images, natural-
-  sorted by filename; each becomes a frame; per-frame remove; first image's
-  (capped) size sets the canvas, others contain-fit (letterboxed on black).
+### Input
+- A single **video** (drag/drop or click the dropzone). Any format the browser
+  can play. (Adding individual images was removed.)
 
 ### Video timeline editor (video mode)
 - **WYSIWYG canvas preview**: the visible preview is a `<canvas>` rendered
@@ -130,7 +124,6 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   (4:3↔3:4, 3:2↔2:3, 16:9↔9:16).
 - Extraction is two-step: render the full transformed frame just large enough
   that the crop ≥ final size, then crop + scale to the exact final size.
-- Images mode has no spatial crop — just **Max width** (px); `0` = original.
 
 ### Style step (order = how it's applied: input → colormap → filter)
 - **Input**: "Full colour (RGB)" (default — keeps colours, colormap disabled) or a

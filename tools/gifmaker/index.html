@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  gifski in the browser — converts videos or image sequences into high-quality
+  gifski in the browser — converts a video into a high-quality
   animated GIFs. Everything runs locally via WebAssembly; no file ever leaves
   your machine. This page deliberately carries no Jekyll front matter so its
   JavaScript is copied verbatim and never processed by Liquid.
@@ -10,7 +10,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GIF Maker — high-quality GIFs in your browser</title>
-  <meta name="description" content="Turn videos and image sequences into high-quality animated GIFs entirely in your browser. Powered by gifski compiled to WebAssembly. Nothing is uploaded.">
+  <meta name="description" content="Turn a video into a high-quality animated GIF entirely in your browser. Powered by gifski compiled to WebAssembly. Nothing is uploaded.">
   <link rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/tools/assets/tools.css">
 </head>
@@ -81,30 +81,20 @@
           </div>
         </div>
       </div>
-      <div class="images-only" hidden>
-        <div class="thumbs" id="thumbs"></div>
-        <p class="muted small">Frames play in this order (sorted by filename).</p>
-      </div>
     </div>
 
     <!-- STEP 1 · SOURCE -->
     <section class="panel step-pane" data-pane="source">
-      <h2 style="margin-top:0">1 &middot; Add your source</h2>
-      <div class="drop noclick" id="drop-any">
-        <p><strong>Drag &amp; drop a video or images here</strong></p>
-        <p class="small muted">Videos (MP4, WebM, MOV) or images (PNG, JPEG, WebP) &mdash; the type is detected automatically.</p>
+      <h2 style="margin-top:0">1 &middot; Add your video</h2>
+      <div class="drop" id="drop-video">
+        <input type="file" id="file-video" accept="video/*">
+        <p><strong>Drop a video here</strong> or click to choose</p>
+        <p class="small muted">MP4, WebM, MOV &mdash; anything your browser can play.</p>
         <p class="small muted" style="margin-bottom:0">
-          Turn them into a high-quality animated GIF, entirely in your browser via WebAssembly.
-          Your files are never uploaded anywhere.
+          Turn it into a high-quality animated GIF, entirely in your browser via WebAssembly.
+          Your video is never uploaded anywhere.
         </p>
       </div>
-      <p class="muted small" style="margin:14px 0 8px">&hellip;or pick files yourself:</p>
-      <div class="source-pick">
-        <button type="button" class="btn secondary" id="pick-video">Choose a video&hellip;</button>
-        <button type="button" class="btn secondary" id="pick-images">Choose images&hellip;</button>
-      </div>
-      <input type="file" id="file-video" accept="video/*" hidden>
-      <input type="file" id="file-images" accept="image/*" multiple hidden>
       <div id="video-info" class="status"></div>
     </section>
 
@@ -128,7 +118,6 @@
           The GIF is built from the kept (green) parts, played back&#8209;to&#8209;back.
         </p>
       </div>
-      <p class="images-only muted" hidden>Trimming applies to videos. Image frames come from your selection in step&nbsp;1.</p>
     </section>
 
     <!-- STEP 3 · CROP & SIZE -->
@@ -211,13 +200,6 @@
           <div class="field"><label for="final-h">Final height &middot; output px</label><input type="number" id="final-h" min="1" step="1"></div>
         </div>
         <p class="muted small" id="crop-info" style="margin:10px 0 0"></p>
-      </div>
-      <div class="images-only controls" hidden>
-        <div class="field" id="field-maxw">
-          <label for="maxw">Max width (px)</label>
-          <input type="number" id="maxw" value="480" min="16" max="2000" step="16">
-          <span class="hint">Frames scale down to fit; 0 = original</span>
-        </div>
       </div>
     </section>
 
@@ -431,7 +413,7 @@
       <p class="muted small" style="margin-top:0">
         Everything here runs locally in your browser through
         <a href="https://developer.mozilla.org/en-US/docs/WebAssembly" target="_blank" rel="noopener">WebAssembly</a>.
-        Your video and images are never uploaded &mdash; no server ever sees them.
+        Your video is never uploaded &mdash; no server ever sees them.
       </p>
       <p class="muted small">
         The GIF encoder is <a href="https://github.com/ImageOptim/gifski" target="_blank" rel="noopener">gifski</a>
