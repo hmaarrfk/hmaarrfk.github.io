@@ -3,7 +3,7 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-13 (tone-curve editor + histograms; speed/duration/loop as instant metadata patches; two-unit crop nudges; render-time preview)._
+_Last updated: 2026-06-14 (responsive/touch: phone layout, coalesced timeline scrub, double-tap curve-point removal, bigger touch targets)._
 
 ## Purpose
 
@@ -92,7 +92,10 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   you're styling/exporting; you see the actual framed output.
 - **Transport**: jump-to-in, prev frame, play/pause, next frame, jump-to-out,
   plus a timecode readout (`m:ss.xx / m:ss.xx · frame N`).
-- **Scrubbable timeline track**: click or drag to move the playhead.
+- **Scrubbable timeline track**: click or drag to move the playhead. Seeks are
+  **coalesced** (only one in flight; latest finger position flushed on `seeked`)
+  so touch scrubbing isn't laggy. `touch-action: none` + pointer capture make the
+  drag work on touch.
 - **Crop** via two draggable green **in/out handles** (or Set start / Set end
   buttons at the playhead).
 - **Frame-by-frame** stepping (buttons + ← / → keys); step = `1 / fps`.
@@ -142,7 +145,7 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
 - **Rotate** (0/90/180/270) and **Flip** live in the **Crop & size** step
   (geometry), not here.
 - **Tone curve (contrast)** — a GIMP-style curves editor on a `<canvas>`:
-  draggable control points (click line to add, double-click to remove) define a
+  draggable control points (click/tap line to add, double-tap/double-click to remove) define a
   256-entry LUT via a **smooth monotonic cubic** (Fritsch–Carlson) interpolation.
   The **end points move horizontally** too, so dragging them inward clips
   blacks/whites to *increase* contrast (not just decrease it). The histograms are

@@ -136,6 +136,7 @@ let cuts = [];               // [{start, end}] interior sections to drop, sorted
 let pendingCutStart = null;  // armed by "Mark cut start"
 let previewRaf = null;       // rAF handle for the live preview loop
 let extracting = false;      // true while pulling frames, to skip preview draws
+let pendingSeek = null;      // latest scrub target while a seek is in flight
 
 // Spatial crop. `crop` is in DISPLAYED (post-rotation/flip) source pixels; the
 // output is that region scaled to (finalW × finalH).
@@ -947,7 +948,10 @@ preview.addEventListener('timeupdate', () => {
     if (t >= c.start && t < c.end) { seek(c.end); break; }
   }
 });
-preview.addEventListener('seeked', () => { setPlayhead(); drawPreview(); });
+preview.addEventListener('seeked', () => {
+  setPlayhead(); drawPreview();
+  if (pendingSeek != null && !extracting) { const t = pendingSeek; pendingSeek = null; seek(t); }
+});
 preview.addEventListener('loadeddata', drawPreview);
 preview.addEventListener('play',  () => { playBtn().innerHTML = PAUSE_SVG; if (!previewRaf) previewLoop(); });
 preview.addEventListener('pause', () => { playBtn().innerHTML = PLAY_SVG; stopPreviewLoop(); drawPreview(); });
@@ -1139,14 +1143,25 @@ function evToVal(e) {
 }
 function nearestPoint(v) {
   const r = curveCanvas.getBoundingClientRect();
-  const thx = 14 / r.width * 255, thy = 14 / r.height * 255;
+  const px = matchMedia('(pointer: coarse)').matches ? 22 : 14;   // bigger grab radius for touch
+  const thx = px / r.width * 255, thy = px / r.height * 255;
   for (let i = 0; i < curvePoints.length; i++)
     if (Math.abs(curvePoints[i].x - v.x) <= thx && Math.abs(curvePoints[i].y - v.y) <= thy) return i;
   return -1;
 }
+let lastTapT = 0, lastTapIdx = -1;
 curveCanvas.addEventListener('pointerdown', (e) => {
   const v = evToVal(e);
   let i = nearestPoint(v);
+  // Manual double-tap / double-click detection (dblclick is unreliable on touch):
+  // a second tap on the same interior point within 350 ms removes it.
+  if (i > 0 && i < curvePoints.length - 1 && i === lastTapIdx && (e.timeStamp - lastTapT) < 350) {
+    curvePoints.splice(i, 1);
+    lastTapIdx = -1; lastTapT = 0; curveDrag = -1;
+    e.preventDefault(); onCurveEdit();
+    return;
+  }
+  lastTapT = e.timeStamp; lastTapIdx = i;
   if (i < 0) { curvePoints.push({ x: v.x, y: v.y }); curvePoints.sort((a, b) => a.x - b.x); i = curvePoints.indexOf(curvePoints.find((p) => p.x === v.x && p.y === v.y)); }
   curveDrag = i;
   try { curveCanvas.setPointerCapture(e.pointerId); } catch {}
@@ -1166,10 +1181,6 @@ curveCanvas.addEventListener('pointermove', (e) => {
 const endCurveDrag = () => { curveDrag = -1; };
 curveCanvas.addEventListener('pointerup', endCurveDrag);
 curveCanvas.addEventListener('pointercancel', endCurveDrag);
-curveCanvas.addEventListener('dblclick', (e) => {
-  const i = nearestPoint(evToVal(e));
-  if (i > 0 && i < curvePoints.length - 1) { curvePoints.splice(i, 1); onCurveEdit(); }
-});
 histLog.addEventListener('change', refreshCurveUI);
 invertInput.addEventListener('change', onCurveEdit);              // changes the value LUT
 reverseCmap.addEventListener('change', () => { markStale(); drawPreview(); refreshCurveUI(); }); // colormap only
@@ -1290,11 +1301,18 @@ function tFromEvent(e) {
   return clamp((e.clientX - r.left) / r.width, 0, 1) * duration;
 }
 let dragging = null; // 'in' | 'out' | 'scrub'
+// Coalesce seeks while scrubbing: video seeking is slow (esp. on mobile), so
+// only issue a new seek once the previous one finishes, always to the latest
+// finger position (flushed in the 'seeked' handler above).
+function requestSeek(t) {
+  if (preview.seeking) pendingSeek = t;
+  else seek(t);
+}
 function startDrag(kind, e) {
   if (!duration) return;
   dragging = kind;
   try { tlTrack.setPointerCapture(e.pointerId); } catch {}
-  if (kind === 'scrub') { preview.pause(); seek(tFromEvent(e)); }
+  if (kind === 'scrub') { preview.pause(); requestSeek(tFromEvent(e)); }
   e.preventDefault();
 }
 handleIn.addEventListener('pointerdown',  (e) => { e.stopPropagation(); startDrag('in', e); });
@@ -1306,9 +1324,9 @@ tlTrack.addEventListener('pointerdown', (e) => {
 tlTrack.addEventListener('pointermove', (e) => {
   if (!dragging) return;
   const t = tFromEvent(e);
-  if (dragging === 'in')  { cropStart = clamp(t, 0, cropEnd - frameStep()); renderTimeline(); seek(cropStart); }
-  else if (dragging === 'out') { cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); seek(cropEnd); }
-  else { seek(t); }
+  if (dragging === 'in')  { cropStart = clamp(t, 0, cropEnd - frameStep()); renderTimeline(); requestSeek(cropStart); }
+  else if (dragging === 'out') { cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); requestSeek(cropEnd); }
+  else { requestSeek(t); }
 });
 const endDrag = () => { dragging = null; };
 tlTrack.addEventListener('pointerup', endDrag);
