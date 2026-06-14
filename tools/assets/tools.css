@@ -427,3 +427,51 @@ input[type="range"] { width: 100%; }
 .muted { color: var(--muted); }
 .small { font-size: .85rem; }
 footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; }
+
+/* ---- Responsive (phones / tablets) ---- */
+@media (max-width: 640px) {
+  html, body { font-size: 16px; }
+  .topbar { padding: 10px 12px; gap: 8px; }
+  .topbar .title { font-size: 1rem; }
+  .topbar a, .topbar .brand { font-size: .82rem; }
+  .wrap { padding: 14px 12px 56px; }
+  .panel { padding: 14px; }
+  h1 { font-size: 1.5rem; }
+  .steps { gap: 6px; }
+  .stepbtn { flex: 1 1 28%; padding: 8px 6px; font-size: .78rem; gap: 5px; }
+  .stepbtn b { width: 18px; height: 18px; font-size: .72rem; }
+  .controls { grid-template-columns: 1fr 1fr; gap: 12px; }
+  #preview-canvas { max-height: 56vh; }
+  .timecode { font-size: .8rem; }
+  .source-pick { flex-direction: column; }
+  .source-pick .btn { width: 100%; }
+  /* Curve + output stack vertically; arrow points down */
+  .curve-col { flex-basis: 100%; max-width: none; }
+  .curve-arrow { transform: rotate(90deg); }
+  .tl-actions { gap: 6px; }
+  .tl-actions .small-btn { flex: 1 1 auto; }
+}
+@media (max-width: 380px) {
+  .controls { grid-template-columns: 1fr; }
+}
+
+/* ---- Bigger hit targets on touch devices ---- */
+@media (pointer: coarse) {
+  .tbtn { width: 50px; height: 46px; }
+  .tbtn svg { width: 22px; height: 22px; }
+  .tbtn.play { width: 60px; }
+  .ndg { width: 40px; height: 36px; }
+  .tl-track { height: 56px; }
+  .tl-handle { width: 18px; }
+  /* enlarge crop handles and re-center them on the corners/edges */
+  #crop-rect .ch { width: 22px; height: 22px; }
+  .ch.nw { left: -11px; top: -11px; }
+  .ch.n  { top: -11px; margin-left: -11px; }
+  .ch.ne { right: -11px; top: -11px; }
+  .ch.e  { right: -11px; margin-top: -11px; }
+  .ch.se { right: -11px; bottom: -11px; }
+  .ch.s  { bottom: -11px; margin-left: -11px; }
+  .ch.sw { left: -11px; bottom: -11px; }
+  .ch.w  { left: -11px; margin-top: -11px; }
+  .toggle input { width: 20px; height: 20px; }
+}
