@@ -66,6 +66,8 @@ const logoOpacity = $('logo-opacity');
 const logoOpacityVal = $('logo-opacity-val');
 const logoClear   = $('logo-clear');
 const logoInfo    = $('logo-info');
+const logoPreview = $('logo-preview');
+const logoDropText = $('logo-drop-text');
 
 const encodeBtn   = $('encode-btn');
 const resetBtn    = $('reset-btn');
@@ -143,6 +145,7 @@ let lastFlip = 'none';       // to mirror the crop when flip changes
 
 // Logo / watermark overlay
 let logoBitmap = null;       // ImageBitmap or null
+let logoUrl = null;          // object URL for the dropzone preview
 
 // Colormap selection (custom searchable combobox).
 let colormapKey = 'none';
@@ -842,6 +845,13 @@ wireDrop(dropLogo, fileLogo, (files) => {
 async function loadLogo(file) {
   try {
     logoBitmap = await createImageBitmap(file);
+    if (logoUrl) URL.revokeObjectURL(logoUrl);
+    logoUrl = URL.createObjectURL(file);
+    logoPreview.src = logoUrl;
+    logoPreview.hidden = false;
+    logoDropText.hidden = true;
+    dropLogo.classList.add('has-logo');
+    logoInfo.classList.remove('error');
     logoInfo.textContent = `Logo: ${file.name} (${logoBitmap.width}×${logoBitmap.height}). It is placed inside the cropped output.`;
     markStale();
     drawPreview();
@@ -1119,12 +1129,14 @@ refreshCurveUI();
 logoSize.addEventListener('input', () => { logoSizeVal.textContent = logoSize.value; markStale(); drawPreview(); });
 logoOpacity.addEventListener('input', () => { logoOpacityVal.textContent = logoOpacity.value; markStale(); drawPreview(); });
 logoPos.addEventListener('change', () => { markStale(); drawPreview(); });
-logoClear.addEventListener('click', () => {
+function clearLogo() {
   logoBitmap = null; fileLogo.value = '';
+  if (logoUrl) { URL.revokeObjectURL(logoUrl); logoUrl = null; }
+  logoPreview.removeAttribute('src'); logoPreview.hidden = true;
+  logoDropText.hidden = false; dropLogo.classList.remove('has-logo');
   logoInfo.textContent = ''; logoInfo.classList.remove('error');
-  markStale();
-  drawPreview();
-});
+}
+logoClear.addEventListener('click', () => { clearLogo(); markStale(); drawPreview(); });
 
 // Anything that changes the actual frames invalidates the base GIF (forces a
 // re-encode); timing & loop do not (they patch metadata instantly).
@@ -1659,7 +1671,7 @@ resetBtn.addEventListener('click', () => {
   if (lastObjectUrl) { URL.revokeObjectURL(lastObjectUrl); lastObjectUrl = null; }
   duration = cropStart = cropEnd = 0; cuts = []; pendingCutStart = null;
   crop = null; cropRectEl.hidden = true; cropInfo.textContent = '';
-  logoBitmap = null; fileLogo.value = ''; logoInfo.textContent = '';
+  clearLogo();
   selectColormap('none');
   curvePoints = [{ x: 0, y: 0 }, { x: 255, y: 255 }]; buildCurveLut(); refreshCurveUI();
   lastBaseGif = null; baseInfo = null;

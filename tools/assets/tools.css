@@ -132,6 +132,11 @@ h2 { font-size: 1.2rem; margin: 28px 0 12px; font-weight: 600; }
 .drop input { display: none; }
 .drop.noclick { cursor: default; }
 .source-pick { display: flex; gap: 10px; flex-wrap: wrap; }
+#logo-preview {
+  max-height: 200px; max-width: 100%; object-fit: contain; border-radius: 6px;
+  background: repeating-conic-gradient(#3a4047 0% 25%, #2e3338 0% 50%) 50% / 20px 20px;
+}
+#drop-logo.has-logo { border-style: solid; border-color: var(--good); padding: 14px; }
 
 /* Controls */
 .controls {

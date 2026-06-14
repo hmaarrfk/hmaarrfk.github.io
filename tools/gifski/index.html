@@ -292,8 +292,11 @@
       <h2 style="margin-top:0">5 &middot; Logo / watermark</h2>
       <div class="drop" id="drop-logo">
         <input type="file" id="file-logo" accept="image/*">
-        <p><strong>Drop a logo image</strong> or click to choose</p>
-        <p class="small muted">A PNG with transparency works best &mdash; optional</p>
+        <img id="logo-preview" alt="chosen logo" hidden>
+        <div id="logo-drop-text">
+          <p><strong>Drop a logo image</strong> or click to choose</p>
+          <p class="small muted">A PNG with transparency works best &mdash; optional</p>
+        </div>
       </div>
       <div class="controls" style="margin-top:14px">
         <div class="field">
@@ -310,7 +313,7 @@
         </div>
         <div class="field">
           <label for="logo-size">Size: <span id="logo-size-val">20</span>% of width</label>
-          <input type="range" id="logo-size" min="2" max="60" value="20" step="1">
+          <input type="range" id="logo-size" min="2" max="200" value="20" step="1">
         </div>
         <div class="field">
           <label for="logo-opacity">Opacity: <span id="logo-opacity-val">100</span>%</label>
@@ -378,7 +381,10 @@
           <select id="loop">
             <option value="-1" selected>Loop forever</option>
             <option value="0">Play once</option>
+            <option value="2">Repeat 2&times;</option>
             <option value="3">Repeat 3&times;</option>
+            <option value="5">Repeat 5&times;</option>
+            <option value="10">Repeat 10&times;</option>
           </select>
         </div>
       </div>

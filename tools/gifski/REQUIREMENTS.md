@@ -148,9 +148,10 @@ control panels switch. Panes contain `.video-only` / `.images-only` blocks that
   colormap is set. Live in the preview.
 
 ### Logo / watermark step
-- Optional logo image (its own click-to-open dropzone). Position TL/TR/BL/BR/
-  center / center +45° / center −45° (rotated), **size** (% of frame width),
-  **opacity** (0–100% → watermark). Drawn
+- Optional logo image (its own click-to-open dropzone that shows a **preview** of
+  the chosen image on a transparency checkerboard once loaded). Position
+  TL/TR/BL/BR/center / center +45° / center −45° (rotated), **size** (2–200% of
+  frame width), **opacity** (0–100% → watermark). Drawn
   *on top* (after colormap), inside the cropped output. Preview composites it
   within the crop region.
 
