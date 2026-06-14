@@ -451,6 +451,8 @@ let GL = null;            // { canvas, gl, prog, u, tex... } once initialised
 let glDead = false;       // permanent fall-back flag
 let glCurveKey = '';      // last curve LUT uploaded (cache key)
 let glCmapKey  = '';      // last colormap LUT uploaded (cache key)
+let glReadBuf = null;     // reusable readPixels target (RGBA, w*h*4)
+let glRowBuf  = null;     // reusable single-row scratch for the vertical flip
 function glCompile(gl, type, src) {
   const sh = gl.createShader(type);
   gl.shaderSource(sh, src); gl.compileShader(sh);
@@ -538,8 +540,12 @@ function glUploadLuts() {
   }
 }
 // Run the pixel-effect pass over `src` (a canvas/video/ImageBitmap of size w×h)
-// and leave the result in GL.canvas. Returns the GL canvas, or null on failure.
-function glPixelEffects(src, w, h) {
+// and leave the result in GL.canvas. When `readBack` is true, also reads the
+// result straight off the GPU via gl.readPixels (skipping a drawImage +
+// getImageData round-trip), vertically flips it (WebGL rows come bottom-to-top)
+// into a reusable RGBA buffer, and returns { canvas, pixels }. Otherwise returns
+// the GL canvas. Returns null on failure (caller falls back to the CPU path).
+function glPixelEffects(src, w, h, readBack) {
   if (!glAvailable()) return null;
   try {
     const gl = GL.gl;
@@ -558,7 +564,23 @@ function glPixelEffects(src, w, h) {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (gl.getError() !== gl.NO_ERROR) throw new Error('gl error during draw');
-    return GL.canvas;
+    if (!readBack) return GL.canvas;
+    const stride = w * 4, total = stride * h;
+    if (!glReadBuf || glReadBuf.length !== total) glReadBuf = new Uint8Array(total);
+    if (!glRowBuf || glRowBuf.length !== stride) glRowBuf = new Uint8Array(stride);
+    const buf = glReadBuf;
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    if (gl.getError() !== gl.NO_ERROR) throw new Error('gl error during readPixels');
+    // Flip vertically in place: readPixels returns rows bottom-to-top, but the
+    // 2D/getImageData convention (and the encoder) want top-to-bottom.
+    const row = glRowBuf, half = h >> 1;
+    for (let r = 0; r < half; r++) {
+      const top = r * stride, bot = (h - 1 - r) * stride;
+      row.set(buf.subarray(top, top + stride));
+      buf.copyWithin(top, bot, bot + stride);
+      buf.set(row, bot);
+    }
+    return { canvas: GL.canvas, pixels: buf };
   } catch (e) {
     glDead = true; GL = null;
     return null;
@@ -624,6 +646,18 @@ function drawLogoInto(ctx, x, y, w, h) {
 // Apply colormap + logo to a finished output frame and read it back.
 function finishFrame(g, w, h) {
   if (colormapActive() || curveActive()) {
+    // Fast path: no logo means the GL result is the final frame, so read it
+    // straight off the GPU (skip the extra drawImage + getImageData). The
+    // encoder accepts a bare { data } object, so wrap the readPixels buffer.
+    if (!logoBitmap) {
+      const glOut = glPixelEffects(g.canvas, w, h, true);
+      if (glOut && glOut.pixels) {
+        // The buffer is reused next call; copy so the pushed frame is stable.
+        return { data: glOut.pixels.slice(), width: w, height: h };
+      }
+    }
+    // Logo present (or readback failed): run the effect onto the 2D canvas so
+    // the logo can be composited in 2D afterwards.
     const glOut = glPixelEffects(g.canvas, w, h);
     if (glOut) {
       g.clearRect(0, 0, w, h);
