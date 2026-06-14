@@ -489,6 +489,20 @@
     </footer>
   </div>
 
+  <!-- Fullscreen viewer for a single result GIF (opened by clicking a result). -->
+  <div class="lightbox" id="lightbox" hidden>
+    <div class="lb-bar">
+      <span class="lb-label" id="lb-label"></span>
+      <button class="btn secondary small-btn" id="lb-fit" type="button">Full screen</button>
+      <button class="btn secondary small-btn" id="lb-true" type="button">True size</button>
+      <a class="btn good small-btn" id="lb-download" download>Download</a>
+      <button class="btn secondary small-btn" id="lb-close" type="button" aria-label="Close">&#x2715; Close</button>
+    </div>
+    <div class="lb-stage" id="lb-stage">
+      <img id="lb-img" alt="Result GIF, enlarged">
+    </div>
+  </div>
+
   <!-- Hidden canvas used for drawing frames during extraction -->
   <canvas id="scratch-canvas" style="display:none"></canvas>
 

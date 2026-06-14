@@ -76,6 +76,15 @@ const result      = $('result');
 const resultsGrid = $('results-grid');
 const vibePanel   = $('vibe');
 
+// Fullscreen result viewer
+const lightbox    = $('lightbox');
+const lbImg       = $('lb-img');
+const lbLabel     = $('lb-label');
+const lbFit       = $('lb-fit');
+const lbTrue      = $('lb-true');
+const lbDownload  = $('lb-download');
+const lbClose     = $('lb-close');
+
 const scratchCanvas = $('scratch-canvas');
 const previewCanvas = $('preview-canvas');
 const previewCtx    = previewCanvas.getContext('2d');
@@ -1375,11 +1384,25 @@ document.querySelectorAll('.transport .tbtn').forEach((b) =>
 document.querySelectorAll('.tl-actions [data-act]').forEach((b) =>
   b.addEventListener('click', () => transport(b.dataset.act)));
 
+// Step one frame. On the compressed steps (after Trim) we step in OUTPUT time so
+// the cut sections are skipped — stepping past a cut jumps straight to the next
+// kept frame, exactly as the final GIF plays. On Source/Trim we step in real time
+// (you're still defining the cuts there, so the full timeline is shown).
+function stepFrame(dir) {
+  const dt = frameStep();
+  if (timelineCompressed()) {
+    const k = keptDurationTotal();
+    const o = clamp(toOutputTime(preview.currentTime) + dir * dt, 0, Math.max(0, k - 1e-3));
+    seek(fromOutputTime(o));
+  } else {
+    seek(preview.currentTime + dir * dt);
+  }
+}
 function transport(act) {
   switch (act) {
     case 'play':      preview.paused ? preview.play() : preview.pause(); break;
-    case 'prevFrame': preview.pause(); seek(preview.currentTime - frameStep()); break;
-    case 'nextFrame': preview.pause(); seek(preview.currentTime + frameStep()); break;
+    case 'prevFrame': preview.pause(); stepFrame(-1); break;
+    case 'nextFrame': preview.pause(); stepFrame(1); break;
     case 'toIn':      seek(cropStart); break;
     case 'toOut':     seek(cropEnd); break;
     case 'setIn':     cropStart = clamp(preview.currentTime, 0, cropEnd - frameStep()); renderTimeline(); break;
@@ -1400,6 +1423,9 @@ function transport(act) {
 
 // Keyboard shortcuts while editing a video
 document.addEventListener('keydown', (e) => {
+  // While the fullscreen viewer is open, Esc closes it and other keys are ignored
+  // (so they don't drive the video behind it).
+  if (lightbox && !lightbox.hidden) { if (e.key === 'Escape') { e.preventDefault(); closeLightbox(); } return; }
   if (!videoFile) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
@@ -1801,11 +1827,44 @@ function buildResultCards() {
     const meta = document.createElement('div'); meta.className = 'rc-meta';
     const dl = document.createElement('a'); dl.className = 'btn good small-btn';
     dl.textContent = 'Download'; dl.download = `${base}-${v.key}.gif`;
+    img.title = 'Click to view full screen';
+    img.addEventListener('click', () => openLightbox(v.outUrl, v.label, dl.download));
     card.append(img, lab, meta, dl);
     resultsGrid.appendChild(card);
     v.el = { img, meta, dl };
   });
   result.classList.add('show');
+}
+// ---- Fullscreen result viewer -----------------------------------------
+function setLbMode(mode) {
+  const fit = mode !== 'true';
+  lightbox.classList.toggle('fit', fit);
+  lightbox.classList.toggle('true', !fit);
+  lbFit.classList.toggle('active', fit);
+  lbTrue.classList.toggle('active', !fit);
+}
+function openLightbox(url, label, downloadName) {
+  if (!url) return;
+  lbImg.src = url;
+  lbLabel.textContent = label || '';
+  lbDownload.href = url;
+  lbDownload.download = downloadName || 'animation.gif';
+  setLbMode('fit');
+  lightbox.hidden = false;
+}
+function closeLightbox() {
+  if (lightbox.hidden) return;
+  lightbox.hidden = true;
+  lbImg.removeAttribute('src');
+}
+if (lightbox) {
+  lbFit.addEventListener('click', () => setLbMode('fit'));
+  lbTrue.addEventListener('click', () => setLbMode('true'));
+  lbClose.addEventListener('click', closeLightbox);
+  // Click the backdrop (the overlay or stage, not the image/buttons) to close.
+  lightbox.addEventListener('click', (e) => {
+    if (e.target === lightbox || e.target.id === 'lb-stage') closeLightbox();
+  });
 }
 // Update the existing cards' image/meta/link to the current variant URLs.
 function refreshResultCards() {
