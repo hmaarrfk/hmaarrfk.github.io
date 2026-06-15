@@ -190,7 +190,7 @@
             </div>
             <span class="hint">by 1 source pixel</span>
           </div>
-          <div class="field">
+          <div class="field" id="gif-nudge-field" hidden>
             <label>GIF-pixel nudge</label>
             <div class="nudge" data-unit="output">
               <button type="button" class="ndg" data-nudge="up" title="Move up 1 output px" aria-label="Move up">&#x25b2;</button>
@@ -207,6 +207,10 @@
             <button type="button" class="btn secondary small-btn" id="crop-reset">Reset crop</button>
           </div>
         </div>
+        <label class="checkbox" style="margin:4px 0 12px">
+          <input type="checkbox" id="custom-res">
+          <span>Custom resolution <span class="hint" style="display:inline">(off: GIF keeps the cropped image's native size)</span></span>
+        </label>
         <div class="field-groups">
           <div class="field-group">
             <div class="fg-title">Crop region <span class="lu">source px</span></div>
@@ -217,7 +221,7 @@
               <label class="fg-item"><span class="fg-l" title="Crop height">H</span><input type="number" id="crop-h" min="1" step="1" aria-label="Crop height (source px)"></label>
             </div>
           </div>
-          <div class="field-group">
+          <div class="field-group" id="output-size-group" hidden>
             <div class="fg-title">Output size <span class="lu">output px</span></div>
             <div class="fg-grid">
               <label class="fg-item"><span class="fg-l" title="Final width">W</span><input type="number" id="final-w" min="1" step="1" aria-label="Final width (output px)"></label>
