@@ -311,9 +311,12 @@ Optimized for phones (iPhone-first) as well as desktop:
 - Crop is defined in **displayed (post-rotation/flip) source pixels** and shown
   as a draggable box on the preview (dimmed outside, rule-of-thirds guides).
   Corner + edge handles resize; locked aspect hides edge handles. Drag interior
-  to move; "Reset crop" restores the full frame. Two nudge d-pads: **Fine**
-  (1 source px) and **GIF-pixel** (1 output px = `crop.w/finalW` source px —
-  useful when the source is much higher-res than the GIF).
+  to move; "Reset crop" restores the full frame. Nudge d-pads: **Fine**
+  (1 source px) always shown, and **GIF-pixel** (1 output px = `crop.w/finalW`
+  source px — useful when the source is much higher-res than the GIF) which only
+  appears under **Custom resolution** (`#gif-nudge-field`, hidden otherwise);
+  with native output a GIF pixel equals a source pixel so it would duplicate the
+  Fine pad. (It is also still hidden on phones regardless, via the CSS reflow.)
 - **Tap to recenter**: tapping **anywhere on the image** — inside or outside the
   box — moves the crop's centre to that point (easier than dragging on touch). A
   tap vs. drag is distinguished by an 8px threshold: a drag inside the box moves
@@ -334,8 +337,16 @@ Optimized for phones (iPhone-first) as well as desktop:
   preview canvas drops its black backing (`#preview-canvas.masked`) so the
   masked-out corners are genuinely transparent (you see the panel/page behind).
   Toggling it `markStale()`s (needs a re-encode).
+- **Native output by default**: the GIF keeps the cropped image's native pixel
+  size — `finalW/finalH` track `crop.w/crop.h` (1:1, no downscale). The
+  **"Custom resolution"** checkbox (`#custom-res`, off by default) reveals the
+  "Output size" W/H block (`#output-size-group`, hidden otherwise) to override the
+  resolution; while it's off the output always follows the cropped native shape,
+  and unchecking it snaps the output back to native (`syncFinalToCrop` /
+  `afterCropChange` force native when `!customRes`; enabling it seeds the inputs
+  from the current native size, or a 480px-wide cap on a fresh load).
 - Exact numeric entry in **both spaces**: crop X/Y/W/H in source px, and final
-  W/H in output px (final follows the crop aspect).
+  W/H in output px (custom resolution only; final follows the crop aspect).
 - **Rotation/flip carry the crop** (transform its extents, don't reset); a
   90/270 turn swaps the crop W↔H, the final W↔H, and the aspect preset wide↔tall
   (4:3↔3:4, 3:2↔2:3, 16:9↔9:16).

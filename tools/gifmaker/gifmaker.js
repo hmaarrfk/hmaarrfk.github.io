@@ -97,6 +97,9 @@ const ovalMask    = $('oval-mask');
 const cropAspect  = $('crop-aspect');
 const cropXIn = $('crop-x'), cropYIn = $('crop-y'), cropWIn = $('crop-w'), cropHIn = $('crop-h');
 const finalWIn = $('final-w'), finalHIn = $('final-h');
+const customResChk = $('custom-res');
+const outputSizeGroup = $('output-size-group');
+const gifNudgeField = $('gif-nudge-field');
 const cropReset = $('crop-reset');
 const cropInfo  = $('crop-info');
 
@@ -156,6 +159,7 @@ let pendingSeek = null;      // latest scrub target while a seek is in flight
 let crop = null;             // {x, y, w, h} or null (= whole frame)
 let aspectMode = 'orig';     // 'free' | 'orig' | '1:1' | '4:3' | ...
 let finalW = 0, finalH = 0;
+let customRes = false;       // when false, output follows the cropped native size
 let lastRotation = 0;        // to transform the crop when rotation changes
 let lastFlip = 'none';       // to mirror the crop when flip changes
 
@@ -363,6 +367,7 @@ function applyAspectToCrop() {
   roundCrop();
 }
 function defaultFinalFromCrop() {
+  if (!customRes) { finalW = Math.max(1, Math.round(crop.w)); finalH = Math.max(1, Math.round(crop.h)); return; }
   const cap = 480;
   finalW = Math.min(crop.w, cap > 0 ? cap : crop.w);
   finalH = Math.max(1, Math.round(finalW * crop.h / crop.w));
@@ -399,14 +404,21 @@ function positionCropRect() {
   cropRectEl.style.width  = (crop.w / f.w * 100) + '%';
   cropRectEl.style.height = (crop.h / f.h * 100) + '%';
 }
-// Recompute the final size to follow the crop's aspect, keeping finalW.
+// Recompute the final size. Without "Custom resolution" the output simply
+// mirrors the cropped native size; with it, keep finalW and follow the aspect.
 function syncFinalToCrop() {
+  if (!customRes) {
+    finalW = Math.max(1, Math.round(crop.w));
+    finalH = Math.max(1, Math.round(crop.h));
+    return;
+  }
   finalW = Math.max(1, Math.round(finalW));
   finalH = Math.max(1, Math.round(finalW * crop.h / crop.w));
 }
 function afterCropChange({ keepFinal = true } = {}) {
   roundCrop();
-  if (keepFinal) syncFinalToCrop();
+  // In native mode the output always tracks the crop, regardless of keepFinal.
+  if (keepFinal || !customRes) syncFinalToCrop();
   syncCropInputs();
   positionCropRect();
   markStale();
@@ -1519,6 +1531,18 @@ finalHIn.addEventListener('change', () => {
   if (!crop) return;
   finalH = Math.max(1, readInt(finalHIn, finalH));
   finalW = Math.max(1, Math.round(finalH * crop.w / crop.h));
+  syncCropInputs();
+});
+
+customResChk.addEventListener('change', () => {
+  customRes = customResChk.checked;
+  outputSizeGroup.hidden = !customRes;
+  // The GIF-pixel nudge only differs from the source-px nudge when the output is
+  // a different size than the crop, i.e. when custom resolution is in play.
+  gifNudgeField.hidden = !customRes;
+  if (!crop) return;
+  // Leaving custom mode snaps the output back to the cropped native size.
+  if (!customRes) { syncFinalToCrop(); markStale(); }
   syncCropInputs();
 });
 
