@@ -3,11 +3,28 @@
 A living spec for the GIF Maker at `/tools/gifmaker/`. Update this file
 whenever the tool changes so we can always pick up where we left off.
 
-_Last updated: 2026-06-14 (Short-screen fix: the About & license details and the legal footer are NO LONGER hidden on short/`max-height:760px` windows (they were `display:none`'d there and once a video loaded, making the About — and the license — totally unreachable); they now stay below the editor, reached with a small scroll, so the license is always accessible. Fullscreen result viewer — click a result GIF → lightbox with Full screen / True size / Download / Close (Esc/backdrop close); frame stepping after Trim now steps in OUTPUT time so it skips cut sections and the timeline reads as fully cut; fixed two layout regressions from the wide-screen pass — hidden step-panes could overlay the active one (the Source dropzone was covered, blocking video insertion) and the Create-GIF button overlapped the FPS field in the dense Export grid, both via `.step-pane[hidden]{display:none!important}` / giving `.action-row` its own grid row. Round 4 — **post-encode Export now fits one screen at 1280×720 (the round-3 one-screen failure).** After Create GIF the stage collapses; the generic single-column fallback used to stack the export controls + "Your GIFs" + three ~363px cards + the #vibe promo to ~1125px (≈405px below the fold, Download buttons unreachable). Under `@media (min-width:820px) and (max-height:760px)`, the collapsed-stage export pane is now re-laid as its own two-column grid (`grid-template-areas: head / "result controls" / "result status"`): the three GIF cards + Download buttons fill the WIDE LEFT column (cards capped 200px) while FPS/Quality/Timing/Speed/Looping + the Create/Start-over row sit in a narrow right column — measured post-encode scrollHeight === 720 (was 1125), Download buttons at y=557, 0 overflow, 0 console errors. The Export `.action-row` reverts from sticky to static in this side-by-side layout. The **#vibe promo is slimmed on the short export screen** (heading + Star button only, both promo `<p>`s hidden, flex one-row) so it adds ~68px instead of ~161px — guarded `.vibe:not([hidden])` so the `display:flex` never overrides the `[hidden]` attribute and leaks onto other steps. **Symmetric minimal gutters at 1280:** `.wrap{max-width:min(--maxw-editor,96vw)}` so the 1240px cap no longer leaves a one-sided 40px right gutter (now 26px each side). **Trim right column balanced:** the short Trim pane is `display:flex;justify-content:center` so its controls sit level with the preview middle instead of floating atop ~270px of dead column. **Source pre-load dropzone is now the hero** (`min-height:300px`, centred CTA) so the empty first screen looks intentional. **iPhone density pass (≤640px):** stage chrome slimmed (`#stage{padding:10px}`, `.tl-track{height:40px}`, tighter transport) freeing ~150px of controls above the fold; preview capped 32vh on Crop/Style/Logo and 40vh on Trim (where the timeline IS the control); the desktop crop reflow (Aspect full-width then compact source-px d-pad + Reset, hints hidden, tighter field-groups) ported to mobile; verbose Trim hint hidden, Logo Position/Size 2-up, Style hints hidden. Net iPhone scrollHeight: trim 906→844 (fits), logo 1104→887, style 1244→1106, crop 1295→1161 (crop box still pixel-aligned with the canvas). The remaining iPhone overflow on Crop/Style is inherent to the single-column stack (preview above tall controls); the clean fix is a JS "hide preview" toggle reusing `#stage.collapsed`, deferred to keep JS risk-free. 1920×1080 unchanged (wrap 1760, 80px symmetric margins, 0 overflow). Round 3 — true one-screen fit at 1280×720 + much-reduced phone scroll. **Page chrome no longer steals the 720px budget:** under `@media (max-height:760px)` the always-rendered About & license `<details>`, the legal footer and the `.wrap`'s 80px bottom padding (reduced to 16px) are removed while editing — page scrollHeight dropped from a constant 898px (≈178px of forced scroll on every step) to ≤736px (Crop) / 722px (Style) / 720px (the rest). **Crop/Output number inputs no longer clip:** the 3-digit values (480/320) were cut to "4:"/"3:" by the native spinner in the ~50px grid cells; the spinner is now removed (`appearance:textfield` + `::-webkit-*-spin-button{appearance:none}`) with tighter centred padding so the digits show in full. **iPhone (390×844) scroll cut hard on every step** (source 1161→992, trim 1030→906, crop 1568→1295, style 1725→1244 [−481px], logo 1371→1104, **export 1177→844 = exactly one screen**): the two tone-curve canvases now sit side-by-side on phone too (was a ~360px vertical tower), the redundant GIF-pixel nudge pad is hidden on phone (one source-px pad kept), the logo dropzone is shrunk, the phone preview cap is 38vh, and About/footer are hidden once a video is loaded (`.wrap:has(#stage:not([hidden]))`). On the phone single-column Export step the preview stage's visible UI collapses pre-encode (`#editor:has(.step-pane[data-pane="export"]:not([hidden]))`, the `<video>` decode-source stays rendered) so FPS/Quality/Create-GIF sit near the top — desktop keeps the preview visible since its controls are already beside it. **1920×1080 side margins cut ~210px→80px each side:** the editor cap is raised to `min(1760px,95vw)` at ≥1500px and the controls column grows there (440→520px) so the recovered width feeds both columns; preview 690×460, crop box still pixel-aligned. The short-screen results-grid is capped 3-up with 230px thumbnails. Round 2 baseline: One-screen fit at 1280×720: every step (Source/Trim/Crop/Style/Logo/Export) now fits — or is within a few px of — the 720px-tall viewport. Crop overflow went from +419px to ~+8px and Style from +677px to ~+2px by compacting their control columns (see "One-screen density" below); the preview is now HEIGHT-driven on wide screens (`#preview-canvas{height:min(56vh,460px);width:auto}`, wrap `width:fit-content` centred) so it upscales past the source's native pixel width to fill its column — at 1280×720 a 3:2 video renders ~605×403 (was 475×317), and the wrap hugs the canvas so the % crop box stays exactly aligned; the editor cap is raised to 1500px at ≥1500px so the recovered space grows the preview column instead of becoming dead outer margin (1920×1080 side margin ~340→~210px, preview ~690×460); the header band is tightened under `@media (max-height:760px)` (`.wrap` pad-top 16px, smaller step buttons) to reclaim ~25px; the short-screen preview cap (`44vh`) is now scoped to `<820px` so it only applies to the single-column phone/narrow layout. Earlier: Wide-screen two-column editor: at ≥820px the preview stage and the active step's controls sit side by side in a CSS grid (`.editor` wrapping `#stage` + the `.step-pane`s), reclaiming the old empty left/right margins and getting each step's controls beside — not below — the preview so the short steps fit a 1280×720 viewport; page widened to 1240px only here while step bar / vibe / about / footer stay centred at 880px; sticky preview keeps the frame in view while taller controls scroll; Export CTA row pinned sticky to the pane bottom; on Export-focus / before-load the grid drops to one column so results/controls span full width; Style help text collapsed into a `<details>` and curve/histogram canvases capped at 240px; phone density: Crop & Style controls now 2-up, field-groups stay 2-up, results-grid 2-up with 130px previews, compact step bar; preview shrunk so controls clear the fold — Crop/Style phone heights cut ~340/650px. Export keeps the preview visible until you press Create GIF, then collapses to the output + star ask; star-on-GitHub ask shown only after generating; duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
+_Last updated: 2026-06-16 (**Multi-format export — GIF + Animated WebP + APNG.**
+The Export step now offers three "Create" buttons (Create GIF / Create WebP /
+Create APNG); each encodes that format's **three size/quality tiers** from a single
+(cached, reused) frame extraction. **Only the most recently created format is
+shown** — each "Create" replaces the previous result (the frame cache is kept, so
+switching formats re-encodes without re-extracting). WebP is encoded per-frame via the
+vendored `@jsquash/webp` (libwebp WASM, Apache-2.0) and muxed into an animated WebP
+by our own code (`formats.js`); APNG via the vendored `UPNG.js` + `pako` (MIT).
+Both new formats support the same **instant speed/loop patching** as GIF — base
+encoded once at 1×/infinite, then per-format byte patchers (`patchWebp` rewrites
+ANMF durations + the ANIM loop count; `patchApng` rewrites fcTL delays + the acTL
+num_plays with recomputed CRCs) update every shown card with no re-encode. Oval-mask
+transparency carries into WebP (alpha) and APNG (native). New deps live in
+`vendor-webp/` and `vendor-apng/` (both permissive); the WebP encoder's bare
+`wasm-feature-detect` import is resolved by an import map in `index.html`. Tests:
+`window.__webpTest()` / `window.__apngTest()` alongside `__gifskiTest`.)_
+
+_Earlier: 2026-06-14 (Short-screen fix: the About & license details and the legal footer are NO LONGER hidden on short/`max-height:760px` windows (they were `display:none`'d there and once a video loaded, making the About — and the license — totally unreachable); they now stay below the editor, reached with a small scroll, so the license is always accessible. Fullscreen result viewer — click a result GIF → lightbox with Full screen / True size / Download / Close (Esc/backdrop close); frame stepping after Trim now steps in OUTPUT time so it skips cut sections and the timeline reads as fully cut; fixed two layout regressions from the wide-screen pass — hidden step-panes could overlay the active one (the Source dropzone was covered, blocking video insertion) and the Create-GIF button overlapped the FPS field in the dense Export grid, both via `.step-pane[hidden]{display:none!important}` / giving `.action-row` its own grid row. Round 4 — **post-encode Export now fits one screen at 1280×720 (the round-3 one-screen failure).** After Create GIF the stage collapses; the generic single-column fallback used to stack the export controls + "Your GIFs" + three ~363px cards + the #vibe promo to ~1125px (≈405px below the fold, Download buttons unreachable). Under `@media (min-width:820px) and (max-height:760px)`, the collapsed-stage export pane is now re-laid as its own two-column grid (`grid-template-areas: head / "result controls" / "result status"`): the three GIF cards + Download buttons fill the WIDE LEFT column (cards capped 200px) while FPS/Quality/Timing/Speed/Looping + the Create/Start-over row sit in a narrow right column — measured post-encode scrollHeight === 720 (was 1125), Download buttons at y=557, 0 overflow, 0 console errors. The Export `.action-row` reverts from sticky to static in this side-by-side layout. The **#vibe promo is slimmed on the short export screen** (heading + Star button only, both promo `<p>`s hidden, flex one-row) so it adds ~68px instead of ~161px — guarded `.vibe:not([hidden])` so the `display:flex` never overrides the `[hidden]` attribute and leaks onto other steps. **Symmetric minimal gutters at 1280:** `.wrap{max-width:min(--maxw-editor,96vw)}` so the 1240px cap no longer leaves a one-sided 40px right gutter (now 26px each side). **Trim right column balanced:** the short Trim pane is `display:flex;justify-content:center` so its controls sit level with the preview middle instead of floating atop ~270px of dead column. **Source pre-load dropzone is now the hero** (`min-height:300px`, centred CTA) so the empty first screen looks intentional. **iPhone density pass (≤640px):** stage chrome slimmed (`#stage{padding:10px}`, `.tl-track{height:40px}`, tighter transport) freeing ~150px of controls above the fold; preview capped 32vh on Crop/Style/Logo and 40vh on Trim (where the timeline IS the control); the desktop crop reflow (Aspect full-width then compact source-px d-pad + Reset, hints hidden, tighter field-groups) ported to mobile; verbose Trim hint hidden, Logo Position/Size 2-up, Style hints hidden. Net iPhone scrollHeight: trim 906→844 (fits), logo 1104→887, style 1244→1106, crop 1295→1161 (crop box still pixel-aligned with the canvas). The remaining iPhone overflow on Crop/Style is inherent to the single-column stack (preview above tall controls); the clean fix is a JS "hide preview" toggle reusing `#stage.collapsed`, deferred to keep JS risk-free. 1920×1080 unchanged (wrap 1760, 80px symmetric margins, 0 overflow). Round 3 — true one-screen fit at 1280×720 + much-reduced phone scroll. **Page chrome no longer steals the 720px budget:** under `@media (max-height:760px)` the always-rendered About & license `<details>`, the legal footer and the `.wrap`'s 80px bottom padding (reduced to 16px) are removed while editing — page scrollHeight dropped from a constant 898px (≈178px of forced scroll on every step) to ≤736px (Crop) / 722px (Style) / 720px (the rest). **Crop/Output number inputs no longer clip:** the 3-digit values (480/320) were cut to "4:"/"3:" by the native spinner in the ~50px grid cells; the spinner is now removed (`appearance:textfield` + `::-webkit-*-spin-button{appearance:none}`) with tighter centred padding so the digits show in full. **iPhone (390×844) scroll cut hard on every step** (source 1161→992, trim 1030→906, crop 1568→1295, style 1725→1244 [−481px], logo 1371→1104, **export 1177→844 = exactly one screen**): the two tone-curve canvases now sit side-by-side on phone too (was a ~360px vertical tower), the redundant GIF-pixel nudge pad is hidden on phone (one source-px pad kept), the logo dropzone is shrunk, the phone preview cap is 38vh, and About/footer are hidden once a video is loaded (`.wrap:has(#stage:not([hidden]))`). On the phone single-column Export step the preview stage's visible UI collapses pre-encode (`#editor:has(.step-pane[data-pane="export"]:not([hidden]))`, the `<video>` decode-source stays rendered) so FPS/Quality/Create-GIF sit near the top — desktop keeps the preview visible since its controls are already beside it. **1920×1080 side margins cut ~210px→80px each side:** the editor cap is raised to `min(1760px,95vw)` at ≥1500px and the controls column grows there (440→520px) so the recovered width feeds both columns; preview 690×460, crop box still pixel-aligned. The short-screen results-grid is capped 3-up with 230px thumbnails. Round 2 baseline: One-screen fit at 1280×720: every step (Source/Trim/Crop/Style/Logo/Export) now fits — or is within a few px of — the 720px-tall viewport. Crop overflow went from +419px to ~+8px and Style from +677px to ~+2px by compacting their control columns (see "One-screen density" below); the preview is now HEIGHT-driven on wide screens (`#preview-canvas{height:min(56vh,460px);width:auto}`, wrap `width:fit-content` centred) so it upscales past the source's native pixel width to fill its column — at 1280×720 a 3:2 video renders ~605×403 (was 475×317), and the wrap hugs the canvas so the % crop box stays exactly aligned; the editor cap is raised to 1500px at ≥1500px so the recovered space grows the preview column instead of becoming dead outer margin (1920×1080 side margin ~340→~210px, preview ~690×460); the header band is tightened under `@media (max-height:760px)` (`.wrap` pad-top 16px, smaller step buttons) to reclaim ~25px; the short-screen preview cap (`44vh`) is now scoped to `<820px` so it only applies to the single-column phone/narrow layout. Earlier: Wide-screen two-column editor: at ≥820px the preview stage and the active step's controls sit side by side in a CSS grid (`.editor` wrapping `#stage` + the `.step-pane`s), reclaiming the old empty left/right margins and getting each step's controls beside — not below — the preview so the short steps fit a 1280×720 viewport; page widened to 1240px only here while step bar / vibe / about / footer stay centred at 880px; sticky preview keeps the frame in view while taller controls scroll; Export CTA row pinned sticky to the pane bottom; on Export-focus / before-load the grid drops to one column so results/controls span full width; Style help text collapsed into a `<details>` and curve/histogram canvases capped at 240px; phone density: Crop & Style controls now 2-up, field-groups stay 2-up, results-grid 2-up with 130px previews, compact step bar; preview shrunk so controls clear the fold — Crop/Style phone heights cut ~340/650px. Export keeps the preview visible until you press Create GIF, then collapses to the output + star ask; star-on-GitHub ask shown only after generating; duration mode now extracts exactly fps×duration frames sampled across the kept content, not the whole source; markStale clears stale result cards cleanly (no blob errors); Generate is a focused step that collapses the input video; star-on-GitHub ask shown only on the Source + Generate steps; About & license collapsed into a small details; colormap picker swatches now show the current frame recoloured, not an abstract gradient; oval/circle mask in Crop — transparent corners via GIF transparency, logo still drawn on top; 3-point levels+gamma tone curve — min/max input black/white points for contrast, mid for gamma; harmonized editor that mirrors with invert input / reverse colormap via on-canvas input/output ramps; three renamed size variants — High quality / Medium ½-rate / High compression; grouped Crop region / Output size fields; single-column controls on phones; iOS preview decode fix; video-only)._
 
 ## Purpose
 
-Turn a **video** into a high-quality animated GIF,
+Turn a **video** into a high-quality animated **GIF, WebP, or APNG**,
 **entirely client-side**. It is the first of a planned family of small static
 WebAssembly tools under `/tools/`.
 
@@ -28,7 +45,10 @@ WebAssembly tools under `/tools/`.
    normal Jekyll page and may use front matter.)
 6. **License compliance.** gifski/gifski-wasm are **AGPL-3.0**. The page must
    visibly state this, link the bundled `vendor/LICENSE`, and point to the
-   corresponding source (encoder repos + this page's source on GitHub).
+   corresponding source (encoder repos + this page's source on GitHub). The WebP
+   and APNG encoders are permissive (Apache-2.0 / MIT) and are credited + linked in
+   the About panel with their bundled licenses (`vendor-webp/LICENSE`,
+   `vendor-apng/LICENSE.UPNG`, `vendor-apng/LICENSE.pako`).
 
 ## Files
 
@@ -36,17 +56,17 @@ WebAssembly tools under `/tools/`.
 |------|------|
 | `index.html` | Tool UI (raw HTML, no front matter) |
 | `gifmaker.js` | All app logic (ES module) |
+| `formats.js` | Animated WebP muxer + APNG encoder wrappers + `patchWebp`/`patchApng` (ES module) |
 | `colormaps.js` | 22 matplotlib colormap LUTs (256×[r,g,b]); generated from matplotlib, see header for licenses |
 | `../assets/tools.css` | Shared styling for standalone tool pages |
-| `vendor/dist/encode.js` | gifski-wasm high-level `encode()` wrapper |
-| `vendor/pkg/gifski_wasm.js` | wasm-bindgen glue |
-| `vendor/pkg/gifski_wasm_bg.wasm` | gifski compiled to WASM (~293 KB) |
-| `vendor/LICENSE` | AGPL-3.0 text |
-| `vendor/README.md` | Provenance + how to re-vendor gifski-wasm |
-| `vendor/update-vendor.sh` | Helper: `npm pack`s a pinned gifski-wasm and copies the 4 files in |
+| `vendor/…` | gifski-wasm (GIF encoder, AGPL-3.0) — `dist/encode.js`, `pkg/gifski_wasm.js`, `pkg/gifski_wasm_bg.wasm` (~293 KB), `LICENSE`, `README.md`, `update-vendor.sh` |
+| `vendor-webp/…` | @jsquash/webp (libwebp WASM, Apache-2.0) — `encode.js`/`meta.js`/`utils.js`, `codec/enc/webp_enc*.{js,wasm}`, `wasm-feature-detect.js`, `LICENSE*`, `README.md` |
+| `vendor-apng/…` | UPNG.js + pako (APNG encoder, MIT) — `UPNG.js`, `pako.min.js`, `LICENSE.UPNG`, `LICENSE.pako`, `README.md` |
 | `REQUIREMENTS.md` | This file |
 
-Pinned upstream: **`gifski-wasm@2.2.0`** (single-thread default export).
+Pinned upstream: **`gifski-wasm@2.2.0`** (single-thread default export),
+**`@jsquash/webp@1.5.0`** + **`wasm-feature-detect@1.8.0`** (WebP),
+**`upng-js@2.1.0`** + **`pako@1.0.11`** (APNG).
 **Vendoring strategy:** the four `vendor/` files are **checked-in copies** (no git
 submodule, no package manager, nothing fetched at build/runtime). Only the
 single-thread build is vendored (the multi-thread build needs SharedArrayBuffer →
@@ -66,6 +86,27 @@ COOP/COEP, which GitHub Pages can't set). To update, run `vendor/update-vendor.s
 - `repeat`: `-1` = loop forever, `0` = play once, `n` = finite repeats.
 - The wasm file is located at runtime via `import.meta.url`; vendoring preserves
   the `dist/` → `pkg/` relative layout so this resolves.
+
+**WebP / APNG (`formats.js`).** Same frame input (`ImageData[]`), one base
+animation at 1×/infinite per tier, then patched.
+- `encodeWebpAnim({ frames, width, height, frameDurations, quality, loop })` →
+  `Promise<Uint8Array>`. Encodes each frame to a lossy WebP via `@jsquash/webp`
+  (`quality` 0–100), then muxes a RIFF `VP8X`+`ANIM`+`ANMF…` animated WebP. Sets the
+  VP8X **Alpha** flag when any frame had alpha (oval mask). `loop`: `-1` infinite /
+  `0` once / `n` (mapped to WebP's play count, 0 = infinite).
+- `encodeApngAnim({ frames, width, height, frameDurations, cnum, loop })` →
+  `Uint8Array`. `UPNG.encode` (`cnum` = lossy colour count, `0` = lossless); loop set
+  via `patchApng`.
+- `patchWebp(bytes, delayMs, loop)` / `patchApng(bytes, delayMs, loop)` rewrite
+  per-frame duration + loop count **in place** (no re-encode), mirroring `patchGif`.
+  WebP: ANMF duration (24-bit) + ANIM loop count (16-bit), no checksum. APNG: fcTL
+  `delay_num`/`delay_den` (den fixed to 1000 → ms) + acTL `num_plays`, **recomputing
+  each touched chunk's CRC32**. `applyMetadata` dispatches by `variant.format`
+  (GIF delays are centiseconds; WebP/APNG use ms = `delayCs × 10`).
+- The WebP wasm resolves via `import.meta.url` (preserve `codec/enc/` layout); the
+  glue's bare `wasm-feature-detect` import is resolved by an import map in
+  `index.html`. UPNG.js + pako are classic scripts loaded as `window.UPNG`/`window.pako`
+  **before** the module (pako first).
 
 ## Features (current)
 
@@ -430,18 +471,30 @@ Optimized for phones (iPhone-first) as well as desktop:
     duration value re-times the existing frames instantly too (their total plays
     over the new duration); the frame *count* only re-samples on the next Create
     GIF.
-- **Three size/quality variants per render** (`VARIANT_DEFS`): one "Create GIF"
-  extracts every frame **once** (shared), then encodes the variants and shows them
-  side by side so the user picks the smallest acceptable one:
-  1. **High quality** — the requested fps & quality.
+- **Three output formats, three size/quality tiers each.** The Export step has
+  **three "Create" buttons** — Create GIF / Create WebP / Create APNG
+  (`FORMATS`/`FORMAT_ORDER`). A single click runs `generateFormat(fmt)`, which
+  encodes that format's three tiers and shows them under a format heading
+  (`.result-group` + `.rc-group-head`). **Only the latest format is shown** — each
+  Create first `clearResultVariants()`s the previous results (revoking their blobs),
+  so you see just the three sizes of the format you last created, never all nine at
+  once. (Switching formats reuses the cached frames; no re-extract.)
+- **The three tiers per format** (`VARIANT_DEFS`, shared `fpsDiv`/`qMul`):
+  1. **High quality** — full fps & quality.
   2. **Medium** — half the frame rate (`frames.filter((_,i)=>i%2===0)`), same quality.
-  3. **High compression** — half the frame rate **and** quality × 0.75 (smallest).
-  (¼ frame rate was dropped as too aggressive; the standalone ¾-quality variant
-  was folded into High compression.) Variants that subsample below 2 frames, or
-  that would duplicate another variant's (frame-count, quality) pair, are skipped.
-  Each is rendered as a `.result-card` (preview, label, meta, **Download** named
-  `<source>-<key>.gif`). Frame *rate* (sampling) and quality genuinely need a
-  re-encode; that's why all variants are produced up front in the single pass.
+  3. **High compression** — half the frame rate **and** lower quality (smallest).
+  Each format maps the tier to its own quality knob (`FORMATS[fmt].quality`):
+  GIF/WebP use 1–100 (`round(Q·qMul)`); APNG uses a lossy colour-count ladder
+  (`0` lossless / `256` / `64`). Tiers that subsample below 2 frames, or that
+  duplicate another tier's (frame-count, quality) pair, are skipped.
+- **Frame extraction is shared & cached** (`cachedFrames`): the first Create
+  extracts every frame once at full rate; subsequent format clicks at the same
+  settings **reuse** that set (no re-extract). `markStale()` (any frame-affecting
+  edit) clears the cache + all results.
+- Each variant is a `.result-card` (preview, label, meta, **Download** named
+  `<source>-<key>.<ext>` — `.gif`/`.webp`/`.png`). Frame *rate* (sampling) and
+  quality genuinely need a re-encode; that's why a format's three tiers are
+  produced up front in one pass.
 - **Fullscreen viewer (lightbox)**: clicking a result thumbnail opens `#lightbox`
   — a fixed full-viewport overlay (checkerboard backing so transparent oval-masked
   GIFs read correctly) showing that GIF with a toolbar: **Full screen** (default —
@@ -449,15 +502,16 @@ Optimized for phones (iPhone-first) as well as desktop:
   focus on the output), **True size** (native 1:1 pixels, scrolls if larger),
   **Download**, and **Close**. Close via the button, the backdrop, or `Esc`; while
   open, the video keyboard shortcuts are suppressed.
-- **Metadata patching**: each variant's base GIF is encoded once at 1× / infinite
-  loop; changing timing or loop rewrites every variant's per-frame delays /
-  Netscape loop block **in place** (`patchGif`, then `refreshResultCards`
-  updates the cards) — no re-encode. In **duration** mode each variant's delay is
-  `totalDuration / its own frame count`, so all variants share the same total
+- **Metadata patching**: each variant's base animation is encoded once at 1× /
+  infinite loop; changing timing or loop rewrites every variant's per-frame delays
+  + loop count **in place**, dispatched by format (`patchGif` / `patchWebp` /
+  `patchApng` via `patchVariant`), then `refreshResultCards` updates the cards — no
+  re-encode, **across all shown formats**. In **duration** mode each variant's delay
+  is `totalDuration / its own frame count`, so all variants share the same total
   runtime despite different frame counts. Any change that alters the actual frames
-  (`markStale()`) invalidates all variants so the next Create GIF re-encodes.
-  Card `<img>`/links are updated in place (not rebuilt) on metadata patches so a
-  mid-load image is never stranded when its old blob URL is revoked.
+  (`markStale()`) invalidates all variants + the frame cache so the next Create
+  re-encodes. Card `<img>`/links are updated in place (not rebuilt) on metadata
+  patches so a mid-load image is never stranded when its old blob URL is revoked.
 
 ### Privacy / about
 - A privacy **tagline above the source dropzone** (`.tagline`): "No data is
@@ -536,6 +590,10 @@ CPU/2D fallback (feature-detected; the vendored gifski WASM encode is unchanged)
 - `window.__gifskiTest(opts)` runs the full transform+encode on synthetic
   frames (no file picker) and returns the GIF header/size/dims — used to verify
   rotate/flip/filter/speed/loop/**quality** produce valid `GIF89a`s.
+- `window.__webpTest(opts)` / `window.__apngTest(opts)` encode synthetic frames
+  (with a transparent quadrant by default, to exercise the alpha path) and assert
+  the container is valid (`RIFF…WEBP`; PNG signature + `acTL`) and that
+  `patchWebp`/`patchApng` round-trip the timing/loop (APNG with recomputed CRCs).
 - The variant flow is exercised end-to-end with a synthetic in-page video
   (canvas → `MediaRecorder` → `File` → the real `#file-video` input), then
   asserting the `.result-card`s render with non-increasing sizes and that
@@ -552,12 +610,19 @@ CPU/2D fallback (feature-detected; the vendored gifski WASM encode is unchanged)
 - Frame stepping is sampling-rate based (`1/fps`), not true container frames
   (browsers don't expose exact frame timing reliably without
   `requestVideoFrameCallback`). Good enough for GIF authoring.
-- Very long/large videos extract slowly (sequential seeks) and use lots of RAM;
-  consider downscaling first or capping frame count with a warning.
+- Very long/large videos extract slowly (sequential seeks) and use lots of RAM.
+  Extraction holds every frame as RGBA (`w·h·4` bytes), so a hi-res source (e.g. a
+  3072² microscopy video × ~60 frames ≈ 2.3 GB) overflows the browser's allocation
+  limit. **Pre-flight guard:** `checkExportBudget(fps)` estimates `frames ×
+  outW × outH × 4` from `plannedFrameCount` + `plannedOutputSize`; above
+  `FRAME_BYTES_LIMIT` (~1.2 GB) `generateFormat` aborts *before* extracting and
+  shows guidance (enable **Custom resolution** at a suggested ~400 MB-equivalent
+  size, or crop tighter / lower FPS / trim) instead of crashing. The `catch` also
+  maps any allocation error that slips through to the same actionable message.
 - Possible additions: drag-to-reorder image frames, per-frame durations, crop
-  **rectangle** (spatial), brightness/contrast sliders, a frame-count/size
-  estimate before encoding, optional multi-thread build behind COOP/COEP if ever
-  self-hosted somewhere that allows it.
+  **rectangle** (spatial), brightness/contrast sliders, auto-capping the default
+  output resolution for huge sources (today it's native-by-default + the pre-flight
+  guard), optional multi-thread build behind COOP/COEP if ever self-hosted.
 
 ## Adding sibling tools
 

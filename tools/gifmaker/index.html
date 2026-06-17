@@ -10,9 +10,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GIF Maker — high-quality GIFs in your browser</title>
-  <meta name="description" content="Turn a video into a high-quality animated GIF entirely in your browser. Powered by gifski compiled to WebAssembly. Nothing is uploaded.">
+  <meta name="description" content="Turn a video into a high-quality animated GIF, WebP, or APNG entirely in your browser. Powered by WebAssembly. Nothing is uploaded.">
   <link rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/tools/assets/tools.css">
+  <!-- Resolve the @jsquash/webp encoder's bare `wasm-feature-detect` import to its
+       vendored copy (no bundler on this static page). Must precede the module. -->
+  <script type="importmap">
+  { "imports": { "wasm-feature-detect": "/tools/gifmaker/vendor-webp/wasm-feature-detect.js" } }
+  </script>
 </head>
 <body>
   <div class="topbar">
@@ -413,8 +418,14 @@
         </div>
       </div>
 
-      <div class="action-row" style="margin-top:20px; display:flex; gap:12px; flex-wrap:wrap;">
+      <p class="hint" style="margin:16px 0 0">
+        Pick a format — each makes three sizes from the same frames. WebP &amp; APNG
+        are far smaller/sharper than GIF. Creating one replaces the previous result.
+      </p>
+      <div class="action-row" style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap;">
         <button class="btn" id="encode-btn" disabled>Create GIF</button>
+        <button class="btn" id="encode-webp-btn" disabled>Create WebP</button>
+        <button class="btn" id="encode-apng-btn" disabled>Create APNG</button>
         <button class="btn secondary" id="reset-btn">Start over</button>
       </div>
 
@@ -422,12 +433,12 @@
       <div class="status" id="status"></div>
 
       <div class="result" id="result">
-        <h2>Your GIFs</h2>
+        <h2>Your animation</h2>
         <p class="muted small" style="margin:0 0 8px">
-          A few sizes from one render — pick whichever is small enough. Speed &amp; loop
-          changes update all of them instantly.
+          Three sizes — pick whichever is small enough. Speed &amp; loop changes
+          update them instantly.
         </p>
-        <div class="results-grid" id="results-grid"></div>
+        <div id="results-grid"></div>
       </div>
     </section>
     </div><!-- /.editor -->
@@ -459,6 +470,13 @@
         and bundled directly with this page.
       </p>
       <p class="muted small">
+        WebP and APNG output use <a href="https://github.com/jamsinclair/jSquash" target="_blank" rel="noopener">@jsquash/webp</a>
+        (Google&rsquo;s <a href="https://chromium.googlesource.com/webm/libwebp/" target="_blank" rel="noopener">libwebp</a>, compiled to WebAssembly)
+        and <a href="https://github.com/photopea/UPNG.js" target="_blank" rel="noopener">UPNG.js</a> with
+        <a href="https://github.com/nodeca/pako" target="_blank" rel="noopener">pako</a> &mdash; all bundled with this page. The animated WebP is
+        muxed and APNG/WebP timing is patched by this page&rsquo;s own code.
+      </p>
+      <p class="muted small">
         <strong>License:</strong> gifski and gifski-wasm are licensed under the
         <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU Affero General Public License v3.0 (AGPL-3.0)</a>.
         Because this page distributes the gifski WebAssembly binary to you over a network, the AGPL requires that the
@@ -466,12 +484,18 @@
         <a href="vendor/LICENSE" target="_blank" rel="noopener">included here</a>, the encoder source is at the
         gifski and gifski-wasm repositories linked above, and the full source of this page is on
         <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/gifmaker" target="_blank" rel="noopener">GitHub</a>.
+        The WebP encoder (libwebp / @jsquash/webp) is
+        <a href="vendor-webp/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>; UPNG.js and pako are MIT
+        (<a href="vendor-apng/LICENSE.UPNG" target="_blank" rel="noopener">UPNG</a>,
+        <a href="vendor-apng/LICENSE.pako" target="_blank" rel="noopener">pako</a>).
       </p>
 
       <h3 style="margin:22px 0 10px">Built on</h3>
       <ul class="refs muted">
         <li><a href="https://github.com/ImageOptim/gifski" target="_blank" rel="noopener">gifski</a> &mdash; the GIF encoder (Kornel Lesi&nbsp;ński)</li>
         <li><a href="https://github.com/jamsinclair/gifski-wasm" target="_blank" rel="noopener">gifski-wasm</a> &mdash; the WebAssembly build</li>
+        <li><a href="https://github.com/jamsinclair/jSquash" target="_blank" rel="noopener">@jsquash/webp</a> &amp; <a href="https://chromium.googlesource.com/webm/libwebp/" target="_blank" rel="noopener">libwebp</a> &mdash; the WebP encoder (Apache-2.0)</li>
+        <li><a href="https://github.com/photopea/UPNG.js" target="_blank" rel="noopener">UPNG.js</a> + <a href="https://github.com/nodeca/pako" target="_blank" rel="noopener">pako</a> &mdash; the APNG encoder (MIT)</li>
         <li><a href="https://rustwasm.github.io/wasm-bindgen/" target="_blank" rel="noopener">wasm-bindgen</a> &amp; <a href="https://www.rust-lang.org/" target="_blank" rel="noopener">Rust</a> &rarr; WebAssembly</li>
         <li><a href="https://matplotlib.org/stable/users/explain/colors/colormaps.html" target="_blank" rel="noopener">matplotlib colormaps</a> (viridis, plasma, &hellip;)</li>
         <li><a href="https://research.google/blog/turbo-an-improved-rainbow-colormap-for-visualization/" target="_blank" rel="noopener">Turbo colormap</a> (Google)</li>
@@ -514,6 +538,10 @@
   <!-- Hidden canvas used for drawing frames during extraction -->
   <canvas id="scratch-canvas" style="display:none"></canvas>
 
+  <!-- APNG encoder (UPNG.js + its pako deflate dep), vendored, loaded as globals
+       before the module so gifmaker.js can read window.UPNG. -->
+  <script src="/tools/gifmaker/vendor-apng/pako.min.js"></script>
+  <script src="/tools/gifmaker/vendor-apng/UPNG.js"></script>
   <script type="module" src="/tools/gifmaker/gifmaker.js"></script>
 </body>
 </html>

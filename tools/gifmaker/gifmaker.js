@@ -11,6 +11,7 @@
 // cannot set. That keeps the whole tool a plain static page.
 
 import encode from './vendor/dist/encode.js';
+import { encodeWebpAnim, patchWebp, encodeApngAnim, patchApng } from './formats.js';
 import { COLORMAPS, COLORMAP_ORDER } from './colormaps.js';
 
 // ---- DOM ---------------------------------------------------------------
@@ -66,7 +67,10 @@ const logoInfo    = $('logo-info');
 const logoPreview = $('logo-preview');
 const logoDropText = $('logo-drop-text');
 
-const encodeBtn   = $('encode-btn');
+const encodeBtn   = $('encode-btn');         // Create GIF
+const encodeWebpBtn = $('encode-webp-btn');  // Create WebP
+const encodeApngBtn = $('encode-apng-btn');  // Create APNG
+const encodeBtns  = [encodeBtn, encodeWebpBtn, encodeApngBtn];
 const resetBtn    = $('reset-btn');
 const progress    = $('progress');
 const progressBar = progress.firstElementChild;
@@ -124,12 +128,15 @@ const PAUSE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.4
 // ---- State -------------------------------------------------------------
 let videoFile = null;        // File
 
-// On "Create GIF" we extract frames once and encode four size/quality variants,
-// each kept as a base GIF (1× speed, infinite loop) so speed/loop are instant
-// metadata patches. Invalidated when anything affecting the frames changes.
-// Each variant: { key, label, baseGif, baseDelayCs, frames, w, h, effFps,
-//                 quality, outUrl, outSize, delayCs }
+// Each "Create <format>" extracts frames once (cached + reused across formats at
+// the same settings) and encodes three size/quality variants of that format, each
+// kept as a base animation (1× speed, infinite loop) so speed/loop are instant
+// metadata patches. Only the most recently created format is shown (each "Create"
+// replaces the previous results). Invalidated when anything affecting frames changes.
+// Each variant: { key, label, format, mime, ext, base, baseDelayCs, frames, w, h,
+//                 effFps, quality, outUrl, outSize, delayCs }
 let variants = [];
+let cachedFrames = null;     // { frames, w, h, fps } reused across format clicks
 function revokeVariantUrls() { variants.forEach((v) => { if (v.outUrl) URL.revokeObjectURL(v.outUrl); }); }
 function markStale() {
   // Clear each card image's src FIRST (cancels any in-flight blob load cleanly),
@@ -141,6 +148,7 @@ function markStale() {
   result.classList.remove('show');
   revokeVariantUrls();
   variants = [];
+  cachedFrames = null;   // frames depend on the edit that just changed; re-extract
   updateGenerateView();  // un-collapse stage, hide star
 }
 
@@ -428,7 +436,7 @@ function afterCropChange({ keepFinal = true } = {}) {
   if (stylePane && !stylePane.hidden) drawPreview();
 }
 function refreshReady() {
-  encodeBtn.disabled = !videoFile;
+  encodeBtns.forEach((b) => { if (b) b.disabled = !videoFile; });
 }
 function paint(g, source, contentW, contentH, outW, outH, rotation, flip, filterStr) {
   g.save();
@@ -1837,25 +1845,36 @@ function variantDelayCs(v) {
   return Math.max(1, v.baseDelayCs / (parseFloat(speedSel.value) || 1));
 }
 
-// Build the variant cards once per encode (structure only). Each card's <img>,
-// meta and download link are kept on `v.el` and updated in place by later
+// Build the variant cards (structure only). They're grouped under a format heading
+// (only the most recently created format is present). Each card's
+// <img>, meta and download link are kept on `v.el` and updated in place by later
 // metadata patches, so we never detach a mid-load <img> (which would error when
 // its blob URL is revoked).
 function buildResultCards() {
   resultsGrid.innerHTML = '';
   const base = videoFile ? videoFile.name.replace(/\.[^.]+$/, '') : 'animation';
-  variants.forEach((v) => {
-    const card = document.createElement('div'); card.className = 'result-card';
-    const img = document.createElement('img'); img.alt = v.label;
-    const lab = document.createElement('div'); lab.className = 'rc-label'; lab.textContent = v.label;
-    const meta = document.createElement('div'); meta.className = 'rc-meta';
-    const dl = document.createElement('a'); dl.className = 'btn good small-btn';
-    dl.textContent = 'Download'; dl.download = `${base}-${v.key}.gif`;
-    img.title = 'Click to view full screen';
-    img.addEventListener('click', () => openLightbox(v.outUrl, v.label, dl.download));
-    card.append(img, lab, meta, dl);
-    resultsGrid.appendChild(card);
-    v.el = { img, meta, dl };
+  FORMAT_ORDER.forEach((fmt) => {
+    const group = variants.filter((v) => v.format === fmt);
+    if (!group.length) return;
+    const section = document.createElement('div'); section.className = 'result-group';
+    const head = document.createElement('h3'); head.className = 'rc-group-head';
+    head.textContent = FORMATS[fmt].label;
+    const grid = document.createElement('div'); grid.className = 'results-grid';
+    section.append(head, grid);
+    group.forEach((v) => {
+      const card = document.createElement('div'); card.className = 'result-card';
+      const img = document.createElement('img'); img.alt = `${FORMATS[fmt].label} — ${v.label}`;
+      const lab = document.createElement('div'); lab.className = 'rc-label'; lab.textContent = v.label;
+      const meta = document.createElement('div'); meta.className = 'rc-meta';
+      const dl = document.createElement('a'); dl.className = 'btn good small-btn';
+      dl.textContent = 'Download'; dl.download = `${base}-${v.key}.${v.ext}`;
+      img.title = 'Click to view full screen';
+      img.addEventListener('click', () => openLightbox(v.outUrl, img.alt, dl.download));
+      card.append(img, lab, meta, dl);
+      grid.appendChild(card);
+      v.el = { img, meta, dl };
+    });
+    resultsGrid.appendChild(section);
   });
   result.classList.add('show');
 }
@@ -1898,13 +1917,23 @@ function refreshResultCards() {
     const total = v.frames * (v.delayCs || 0) / 100;
     v.el.img.src = v.outUrl;       // reassigning src cancels any pending load cleanly
     v.el.dl.href = v.outUrl;
+    // GIF/WebP quality is 1–100; APNG "quality" is its lossy colour count (0 = lossless).
+    const q = v.format === 'apng' ? (v.quality ? `${v.quality}c` : 'lossless') : `q${v.quality}`;
     v.el.meta.textContent =
-      `${v.w}×${v.h} · ${v.frames}f · ${fps.toFixed(1)}fps · ${total.toFixed(1)}s · q${v.quality} · ${humanSize(v.outSize)}`;
+      `${v.w}×${v.h} · ${v.frames}f · ${fps.toFixed(1)}fps · ${total.toFixed(1)}s · ${q} · ${humanSize(v.outSize)}`;
   });
 }
 
-// Apply the current timing + loop to every variant base GIF (metadata-only
-// patch). Pass { rebuild: true } after an encode to (re)create the cards.
+// Patch one base animation's timing/loop in place, per its format. GIF delays are
+// centiseconds (patchGif); WebP/APNG use milliseconds (delayCs × 10).
+function patchVariant(v, delayCs, loop) {
+  if (v.format === 'webp') return patchWebp(v.base, delayCs * 10, loop);
+  if (v.format === 'apng') return patchApng(v.base, delayCs * 10, loop);
+  return patchGif(v.base, delayCs, loop);
+}
+
+// Apply the current timing + loop to every variant's base animation (metadata-only
+// patch, no re-encode). Pass { rebuild: true } after an encode to (re)create cards.
 function applyMetadata({ rebuild = false } = {}) {
   if (!variants.length) return false;
   const loop = parseInt(loopSelect.value, 10);
@@ -1913,7 +1942,7 @@ function applyMetadata({ rebuild = false } = {}) {
     const stale = [];
     variants.forEach((v) => {
       const delayCs = Math.max(1, Math.round(variantDelayCs(v)));
-      const blob = new Blob([patchGif(v.baseGif, delayCs, loop)], { type: 'image/gif' });
+      const blob = new Blob([patchVariant(v, delayCs, loop)], { type: v.mime });
       if (v.outUrl) stale.push(v.outUrl);
       v.outUrl = URL.createObjectURL(blob);
       v.outSize = blob.size; v.delayCs = delayCs;
@@ -1924,60 +1953,139 @@ function applyMetadata({ rebuild = false } = {}) {
     stale.forEach((u) => URL.revokeObjectURL(u));
     return true;
   } catch (err) {
-    console.warn('GIF metadata patch failed; will re-encode.', err);
+    console.warn('Metadata patch failed; will re-encode.', err);
     markStale();
     return false;
   }
 }
 
-// The size/quality variants produced on every "Create GIF". They share a single
-// frame-extraction pass; the smaller ones drop to half the frame rate and/or
-// lower gifski's quality. The user picks which to download.
+// The three size/quality tiers produced on every "Create <format>". All tiers
+// share a single frame-extraction pass; the smaller ones drop to half the frame
+// rate and/or lower the encoder's quality. The user picks which to download.
 const VARIANT_DEFS = [
   { key: 'high',   label: 'High quality',     fpsDiv: 1, qMul: 1 },
   { key: 'medium', label: 'Medium',           fpsDiv: 2, qMul: 1 },
   { key: 'small',  label: 'High compression', fpsDiv: 2, qMul: 0.75 },
 ];
 
-encodeBtn.addEventListener('click', async () => {
-  encodeBtn.disabled = true; resetBtn.disabled = true;
-  result.classList.remove('show');
-  markStale();
+// Output formats. `quality(tier, Q)` maps a tier (fpsDiv/qMul) + the user's 1–100
+// Quality to that encoder's knob: gifski/libwebp take 1–100; APNG takes a lossy
+// colour count (0 = lossless), so it gets its own size ladder. `encode` returns
+// a base animation at 1× speed / infinite loop (timing/loop are patched after).
+const FORMAT_ORDER = ['gif', 'webp', 'apng'];
+const FORMATS = {
+  gif: {
+    label: 'GIF', ext: 'gif', mime: 'image/gif', btn: () => encodeBtn,
+    quality: (t, Q) => Math.max(1, Math.min(100, Math.round(Q * t.qMul))),
+    encode: async (sub, w, h, durMs, q) => new Uint8Array(await runEncode(sub, w, h, durMs, -1, q)),
+  },
+  webp: {
+    label: 'WebP', ext: 'webp', mime: 'image/webp', btn: () => encodeWebpBtn,
+    quality: (t, Q) => Math.max(1, Math.min(100, Math.round(Q * t.qMul))),
+    encode: (sub, w, h, durMs, q) => encodeWebpAnim(
+      { frames: sub, width: w, height: h, frameDurations: sub.map(() => durMs), quality: q, loop: -1 }),
+  },
+  apng: {
+    label: 'APNG', ext: 'png', mime: 'image/png', btn: () => encodeApngBtn,
+    // High/Medium keep full colour ladders; the compressed tier quantises.
+    quality: (t) => (t.key === 'high' ? 0 : t.key === 'medium' ? 256 : 64),
+    encode: (sub, w, h, durMs, q) => encodeApngAnim(
+      { frames: sub, width: w, height: h, frameDurations: sub.map(() => durMs), cnum: q, loop: -1 }),
+  },
+};
+
+// Drop all current result variants (revoking their blobs) so each "Create" shows
+// only the most recently generated format. Keeps the cached frames, so switching
+// formats re-encodes from the same extraction without re-extracting.
+function clearResultVariants() {
+  variants.forEach((v) => {
+    if (v.el && v.el.img) v.el.img.removeAttribute('src');
+    if (v.outUrl) URL.revokeObjectURL(v.outUrl);
+  });
+  variants = [];
+}
+
+// How many frames the current settings will extract (mirrors framesFromVideo).
+function plannedFrameCount(fps) {
+  const ranges = keepRanges();
+  if (timingMode.value === 'duration') return Math.max(2, Math.round(fps * currentDuration()));
+  const dt = 1 / fps; let n = 0;
+  for (const r of ranges) for (let t = r.start; t < r.end - 1e-4; t += dt) n++;
+  return n;
+}
+// The output frame size the current settings will extract at (mirrors framesFromVideo).
+function plannedOutputSize() {
+  const f = fullDims();
+  const c = crop || { w: f.w, h: f.h };
+  return { w: Math.max(1, finalW || c.w), h: Math.max(1, finalH || c.h) };
+}
+// Extracting holds every frame in memory as RGBA (w·h·4 bytes). Huge sources
+// (e.g. a 3072² video) blow past the browser's allocation limit and fail with a
+// cryptic "Array buffer allocation failed". Estimate up front and, when it's in
+// the danger zone, stop with concrete guidance instead of crashing mid-encode.
+const FRAME_BYTES_LIMIT = 1.2e9;   // ~1.2 GB of frame data → very likely to fail
+function checkExportBudget(fps) {
+  const n = plannedFrameCount(fps);
+  const { w, h } = plannedOutputSize();
+  const bytes = n * w * h * 4;
+  if (bytes <= FRAME_BYTES_LIMIT) return null;
+  // Suggest an output width that brings the frame data down to a comfy ~400 MB.
+  const scale = Math.sqrt(4e8 / bytes);
+  const sw = Math.max(64, Math.round((w * scale) / 16) * 16);
+  const sh = Math.max(64, Math.round(sw * h / w));
+  return `Too big to encode: ${n} frames at ${w}×${h} ≈ ${(bytes / 1e9).toFixed(1)} GB in memory, `
+    + `which will likely fail. Shrink it first — in “Crop & size”, tick “Custom resolution” and set `
+    + `the output to about ${sw}×${sh}px (or crop tighter, lower the FPS, or trim to fewer seconds), `
+    + `then create again.`;
+}
+
+// Encode one format's three tiers from the (cached) extracted frames.
+async function generateFormat(fmt) {
+  const F = FORMATS[fmt];
+  const fps = captureFps();
+  // Pre-flight: refuse obviously-too-large jobs with guidance (don't crash).
+  const budgetWarning = checkExportBudget(fps);
+  if (budgetWarning) { setStatus(budgetWarning, true); return; }
+  encodeBtns.forEach((b) => { if (b) b.disabled = true; });
+  resetBtn.disabled = true;
   setStatus('Preparing…'); setProgress(0);
   try {
-    const fps = captureFps();
-    const tf = readTransform();
     const Q = parseInt(qualityIn.value, 10) || 80;
 
-    // Extract every frame once at full rate; variants reuse this set.
-    const { frames, w, h } = await framesFromVideo(fps, tf);
+    // Extract every frame once at full rate, then reuse across formats/tiers.
+    if (!cachedFrames || cachedFrames.fps !== fps) {
+      const tf = readTransform();
+      const ex = await framesFromVideo(fps, tf);
+      cachedFrames = { frames: ex.frames, w: ex.w, h: ex.h, fps };
+    }
+    const { frames, w, h } = cachedFrames;
 
-    // Build distinct variant specs (skip any that subsample below 2 frames or
-    // duplicate another variant's frame-count + quality combination).
+    // Build distinct tier specs (skip any that subsample below 2 frames or
+    // duplicate another tier's frame-count + quality combination).
     const specs = [];
     const seen = new Set();
     for (const def of VARIANT_DEFS) {
       const sub = def.fpsDiv > 1 ? frames.filter((_, i) => i % def.fpsDiv === 0) : frames;
       if (sub.length < 2) continue;
-      const quality = Math.max(1, Math.min(100, Math.round(Q * def.qMul)));
+      const quality = F.quality(def, Q);
       const sig = sub.length + ':' + quality;
       if (seen.has(sig)) continue;
       seen.add(sig);
       specs.push({ ...def, sub, quality, effFps: fps / def.fpsDiv });
     }
 
-    variants = [];
+    clearResultVariants();
     for (let i = 0; i < specs.length; i++) {
       const sp = specs[i];
-      setStatus(`Encoding ${sp.label} — ${sp.sub.length} frames with gifski…`);
+      setStatus(`Encoding ${F.label} — ${sp.label} (${sp.sub.length} frames)…`);
       setProgress(0.6 + 0.4 * (i / specs.length));
       await new Promise((r) => setTimeout(r, 20));
-      // Each base GIF is 1× speed + infinite loop; speed/loop become instant
-      // metadata patches afterwards (and on later timing/loop changes).
-      const gif = await runEncode(sp.sub, w, h, 1000 / sp.effFps, -1, sp.quality);
+      // Each base is 1× speed + infinite loop; speed/loop become instant metadata
+      // patches afterwards (and on later timing/loop changes).
+      const bytes = await F.encode(sp.sub, w, h, 1000 / sp.effFps, sp.quality);
       variants.push({
-        key: sp.key, label: sp.label,
-        baseGif: new Uint8Array(gif),
+        key: sp.key, label: sp.label, format: fmt, mime: F.mime, ext: F.ext,
+        base: new Uint8Array(bytes),
         baseDelayCs: 100 / sp.effFps,
         frames: sp.sub.length, w, h, effFps: sp.effFps,
         quality: sp.quality, outUrl: null, outSize: 0, delayCs: 0,
@@ -1986,18 +2094,31 @@ encodeBtn.addEventListener('click', async () => {
     setProgress(1);
 
     applyMetadata({ rebuild: true });
-    updateGenerateView();   // now generated: collapse the preview, reveal the star ask
-    setStatus('Done — pick a size to download. Speed & loop update instantly.');
+    updateGenerateView();   // generated: collapse the preview, reveal the star ask
+    setStatus(`Done — ${F.label} ready. Speed & loop update instantly.`);
     result.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     console.error(err);
-    setStatus('Error: ' + (err && err.message ? err.message : err), true);
+    const msg = (err && err.message) ? err.message : String(err);
+    // Safety net: an out-of-memory failure that slipped under the pre-flight check
+    // still gets actionable guidance rather than the raw allocation error.
+    if (/alloc|out of memory|memory/i.test(msg)) {
+      const { w, h } = plannedOutputSize();
+      setStatus(`Ran out of memory encoding ${w}×${h}. Shrink it — in “Crop & size”, tick `
+        + `“Custom resolution” and use a smaller output (or crop tighter / lower FPS / trim), then try again.`, true);
+    } else {
+      setStatus('Error: ' + msg, true);
+    }
   } finally {
     setProgress(null);
-    encodeBtn.disabled = false; resetBtn.disabled = false;
+    resetBtn.disabled = false;
     refreshReady();
   }
-});
+}
+
+encodeBtn.addEventListener('click', () => generateFormat('gif'));
+encodeWebpBtn.addEventListener('click', () => generateFormat('webp'));
+encodeApngBtn.addEventListener('click', () => generateFormat('apng'));
 
 // Timing (speed or total duration) & loop are metadata: patch the base GIF
 // instantly when they change — no re-encode.
@@ -2068,6 +2189,54 @@ window.__gifskiTest = async ({ n = 3, w = 64, h = 48, rotation = 0, flip = 'none
   const bytes = new Uint8Array(gif.buffer || gif);
   return { header: String.fromCharCode(...bytes.slice(0, 6)), bytes: bytes.length,
     w: out.w, h: out.h, frames: frames.length };
+};
+
+// Build n synthetic RGBA frames for the WebP/APNG encoder tests. When `alpha` is
+// set, the top-left quadrant is cleared to transparent to exercise the alpha path.
+function __synthFrames(n, w, h, alpha) {
+  scratchCanvas.width = w; scratchCanvas.height = h;
+  const g = scratchCanvas.getContext('2d', { willReadFrequently: true });
+  const colors = ['#d62828', '#28a745', '#1d6fd6', '#f4a300', '#7b2cbf'];
+  const frames = [];
+  for (let i = 0; i < n; i++) {
+    g.clearRect(0, 0, w, h);
+    g.fillStyle = colors[i % colors.length]; g.fillRect(0, 0, w, h);
+    if (alpha) g.clearRect(0, 0, (w >> 1), (h >> 1));
+    frames.push(g.getImageData(0, 0, w, h));
+  }
+  return frames;
+}
+
+// Encode synthetic frames to an animated WebP, then verify the container magic and
+// that patchWebp rewrites timing/loop. Returns a summary object.
+window.__webpTest = async ({ n = 3, w = 64, h = 48, quality = 80, alpha = true } = {}) => {
+  const frames = __synthFrames(n, w, h, alpha);
+  const bytes = await encodeWebpAnim({ frames, width: w, height: h,
+    frameDurations: frames.map(() => 100), quality, loop: -1 });
+  const magic = String.fromCharCode(...bytes.slice(0, 4)) + String.fromCharCode(...bytes.slice(8, 12));
+  const patched = patchWebp(bytes, 250, 0);   // 250ms/frame, play once
+  return { magic, ok: magic === 'RIFFWEBP', bytes: bytes.length,
+    patchedBytes: patched.length, w, h, frames: frames.length };
+};
+
+// Encode synthetic frames to an APNG, then verify the PNG signature + acTL chunk
+// and that patchApng rewrites timing/loop (with valid CRCs).
+window.__apngTest = ({ n = 3, w = 64, h = 48, cnum = 0, alpha = true } = {}) => {
+  const frames = __synthFrames(n, w, h, alpha);
+  const bytes = encodeApngAnim({ frames, width: w, height: h,
+    frameDurations: frames.map(() => 100), cnum, loop: -1 });
+  const sig = [137, 80, 78, 71, 13, 10, 26, 10].every((b, i) => bytes[i] === b);
+  let hasAcTL = false;
+  for (let p = 8; p + 8 <= bytes.length;) {
+    const len = (bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3];
+    const type = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]);
+    if (type === 'acTL') hasAcTL = true;
+    if (type === 'IEND') break;
+    p += 8 + len + 4;
+  }
+  const patched = patchApng(bytes, 250, 0);
+  return { ok: sig && hasAcTL, sig, hasAcTL, bytes: bytes.length,
+    patchedBytes: patched.length, w, h, frames: frames.length };
 };
 
 // Expose the keep-range solver so its logic can be checked directly.
