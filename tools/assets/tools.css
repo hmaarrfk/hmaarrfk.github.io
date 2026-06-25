@@ -248,7 +248,15 @@ input[type="range"] { width: 100%; }
 .result.show { display: block; }
 .result .meta { color: var(--muted); margin: 12px 0; }
 
-/* Four size/quality variants from a single render. */
+/* Results are grouped by output format (GIF / WebP / APNG); each group holds its
+   three size/quality variants in a grid. */
+.result-group { margin-bottom: 18px; }
+.result-group:last-child { margin-bottom: 0; }
+.rc-group-head {
+  margin: 0 0 8px; font-size: .95rem; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border); padding-bottom: 4px;
+}
 .results-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
