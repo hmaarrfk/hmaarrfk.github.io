@@ -32,7 +32,7 @@ const els = {
   // preview / trim
   preview: $('preview'), timecode: $('timecode'),
   tlTrack: $('tl-track'), handleIn: $('handle-in'), handleOut: $('handle-out'),
-  playhead: $('playhead'), dimHead: $('dim-head'), dimTail: $('dim-tail'),
+  playhead: $('playhead'), dimHead: $('dim-head'), dimTail: $('dim-tail'), keepRegion: $('keep-region'),
   cutsLayer: $('cuts-layer'), tlPending: $('tl-pending'),
   btnSetIn: $('btn-set-in'), btnSetOut: $('btn-set-out'), btnResetTrim: $('btn-reset-trim'),
   trimInfo: $('trim-info'),
@@ -296,6 +296,8 @@ function renderTrim() {
   const inX = timeToX(state.inS), outX = timeToX(state.outS);
   els.handleIn.style.left = `${inX}px`;
   els.handleOut.style.left = `${outX}px`;
+  els.keepRegion.style.left = `${inX}px`;
+  els.keepRegion.style.width = `${Math.max(0, outX - inX)}px`;
   els.dimHead.style.width = `${inX}px`;
   els.dimTail.style.width = `${trackWidth() - outX}px`;
   renderCuts();
