@@ -77,6 +77,19 @@ let currentStep = 'source';
 // Step navigation (one panel at a time, like the GIF Maker)
 // ---------------------------------------------------------------------------
 let previewMode = 'edit';   // 'edit' (trim) | 'output' (settings/export)
+let pendingSeek = null;     // latest scrub target while a seek is in flight
+
+// Scrub to a time: update the playhead immediately for responsiveness, but only
+// issue a new video seek when the previous one has finished (coalescing rapid
+// drag moves so the <video> isn't overwhelmed — a little delay is fine).
+function scrubSeek(t) {
+  if (!state) return;
+  t = clamp(t, 0, Math.max(0, state.durationS - 1e-3));
+  els.playhead.style.left = `${timeToX(t)}px`;
+  els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
+  if (els.preview.seeking) pendingSeek = t;
+  else els.preview.currentTime = t;
+}
 
 function relocatePreview(name) {
   // Move the single shared preview block into the active step's host.
@@ -416,7 +429,10 @@ function setupPreview() {
     }
     renderPlayhead();
   };
-  v.onseeked = renderPlayhead;
+  v.onseeked = () => {
+    renderPlayhead();
+    if (pendingSeek != null) { const t = pendingSeek; pendingSeek = null; v.currentTime = t; }
+  };
   v.onloadedmetadata = () => { renderTrim(); renderPlayhead(); };
 
   els.btnSetIn.onclick = () => { state.inS = clamp(v.currentTime || 0, 0, state.outS - frameStep()); renderTrim(); };
@@ -436,11 +452,20 @@ function setupPreview() {
   };
   els.btnClearCuts.onclick = () => { state.cuts = []; state.pendingCutStart = null; renderTrim(); };
 
-  // Click track to seek
+  // Press-and-drag anywhere on the track to scrub through frames.
   els.tlTrack.onpointerdown = (e) => {
-    if (e.target === els.handleIn || e.target === els.handleOut) return;
+    if (e.target === els.handleIn || e.target === els.handleOut) return;   // handles have their own drag
+    if (e.target.parentElement === els.cutsLayer) return;                  // let a cut band's click remove it
     const rect = els.tlTrack.getBoundingClientRect();
-    seek(xToTime(e.clientX - rect.left));
+    v.pause();
+    try { els.tlTrack.setPointerCapture(e.pointerId); } catch (_) {}
+    scrubSeek(xToTime(e.clientX - rect.left));
+    els.tlTrack.onpointermove = (ev) => scrubSeek(xToTime(ev.clientX - rect.left));
+    els.tlTrack.onpointerup = () => {
+      els.tlTrack.onpointermove = null;
+      els.tlTrack.onpointerup = null;
+      try { els.tlTrack.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
   };
 
   // Drag handles
@@ -449,12 +474,13 @@ function setupPreview() {
       e.preventDefault(); e.stopPropagation();
       handle.setPointerCapture(e.pointerId);
       const rect = els.tlTrack.getBoundingClientRect();
+      v.pause();
       const move = (ev) => {
         const t = xToTime(ev.clientX - rect.left);
         if (which === 'in') state.inS = clamp(t, 0, state.outS - frameStep());
         else state.outS = clamp(t, state.inS + frameStep(), state.durationS);
         renderTrim();
-        seek(which === 'in' ? state.inS : state.outS);
+        scrubSeek(which === 'in' ? state.inS : state.outS);
       };
       const up = (ev) => { handle.releasePointerCapture(e.pointerId); handle.onpointermove = null; handle.onpointerup = null; };
       handle.onpointermove = move;
