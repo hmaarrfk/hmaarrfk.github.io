@@ -85,10 +85,29 @@ let pendingSeek = null;     // latest scrub target while a seek is in flight
 function scrubSeek(t) {
   if (!state) return;
   t = clamp(t, 0, Math.max(0, state.durationS - 1e-3));
-  els.playhead.style.left = `${timeToX(t)}px`;
-  els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
+  paintPlayhead(t);                          // immediate visual (mode-aware)
   if (els.preview.seeking) pendingSeek = t;
   else els.preview.currentTime = t;
+}
+
+// Position the playhead + timecode for a source time, respecting the timeline
+// mode (full edit timeline vs compressed output timeline).
+function paintPlayhead(t) {
+  if (previewMode === 'output') {
+    const kept = keptDuration();
+    const o = clamp(toOutputTime(t), 0, kept);
+    els.playhead.style.left = `${(kept ? o / kept : 0) * trackWidth()}px`;
+    els.timecode.textContent = `${fmtTime(o)} / ${fmtTime(kept)}`;
+  } else {
+    els.playhead.style.left = `${timeToX(t)}px`;
+    els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
+  }
+}
+
+// Map a track x-offset to the source time to seek to (compressed in output mode).
+function xToSeekTime(x) {
+  const frac = clamp(x / trackWidth(), 0, 1);
+  return previewMode === 'output' ? fromOutputTime(frac * keptDuration()) : frac * state.durationS;
 }
 
 function relocatePreview(name) {
@@ -321,6 +340,40 @@ function keptDuration() {
   return Math.max(0.05, (state.outS - state.inS) - cut);
 }
 
+// The kept ranges: [inS, outS] with every cut removed, in order.
+function keptSegments() {
+  const segs = [];
+  let cur = state.inS;
+  for (const c of activeCuts()) {
+    if (c.start > cur) segs.push({ start: cur, end: c.start });
+    cur = Math.max(cur, c.end);
+  }
+  if (cur < state.outS) segs.push({ start: cur, end: state.outS });
+  return segs;
+}
+
+// Source time -> compressed (output) time, and back. These power the compressed
+// timeline shown in Settings/Export, where trim + cuts are already removed.
+function toOutputTime(t) {
+  let o = 0;
+  for (const s of keptSegments()) {
+    if (t >= s.end) o += s.end - s.start;
+    else if (t > s.start) return o + (t - s.start);
+    else return o;
+  }
+  return o;
+}
+function fromOutputTime(o) {
+  let acc = 0;
+  const segs = keptSegments();
+  for (const s of segs) {
+    const d = s.end - s.start;
+    if (o <= acc + d) return s.start + (o - acc);
+    acc += d;
+  }
+  return segs.length ? segs[segs.length - 1].end : state.inS;
+}
+
 // Whether a source time (seconds) lands inside a removed section.
 function inCut(t) {
   for (const c of activeCuts()) if (t >= c.start && t < c.end) return true;
@@ -365,6 +418,20 @@ function renderPending() {
 }
 
 function renderTrim() {
+  // Compressed timeline (Settings/Export): one continuous green bar = the final
+  // output, with the trimmed head/tail and every cut already removed.
+  if (previewMode === 'output') {
+    els.keepRegion.style.left = '0px';
+    els.keepRegion.style.width = `${trackWidth()}px`;
+    els.dimHead.style.width = '0px';
+    els.dimTail.style.width = '0px';
+    els.cutsLayer.innerHTML = '';
+    els.tlPending.style.display = 'none';
+    renderPlayhead();
+    updateEstimate();
+    return;
+  }
+
   const inX = timeToX(state.inS), outX = timeToX(state.outS);
   els.handleIn.style.left = `${inX}px`;
   els.handleOut.style.left = `${outX}px`;
@@ -387,9 +454,7 @@ function renderTrim() {
 }
 
 function renderPlayhead() {
-  const t = els.preview.currentTime || 0;
-  els.playhead.style.left = `${timeToX(t)}px`;
-  els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
+  paintPlayhead(els.preview.currentTime || 0);
   if (state.pendingCutStart != null) renderPending();
 }
 
@@ -459,8 +524,8 @@ function setupPreview() {
     const rect = els.tlTrack.getBoundingClientRect();
     v.pause();
     try { els.tlTrack.setPointerCapture(e.pointerId); } catch (_) {}
-    scrubSeek(xToTime(e.clientX - rect.left));
-    els.tlTrack.onpointermove = (ev) => scrubSeek(xToTime(ev.clientX - rect.left));
+    scrubSeek(xToSeekTime(e.clientX - rect.left));
+    els.tlTrack.onpointermove = (ev) => scrubSeek(xToSeekTime(ev.clientX - rect.left));
     els.tlTrack.onpointerup = () => {
       els.tlTrack.onpointermove = null;
       els.tlTrack.onpointerup = null;
