@@ -1,0 +1,74 @@
+# Video Compressor
+
+A static, offline, in-browser video compressor. It shrinks a video to a target
+file size or a chosen bitrate using the browser's **WebCodecs** API — which
+routes to the machine's *hardware* video encoder (Apple VideoToolbox, NVIDIA
+NVENC, Intel QSV, VAAPI, …). Nothing is uploaded; every step runs locally.
+
+This is distinct from the [GIF Maker](../gifmaker/): that tool produces animated
+GIF/WebP/APNG; this one produces a compressed **MP4** (H.264 or H.265).
+
+## Pipeline
+
+```
+MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoEncoder  ──►  mp4-muxer  ──►  MP4 Blob
+ (demux)         (hardware)         (resize/fps)         (hardware)          (mux)
+```
+
+- **Demux** — [MP4Box.js](https://github.com/gpac/mp4box.js) reads the MP4/MOV,
+  yields the encoded video samples plus the codec configuration record
+  (`avcC`/`hvcC`) the decoder needs.
+- **Decode → scale → encode** — WebCodecs `VideoDecoder`/`VideoEncoder`.
+  Resolution change happens on an `OffscreenCanvas`; frame-rate reduction drops
+  frames by presentation timestamp.
+- **Mux** — [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) writes the
+  encoded chunks back into an MP4 with `fastStart` (moov at the front).
+- **Audio** — AAC audio is **copied through unchanged** via
+  `addAudioChunkRaw` (remuxed, never re-encoded). Non-AAC audio is dropped, and
+  the UI says so.
+
+## Files
+
+| Path | What it is |
+|------|------------|
+| `index.html` | The page. No Jekyll front matter, so the JS is served verbatim. Loads MP4Box as a global `<script>`, then the module. |
+| `compressor.js` | ES module: demux, transcode, mux, and all UI wiring. |
+| `vendor/mp4box/` | Vendored MP4Box.js UMD bundle + license. |
+| `vendor/mp4-muxer/` | Vendored mp4-muxer ESM bundle (`.mjs` renamed to `.js` so GitHub Pages serves it with a JS MIME type) + license. |
+| `vendor/update-vendor.sh` | Re-vendors both deps from npm (see below). |
+
+## Vendoring
+
+Dependencies are **vendored**, not fetched at runtime, so the tool works
+offline and never depends on a CDN. Pinned versions:
+
+- `mp4box` **0.5.2**
+- `mp4-muxer` **5.1.5**
+
+To update:
+
+```bash
+cd tools/videocompressor/vendor
+./update-vendor.sh                 # pinned versions
+./update-vendor.sh 0.5.2 5.1.5     # or specify mp4box + mp4-muxer versions
+```
+
+Then bump the versions above, re-test, and commit the changed `vendor/` files.
+
+## Browser support
+
+WebCodecs is required. As of writing that means a recent **Chrome/Edge** or
+**Safari**; Firefox support is still landing. HEVC *encoding* in particular
+depends on the OS/GPU — the tool probes `VideoEncoder.isConfigSupported()` and
+falls back or reports a clear error if a codec isn't available. If WebCodecs is
+missing entirely, the page shows a compatibility notice instead of the tool.
+
+## Notes / limitations
+
+- Input must be an MP4/MOV/M4V the browser can decode (H.264 or H.265). Formats
+  like ProRes or VP9-in-WebM aren't handled by this MP4-focused demux path.
+- The whole file is read into memory to demux it, so extremely large inputs are
+  bounded by available RAM.
+- Target-size mode computes a constant video bitrate from the duration
+  (single-pass), so the final size is an estimate — very close, not exact. Use
+  the result's size readout and nudge the target if you need to hit a hard cap.

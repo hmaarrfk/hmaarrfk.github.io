@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<!--
+  Video Compressor — shrink a video entirely in your browser.
+
+  Uses the browser's built-in WebCodecs API, so the actual encoding runs on
+  your machine's hardware video encoder (Apple VideoToolbox, NVIDIA NVENC,
+  Intel QSV, VAAPI — whatever your OS/GPU provides). Nothing is uploaded.
+
+    demux  : MP4Box.js         (vendored, ./vendor/mp4box/)
+    decode : WebCodecs VideoDecoder   (hardware)
+    scale  : OffscreenCanvas / <canvas>
+    encode : WebCodecs VideoEncoder   (hardware)
+    mux    : mp4-muxer         (vendored, ./vendor/mp4-muxer/)
+
+  Audio (AAC) is copied through untouched — remuxed, never re-encoded — so it
+  costs no quality and little time.
+
+  This page deliberately carries no Jekyll front matter so its JavaScript is
+  copied verbatim and never processed by Liquid.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Compressor — hardware-accelerated, in your browser</title>
+  <meta name="description" content="Compress a video to a target size or bitrate entirely in your browser, using your machine's hardware video encoder via WebCodecs. Nothing is uploaded.">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/tools/assets/tools.css">
+  <!-- MP4Box (UMD) attaches window.MP4Box; loaded before the module so
+       compressor.js can read it. Vendored locally — no CDN, works offline. -->
+  <script src="/tools/videocompressor/vendor/mp4box/mp4box.all.min.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/tools/">&larr; Tools</a>
+    <span class="title">Video Compressor</span>
+    <a class="brand" href="/">Mark Harfouche</a>
+  </div>
+
+  <div class="wrap">
+
+    <p class="lede">
+      Shrink a video to a target file size or bitrate &mdash; H.264 or H.265 &mdash;
+      using your computer's <strong>hardware video encoder</strong> through the
+      browser's <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API">WebCodecs</a>
+      API. The file never leaves your machine.
+    </p>
+
+    <!-- Compatibility banner, shown only if WebCodecs is missing. -->
+    <div class="panel" id="unsupported" hidden>
+      <h2 style="margin-top:0">Your browser can't run this tool</h2>
+      <p class="muted" id="unsupported-why"></p>
+      <p class="muted">
+        WebCodecs is available in recent Chrome, Edge, and Safari. Firefox
+        support is still landing. Try the latest Chrome or Safari.
+      </p>
+    </div>
+
+    <!-- STEP 1 · SOURCE -->
+    <section class="panel" id="pane-source">
+      <h2 style="margin-top:0">Add your video</h2>
+      <p class="tagline">
+        No data is transmitted; all encoding happens on your device.
+        <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/videocompressor" target="_blank" rel="noopener">Open source on GitHub</a>.
+      </p>
+      <div class="drop" id="drop-video">
+        <input type="file" id="file-video" accept="video/mp4,video/quicktime,video/*,.mp4,.mov,.m4v">
+        <p><strong>Drop a video here</strong> or click to choose</p>
+        <p class="small muted">MP4, MOV, or M4V &mdash; H.264 or H.265 video.</p>
+        <p class="small muted" style="margin-bottom:0">
+          Compressed on your device with your hardware encoder. Never uploaded.
+        </p>
+      </div>
+      <div id="video-info" class="status"></div>
+    </section>
+
+    <!-- STEP 2 · SETTINGS -->
+    <section class="panel" id="pane-settings" hidden>
+      <h2 style="margin-top:0">Compression settings</h2>
+
+      <!-- Size target mode -->
+      <div class="field-group" style="margin-bottom:14px">
+        <div class="row" style="gap:22px; flex-wrap:wrap">
+          <label class="checkbox" style="cursor:pointer">
+            <input type="radio" name="mode" value="size" checked> Target file size
+          </label>
+          <label class="checkbox" style="cursor:pointer">
+            <input type="radio" name="mode" value="bitrate"> Set bitrate
+          </label>
+        </div>
+
+        <div class="controls" style="margin-top:14px">
+          <div class="field" id="field-size">
+            <label for="in-size">Target size <span class="lu">(MB)</span></label>
+            <input type="number" id="in-size" value="100" min="1" step="1">
+            <span class="hint" id="hint-size"></span>
+          </div>
+          <div class="field" id="field-bitrate" hidden>
+            <label for="in-bitrate">Video bitrate <span class="lu">(Mbps)</span></label>
+            <input type="number" id="in-bitrate" value="4" min="0.1" step="0.1">
+            <span class="hint" id="hint-bitrate"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="field">
+          <label for="in-scale">Resolution</label>
+          <select id="in-scale">
+            <option value="1">Keep original (100%)</option>
+            <option value="0.75">75% each axis</option>
+            <option value="0.5" selected>50% each axis</option>
+            <option value="0.25">25% each axis</option>
+          </select>
+          <span class="hint" id="hint-scale"></span>
+        </div>
+
+        <div class="field">
+          <label for="in-fps">Frame rate</label>
+          <select id="in-fps">
+            <option value="0">Keep original</option>
+            <option value="60">60 fps</option>
+            <option value="30" selected>30 fps</option>
+            <option value="24">24 fps</option>
+            <option value="15">15 fps</option>
+          </select>
+          <span class="hint" id="hint-fps"></span>
+        </div>
+
+        <div class="field">
+          <label for="in-codec">Codec</label>
+          <select id="in-codec">
+            <option value="avc">H.264 (most compatible)</option>
+            <option value="hevc">H.265 / HEVC (smaller)</option>
+          </select>
+          <span class="hint" id="hint-codec"></span>
+        </div>
+
+        <div class="field">
+          <label>Audio</label>
+          <label class="checkbox" style="margin-top:4px">
+            <input type="checkbox" id="in-audio" checked> Keep audio (copied, no re-encode)
+          </label>
+          <span class="hint" id="hint-audio"></span>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:20px; gap:14px; flex-wrap:wrap">
+        <button class="btn" id="btn-compress" type="button">Compress video</button>
+        <button class="btn" id="btn-cancel" type="button" hidden
+                style="background:var(--danger)">Cancel</button>
+        <span class="status" id="est" style="margin-top:0"></span>
+      </div>
+
+      <div class="progress" id="progress"><div></div></div>
+      <div class="status" id="status"></div>
+    </section>
+
+    <!-- STEP 3 · RESULT -->
+    <section class="panel result" id="pane-result">
+      <h2 style="margin-top:0">Done</h2>
+      <div class="result-card" style="text-align:left">
+        <video id="result-video" controls playsinline style="max-width:100%;border-radius:var(--radius)"></video>
+        <div class="rc-meta" id="result-meta"></div>
+        <a class="btn" id="download" download>Download</a>
+      </div>
+      <p class="small muted" style="margin-top:14px">
+        Not happy with the size or quality? Adjust the settings above and compress again.
+      </p>
+    </section>
+
+    <details class="help-details">
+      <summary>How this works &amp; privacy</summary>
+      <p>
+        This tool demuxes your file with
+        <a href="https://github.com/gpac/mp4box.js" target="_blank" rel="noopener">MP4Box.js</a>,
+        decodes and re-encodes the video with the browser's
+        <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API" target="_blank" rel="noopener">WebCodecs</a>
+        API &mdash; which routes to your machine's hardware video encoder &mdash;
+        and repackages the result with
+        <a href="https://github.com/Vanilagy/mp4-muxer" target="_blank" rel="noopener">mp4-muxer</a>.
+        Every step runs locally in your browser; your video is never uploaded.
+      </p>
+      <p>
+        AAC audio is <strong>copied through unchanged</strong> (remuxed, not
+        re-encoded), so keeping audio costs no extra quality and almost no time.
+        Video with an audio codec other than AAC will have its audio dropped
+        &mdash; you'll be told when that happens.
+      </p>
+    </details>
+
+  </div>
+
+  <script type="module" src="/tools/videocompressor/compressor.js"></script>
+</body>
+</html>
