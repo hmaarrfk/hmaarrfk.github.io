@@ -3,9 +3,17 @@
 // Pipeline:  MP4Box.js (demux)  ->  VideoDecoder (HW)  ->  scale on a canvas
 //            ->  VideoEncoder (HW)  ->  mp4-muxer (mux)  ->  Blob.
 //
-// AAC audio is copied through untouched: the original encoded audio samples are
-// handed straight to the muxer (addAudioChunkRaw), so audio is never
-// re-encoded. Everything runs locally; no file ever leaves the machine.
+// Large files (multi-GB) are handled without ever reading the whole file into
+// one ArrayBuffer (Chrome caps a single ArrayBuffer near 2 GB). Instead:
+//   * metadata is parsed from `moov` alone — we feed MP4Box every top-level box
+//     *except the mdat payload* (just its 8-byte header), so it can reach and
+//     parse `moov` even when it sits at the end of the file;
+//   * the encoded video samples are streamed out of `mdat` in chunks during
+//     compression, feeding the decoder with backpressure and releasing each
+//     batch so memory stays bounded.
+//
+// AAC audio is copied through untouched (remuxed, never re-encoded).
+// Everything runs locally; no file ever leaves the machine.
 //
 // MP4Box is loaded as a global (window.MP4Box) by a <script> tag in index.html.
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
@@ -18,8 +26,16 @@ const MP4Box = window.MP4Box;
 const $ = (id) => document.getElementById(id);
 const els = {
   unsupported: $('unsupported'), unsupportedWhy: $('unsupported-why'),
-  paneSource: $('pane-source'), paneSettings: $('pane-settings'), paneResult: $('pane-result'),
+  paneSource: $('pane-source'), panePreview: $('pane-preview'),
+  paneSettings: $('pane-settings'), paneResult: $('pane-result'),
   drop: $('drop-video'), file: $('file-video'), info: $('video-info'),
+  // preview / trim
+  preview: $('preview'), timecode: $('timecode'),
+  tlTrack: $('tl-track'), handleIn: $('handle-in'), handleOut: $('handle-out'),
+  playhead: $('playhead'), dimHead: $('dim-head'), dimTail: $('dim-tail'),
+  btnSetIn: $('btn-set-in'), btnSetOut: $('btn-set-out'), btnResetTrim: $('btn-reset-trim'),
+  trimInfo: $('trim-info'),
+  // settings
   fieldSize: $('field-size'), fieldBitrate: $('field-bitrate'),
   inSize: $('in-size'), inBitrate: $('in-bitrate'),
   inScale: $('in-scale'), inFps: $('in-fps'), inCodec: $('in-codec'), inAudio: $('in-audio'),
@@ -43,10 +59,10 @@ function detectSupport() {
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let state = null;   // { file, buffer, mp4, video, audio, durationS, fps }
+let state = null;   // { file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL, inS, outS }
 let running = false;
 let cancelRequested = false;
-let lastUrl = null; // object URL for the produced blob (revoked on re-run)
+let lastUrl = null;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,12 +73,14 @@ const fmtBytes = (n) => {
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 };
-const fmtDuration = (s) => {
+const fmtTime = (s) => {
+  s = Math.max(0, s || 0);
   const m = Math.floor(s / 60), sec = (s % 60);
-  return `${m}:${sec.toFixed(1).padStart(4, '0')}`;
+  return `${m}:${sec.toFixed(2).padStart(5, '0')}`;
 };
 const even = (n) => Math.max(2, Math.round(n / 2) * 2);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function setStatus(msg) { els.status.textContent = msg || ''; }
 function setProgress(frac) {
@@ -71,62 +89,94 @@ function setProgress(frac) {
   els.progress.firstElementChild.style.width = `${clamp(frac, 0, 1) * 100}%`;
 }
 
-// Read a box's raw payload (after its header) straight out of the file buffer.
-// MP4Box exposes each parsed box's byte range via .start / .size / .hdr_size.
-function boxPayload(fileBytes, box) {
-  return fileBytes.slice(box.start + box.hdr_size, box.start + box.size);
+// Read a byte range of the File as an ArrayBuffer (streams from disk; never the
+// whole file at once).
+async function readRange(file, start, end) {
+  return file.slice(start, end).arrayBuffer();
 }
 
-// Extract the codec configuration record (avcC / hvcC) for a VideoDecoder's
-// `description`. Without it, avc1/hvc1 samples (length-prefixed NAL units)
-// cannot be decoded.
-function videoDescription(mp4, fileBytes, trackId) {
+// ---------------------------------------------------------------------------
+// Top-level atom walk — locate moov / mdat with tiny header reads only.
+// ---------------------------------------------------------------------------
+async function walkAtoms(file) {
+  const total = file.size;
+  const atoms = [];
+  let pos = 0;
+  while (pos < total) {
+    const head = new DataView(await readRange(file, pos, Math.min(pos + 16, total)));
+    if (head.byteLength < 8) break;
+    let size = head.getUint32(0);
+    const type = String.fromCharCode(head.getUint8(4), head.getUint8(5), head.getUint8(6), head.getUint8(7));
+    let hdr = 8;
+    if (size === 1) { size = Number(head.getBigUint64(8)); hdr = 16; }
+    else if (size === 0) { size = total - pos; }          // extends to EOF
+    atoms.push({ type, start: pos, size, hdr });
+    if (size <= 0) break;
+    pos += size;
+  }
+  return atoms;
+}
+
+// Read a parsed box's payload (after its header) straight from the file.
+// MP4Box exposes each box's true byte range via .start / .size / .hdr_size.
+async function boxPayload(file, box) {
+  return new Uint8Array(await readRange(file, box.start + box.hdr_size, box.start + box.size));
+}
+
+async function videoDescription(file, mp4, trackId) {
   const trak = mp4.getTrackById(trackId);
   for (const entry of trak.mdia.minf.stbl.stsd.entries) {
     const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
-    if (box) return boxPayload(fileBytes, box);
+    if (box) return boxPayload(file, box);
   }
   return null;
 }
 
-// Walk the esds descriptor tree to the DecoderSpecificInfo (AudioSpecificConfig)
-// AAC needs. MP4Box's hdr_size already consumes the FullBox version+flags, so
-// the payload begins at the ES_Descriptor (tag 0x03).
-function aacDescription(mp4, fileBytes, trackId) {
+async function aacDescription(file, mp4, trackId) {
   const trak = mp4.getTrackById(trackId);
   for (const entry of trak.mdia.minf.stbl.stsd.entries) {
     if (!entry.esds) continue;
-    const v = boxPayload(fileBytes, entry.esds);
+    const v = await boxPayload(file, entry.esds);
     const o = { p: 0 };
     const readLen = () => { let b, n = 0; do { b = v[o.p++]; n = (n << 7) | (b & 0x7f); } while (b & 0x80); return n; };
-    if (v[o.p++] !== 0x03) return null; readLen(); o.p += 3;   // ES_Descriptor: ES_ID(2)+flags(1)
-    if (v[o.p++] !== 0x04) return null; readLen(); o.p += 13;  // DecoderConfigDescriptor body
+    if (v[o.p++] !== 0x03) return null; readLen(); o.p += 3;   // ES_Descriptor
+    if (v[o.p++] !== 0x04) return null; readLen(); o.p += 13;  // DecoderConfigDescriptor
     if (v[o.p++] !== 0x05) return null;                        // DecoderSpecificInfo
-    const len = readLen();
+    const len = readLen();                                     // advance o.p BEFORE slicing
     return v.slice(o.p, o.p + len);
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Load & parse a source file
+// Load & parse a source file (metadata only — no mdat payload).
 // ---------------------------------------------------------------------------
 async function loadFile(file) {
   resetResult();
+  els.panePreview.hidden = true;
   els.paneSettings.hidden = true;
-  els.info.textContent = 'Reading file…';
+  els.info.textContent = 'Analyzing…';
 
-  const buffer = await file.arrayBuffer();
-  const fileBytes = new Uint8Array(buffer);
+  const atoms = await walkAtoms(file);
+  const mdat = atoms.find((a) => a.type === 'mdat');
+  if (!mdat) throw new Error('No media data (mdat) box found — is this a valid MP4/MOV?');
 
   const mp4 = MP4Box.createFile();
   const info = await new Promise((resolve, reject) => {
     mp4.onError = (e) => reject(new Error(typeof e === 'string' ? e : 'Could not parse this file.'));
     mp4.onReady = resolve;
-    const ab = buffer.slice(0);          // MP4Box mutates .fileStart on the buffer it gets
-    ab.fileStart = 0;
-    mp4.appendBuffer(ab);
-    mp4.flush();
+    // Feed every box fully, except mdat: give only its header so MP4Box learns
+    // the size, skips the payload, and can reach moov (often at end of file).
+    (async () => {
+      try {
+        for (const a of atoms) {
+          const end = a.type === 'mdat' ? a.start + a.hdr : a.start + a.size;
+          const ab = await readRange(file, a.start, end);
+          ab.fileStart = a.start;
+          mp4.appendBuffer(ab);
+        }
+      } catch (e) { reject(e); }
+    })();
   });
 
   const video = info.videoTracks && info.videoTracks[0];
@@ -136,20 +186,23 @@ async function loadFile(file) {
   const durationS = info.duration / info.timescale;
   const fps = video.nb_samples / (video.duration / video.timescale);
 
-  state = { file, buffer, fileBytes, mp4, video, audio, durationS, fps };
+  if (lastUrl) { /* keep result url logic separate */ }
+  const previewURL = URL.createObjectURL(file);
+
+  state = { file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL, inS: 0, outS: durationS };
 
   // Info line
   const parts = [
     `${video.track_width}×${video.track_height}`,
     `${fps.toFixed(1)} fps`,
-    fmtDuration(durationS),
+    fmtTime(durationS),
     fmtBytes(file.size),
     (video.codec || '').split('.')[0].toUpperCase(),
   ];
-  if (audio) parts.push(`audio: ${audio.codec}`); else parts.push('no audio');
+  parts.push(audio ? `audio: ${audio.codec}` : 'no audio');
   els.info.textContent = parts.join('  ·  ');
 
-  // Audio checkbox availability
+  // Audio availability
   const isAac = audio && /mp4a/.test(audio.codec);
   els.inAudio.disabled = !isAac;
   els.inAudio.checked = !!isAac;
@@ -157,8 +210,108 @@ async function loadFile(file) {
     : isAac ? `${audio.audio.channel_count}ch · ${audio.audio.sample_rate} Hz — copied unchanged.`
     : `Audio is ${audio.codec} (not AAC) and will be dropped.`;
 
+  // Preview + trim
+  setupPreview();
+
+  els.panePreview.hidden = false;
   els.paneSettings.hidden = false;
   updateEstimate();
+}
+
+// ---------------------------------------------------------------------------
+// Preview & trim
+// ---------------------------------------------------------------------------
+function trackWidth() { return els.tlTrack.clientWidth || 1; }
+function timeToX(t) { return (t / state.durationS) * trackWidth(); }
+function xToTime(x) { return clamp((x / trackWidth()) * state.durationS, 0, state.durationS); }
+
+function renderTrim() {
+  const inX = timeToX(state.inS), outX = timeToX(state.outS);
+  els.handleIn.style.left = `${inX}px`;
+  els.handleOut.style.left = `${outX}px`;
+  els.dimHead.style.width = `${inX}px`;
+  els.dimTail.style.width = `${trackWidth() - outX}px`;
+  const sel = state.outS - state.inS;
+  els.trimInfo.textContent = `Keep ${fmtTime(state.inS)} → ${fmtTime(state.outS)}  (${fmtTime(sel)})`;
+  updateEstimate();
+}
+
+function renderPlayhead() {
+  const t = els.preview.currentTime || 0;
+  els.playhead.style.left = `${timeToX(t)}px`;
+  els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
+}
+
+function frameStep() { return 1 / Math.max(1, state.fps); }
+function seek(t) { els.preview.currentTime = clamp(t, 0, Math.max(0, state.durationS - 1e-3)); }
+
+function setupPreview() {
+  const v = els.preview;
+  v.src = state.previewURL;
+  v.load();
+  seek(0);
+
+  // Transport buttons
+  els.panePreview.querySelectorAll('.transport [data-act]').forEach((btn) => {
+    btn.onclick = () => {
+      switch (btn.dataset.act) {
+        case 'play': v.paused ? v.play() : v.pause(); break;
+        case 'prevFrame': v.pause(); seek((v.currentTime || 0) - frameStep()); break;
+        case 'nextFrame': v.pause(); seek((v.currentTime || 0) + frameStep()); break;
+        case 'toIn': seek(state.inS); break;
+        case 'toOut': seek(state.outS); break;
+      }
+    };
+  });
+
+  v.ontimeupdate = renderPlayhead;
+  v.onseeked = renderPlayhead;
+  v.onloadedmetadata = () => { renderTrim(); renderPlayhead(); };
+
+  els.btnSetIn.onclick = () => { state.inS = clamp(v.currentTime || 0, 0, state.outS - frameStep()); renderTrim(); };
+  els.btnSetOut.onclick = () => { state.outS = clamp(v.currentTime || 0, state.inS + frameStep(), state.durationS); renderTrim(); };
+  els.btnResetTrim.onclick = () => { state.inS = 0; state.outS = state.durationS; renderTrim(); };
+
+  // Click track to seek
+  els.tlTrack.onpointerdown = (e) => {
+    if (e.target === els.handleIn || e.target === els.handleOut) return;
+    const rect = els.tlTrack.getBoundingClientRect();
+    seek(xToTime(e.clientX - rect.left));
+  };
+
+  // Drag handles
+  const dragHandle = (handle, which) => {
+    handle.onpointerdown = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      handle.setPointerCapture(e.pointerId);
+      const rect = els.tlTrack.getBoundingClientRect();
+      const move = (ev) => {
+        const t = xToTime(ev.clientX - rect.left);
+        if (which === 'in') state.inS = clamp(t, 0, state.outS - frameStep());
+        else state.outS = clamp(t, state.inS + frameStep(), state.durationS);
+        renderTrim();
+        seek(which === 'in' ? state.inS : state.outS);
+      };
+      const up = (ev) => { handle.releasePointerCapture(e.pointerId); handle.onpointermove = null; handle.onpointerup = null; };
+      handle.onpointermove = move;
+      handle.onpointerup = up;
+    };
+  };
+  dragHandle(els.handleIn, 'in');
+  dragHandle(els.handleOut, 'out');
+
+  // Keyboard
+  document.onkeydown = (e) => {
+    if (els.panePreview.hidden) return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.key === ' ') { e.preventDefault(); v.paused ? v.play() : v.pause(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) - frameStep()); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) + frameStep()); }
+    else if (e.key === 'Home') { seek(state.inS); }
+    else if (e.key === 'End') { seek(state.outS); }
+  };
+
+  renderTrim();
 }
 
 // ---------------------------------------------------------------------------
@@ -171,26 +324,24 @@ function currentSettings() {
   const outH = even(state.video.track_height * scale);
   const fpsSel = parseFloat(els.inFps.value);
   const outFps = fpsSel > 0 ? Math.min(fpsSel, state.fps) : state.fps;
-  const codec = els.inCodec.value;                 // 'avc' | 'hevc'
+  const codec = els.inCodec.value;
   const keepAudio = els.inAudio.checked && !els.inAudio.disabled;
-  return { mode, scale, outW, outH, outFps, codec, keepAudio };
+  const trimDur = Math.max(0.05, state.outS - state.inS);
+  return { mode, scale, outW, outH, outFps, codec, keepAudio, trimDur };
 }
 
-// Total bytes of the AAC audio track (unchanged on passthrough).
-function audioBytes() {
+function audioBytesPerSecond() {
   if (!state.audio) return 0;
-  // nb_samples * average sample size isn't exposed directly; estimate from bitrate
-  // when available, else 0 (updated precisely during extraction).
-  const br = state.audio.bitrate || 0;
-  return br ? Math.round(br / 8 * state.durationS) : Math.round(128000 / 8 * state.durationS);
+  const br = state.audio.bitrate || 128000;
+  return br / 8;
 }
 
 function targetVideoBitrate(s) {
   if (s.mode === 'bitrate') return Math.round(parseFloat(els.inBitrate.value) * 1e6);
-  const targetBytes = parseFloat(els.inSize.value) * 1024 * 1024 * 0.97;   // 3% muxing/headroom
-  const audio = s.keepAudio ? audioBytes() : 0;
+  const targetBytes = parseFloat(els.inSize.value) * 1024 * 1024 * 0.97;
+  const audio = s.keepAudio ? audioBytesPerSecond() * s.trimDur : 0;
   const videoBits = Math.max(0, targetBytes - audio) * 8;
-  return Math.max(100_000, Math.round(videoBits / state.durationS));
+  return Math.max(100_000, Math.round(videoBits / s.trimDur));
 }
 
 function updateEstimate() {
@@ -204,16 +355,16 @@ function updateEstimate() {
     : 'Plays almost everywhere.';
 
   if (s.mode === 'size') {
-    els.hintSize.textContent = `≈ ${(vBitrate / 1e6).toFixed(2)} Mbps video${s.keepAudio ? ' + audio' : ''}`;
+    els.hintSize.textContent = `≈ ${(vBitrate / 1e6).toFixed(2)} Mbps video${s.keepAudio ? ' + audio' : ''}, ${fmtTime(s.trimDur)}`;
   } else {
-    const est = (vBitrate / 8 * state.durationS) + (s.keepAudio ? audioBytes() : 0);
-    els.hintBitrate.textContent = `≈ ${fmtBytes(est)} output`;
+    const est = (vBitrate / 8 * s.trimDur) + (s.keepAudio ? audioBytesPerSecond() * s.trimDur : 0);
+    els.hintBitrate.textContent = `≈ ${fmtBytes(est)} output (${fmtTime(s.trimDur)})`;
   }
   els.est.textContent = '';
 }
 
 // ---------------------------------------------------------------------------
-// Encoder config probing — pick the first supported codec string.
+// Encoder config probing
 // ---------------------------------------------------------------------------
 async function pickEncoderConfig(codec, width, height, bitrate, framerate) {
   const candidates = codec === 'hevc'
@@ -231,7 +382,7 @@ async function pickEncoderConfig(codec, width, height, bitrate, framerate) {
       try {
         const { supported } = await VideoEncoder.isConfigSupported(config);
         if (supported) return config;
-      } catch (_) { /* try next */ }
+      } catch (_) { /* next */ }
     }
   }
   return null;
@@ -243,7 +394,8 @@ async function pickEncoderConfig(codec, width, height, bitrate, framerate) {
 async function compress() {
   if (running) return;
   const s = currentSettings();
-  const { video, audio, fileBytes, mp4, durationS } = state;
+  const { file, video, audio, mp4, mdat } = state;
+  els.preview.pause();
 
   running = true; cancelRequested = false;
   resetResult();
@@ -255,9 +407,11 @@ async function compress() {
   let decoder, encoder, muxer;
   try {
     const vBitrate = targetVideoBitrate(s);
+    const inMicros = Math.round(state.inS * 1e6);
+    const outMicros = Math.round(state.outS * 1e6);
 
-    // ---- Verify the source is decodable ----
-    const description = videoDescription(mp4, fileBytes, video.id);
+    // ---- Verify source is decodable ----
+    const description = await videoDescription(file, mp4, video.id);
     const decCfg = {
       codec: video.codec,
       codedWidth: video.track_width,
@@ -294,101 +448,139 @@ async function compress() {
     muxer = new Muxer(muxerOpts);
 
     // ---- Encoder ----
+    let encodeErr = null;
     encoder = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: (e) => { throw e; },
+      error: (e) => { encodeErr = e; },
     });
     encoder.configure(encCfg);
 
-    // ---- Decode → scale → encode ----
-    const totalFrames = Math.max(1, Math.round(Math.min(video.nb_samples, s.outFps * durationS)));
-    const gop = Math.max(1, Math.round(s.outFps * 2));    // keyframe every ~2s
+    // ---- Decode → (trim window) → scale → encode ----
+    const gop = Math.max(1, Math.round(s.outFps * 2));
     const needScale = s.outW !== video.track_width || s.outH !== video.track_height;
     const canvas = new OffscreenCanvas(s.outW, s.outH);
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    const frameInterval = 1e6 / s.outFps;
+    const decimating = s.outFps < state.fps - 0.01;
+    const estFrames = Math.max(1, Math.round(s.outFps * s.trimDur));
 
-    const frameInterval = 1e6 / s.outFps;   // microseconds between kept frames
-    let nextEmit = 0, emitted = 0;
+    let nextEmit = inMicros, emitted = 0, reachedOut = false;
 
     const onDecoded = (frame) => {
-      if (cancelRequested) { frame.close(); return; }
-      // Frame-rate reduction by presentation time (VideoDecoder emits in order).
-      if (s.outFps < state.fps - 0.01 && frame.timestamp + 1 < nextEmit) {
-        frame.close();
-        return;
-      }
-      nextEmit = frame.timestamp + frameInterval;
+      try {
+        if (cancelRequested) return;
+        const t = frame.timestamp;
+        if (t >= outMicros) { reachedOut = true; return; }          // past selection
+        if (t + 1 < inMicros) return;                               // before selection (decoded for refs)
+        if (decimating && t + 1 < nextEmit) return;                 // frame-rate reduction
+        nextEmit = t + frameInterval;
 
-      let out = frame;
-      if (needScale) {
-        ctx.drawImage(frame, 0, 0, s.outW, s.outH);
-        out = new VideoFrame(canvas, {
-          timestamp: frame.timestamp,
-          duration: frame.duration || Math.round(frameInterval),
-        });
+        const outTs = t - inMicros;                                 // shift so output starts at 0
+        let out;
+        if (needScale) {
+          ctx.drawImage(frame, 0, 0, s.outW, s.outH);
+          out = new VideoFrame(canvas, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
+        } else {
+          out = new VideoFrame(frame, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
+        }
+        encoder.encode(out, { keyFrame: emitted % gop === 0 });
+        out.close();
+        emitted++;
+        if (emitted % 5 === 0) {
+          setProgress(0.05 + 0.9 * Math.min(1, emitted / estFrames));
+          setStatus(`Encoding… ${emitted} / ~${estFrames} frames`);
+        }
+      } finally {
         frame.close();
-      }
-      encoder.encode(out, { keyFrame: emitted % gop === 0 });
-      out.close();
-      emitted++;
-      if (emitted % 5 === 0) {
-        setProgress(0.05 + 0.9 * Math.min(1, emitted / totalFrames));
-        setStatus(`Encoding… ${emitted} / ~${totalFrames} frames`);
       }
     };
 
-    decoder = new VideoDecoder({ output: onDecoded, error: (e) => { throw e; } });
+    decoder = new VideoDecoder({ output: onDecoded, error: (e) => { encodeErr = e; } });
     decoder.configure(decCfg);
 
-    // Demux both tracks up front, then feed the decoder with backpressure.
-    setStatus('Reading frames…');
-    const wantAudio = s.keepAudio && audio ? audio.id : null;
-    const demuxed = await demux(state.buffer, video.id, wantAudio);
-    const samples = demuxed.video;
-    if (cancelRequested) throw new Error('cancelled');
+    // Set up sample extraction on the already-parsed file, then stream mdat.
+    const vq = [];                 // queued encoded video samples
+    const audioOut = [];           // AAC samples inside the trim window (passthrough)
+    const asc = (s.keepAudio && audio) ? await aacDescription(file, mp4, audio.id) : null;
 
-    for (let i = 0; i < samples.length; i++) {
-      const smp = samples[i];
-      decoder.decode(new EncodedVideoChunk({
-        type: smp.is_sync ? 'key' : 'delta',
-        timestamp: Math.round((smp.cts / smp.timescale) * 1e6),
-        duration: Math.round((smp.duration / smp.timescale) * 1e6),
-        data: smp.data,
-      }));
-      // Throttle so decoded frames don't pile up in memory.
-      while ((encoder.encodeQueueSize > 8 || decoder.decodeQueueSize > 8) && !cancelRequested) {
-        await new Promise((r) => setTimeout(r, 4));
+    mp4.onSamples = (id, user, smps) => {
+      if (user === 'video') {
+        // Copy sample data now: releaseUsedSamples() nulls smp.data, and we
+        // consume the queue later in feed(). The queue is drained after every
+        // appended chunk, so it holds at most one chunk's worth of samples.
+        for (const smp of smps) vq.push({
+          data: smp.data.slice(0),
+          cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync,
+        });
+      } else if (user === 'audio') {
+        for (const smp of smps) {
+          const cts = (smp.cts / smp.timescale) * 1e6;
+          if (cts + 1 >= inMicros && cts < outMicros) {
+            audioOut.push({
+              data: smp.data.slice(0),                              // copy before release
+              ts: Math.round(cts - inMicros),
+              dur: Math.round((smp.duration / smp.timescale) * 1e6),
+            });
+          }
+        }
       }
-      if (cancelRequested) throw new Error('cancelled');
+      mp4.releaseUsedSamples(id, smps[smps.length - 1].number);
+    };
+    mp4.setExtractionOptions(video.id, 'video', { nbSamples: 30 });
+    if (s.keepAudio && audio) mp4.setExtractionOptions(audio.id, 'audio', { nbSamples: 200 });
+    mp4.start();
+
+    const feed = async () => {
+      while (vq.length && !cancelRequested && !reachedOut) {
+        const smp = vq.shift();
+        decoder.decode(new EncodedVideoChunk({
+          type: smp.is_sync ? 'key' : 'delta',
+          timestamp: Math.round((smp.cts / smp.timescale) * 1e6),
+          duration: Math.round((smp.duration / smp.timescale) * 1e6),
+          data: smp.data,
+        }));
+        while ((encoder.encodeQueueSize > 8 || decoder.decodeQueueSize > 8) && !cancelRequested) {
+          await sleep(4);
+        }
+        if (encodeErr) throw encodeErr;
+      }
+    };
+
+    // Stream the mdat payload in chunks.
+    setStatus('Reading & encoding…');
+    const CHUNK = 8 * 1024 * 1024;
+    let off = mdat.start + mdat.hdr;
+    const endByte = mdat.start + mdat.size;
+    while (off < endByte && !cancelRequested && !reachedOut) {
+      const e = Math.min(off + CHUNK, endByte);
+      const ab = await readRange(file, off, e);
+      ab.fileStart = off;
+      off = e;
+      mp4.appendBuffer(ab);        // fires onSamples synchronously
+      await feed();
     }
+    mp4.flush();
+    await feed();
+    if (cancelRequested) throw new Error('cancelled');
 
     await decoder.flush();
     await encoder.flush();
-    if (cancelRequested) throw new Error('cancelled');
+    if (encodeErr) throw encodeErr;
+    try { mp4.stop(); } catch (_) {}
 
-    // ---- Audio passthrough ----
+    // ---- Audio passthrough (trim-windowed) ----
     let audioNote = '';
     if (s.keepAudio && audio) {
-      setStatus('Copying audio…');
-      try {
-        const asc = aacDescription(mp4, fileBytes, audio.id);
-        const aSamples = demuxed.audio;
+      if (audioOut.length) {
         let first = true;
-        for (const smp of aSamples) {
-          const meta = first && asc ? { decoderConfig: { description: asc } } : undefined;
-          muxer.addAudioChunkRaw(
-            smp.data, 'key',
-            Math.round((smp.cts / smp.timescale) * 1e6),
-            Math.round((smp.duration / smp.timescale) * 1e6),
-            meta,
-          );
+        for (const a of audioOut) {
+          muxer.addAudioChunkRaw(a.data, 'key', a.ts, a.dur, first && asc ? { decoderConfig: { description: asc } } : undefined);
           first = false;
         }
-      } catch (err) {
-        audioNote = ' (audio could not be copied and was dropped)';
-        console.warn('Audio passthrough failed:', err);
+      } else {
+        audioNote = ' (no audio in the selected range)';
       }
-    } else if (audio && !s.keepAudio) {
+    } else if (audio && !els.inAudio.disabled && !s.keepAudio) {
       audioNote = '';
     } else if (audio) {
       audioNote = ' (non-AAC audio dropped)';
@@ -401,53 +593,24 @@ async function compress() {
     setProgress(1);
     setStatus('');
   } catch (err) {
-    if (cancelRequested || (err && err.message === 'cancelled')) {
-      setStatus('Cancelled.');
-    } else {
-      console.error(err);
-      setStatus(`Error: ${err.message || err}`);
-    }
+    if (cancelRequested || (err && err.message === 'cancelled')) setStatus('Cancelled.');
+    else { console.error(err); setStatus(`Error: ${err.message || err}`); }
     setProgress(null);
   } finally {
     try { if (decoder && decoder.state !== 'closed') decoder.close(); } catch (_) {}
     try { if (encoder && encoder.state !== 'closed') encoder.close(); } catch (_) {}
+    try { mp4.onSamples = null; } catch (_) {}
     running = false;
     els.btnCompress.disabled = false;
     els.btnCancel.hidden = true;
   }
 }
 
-// Demux both tracks in a single pass. Extraction options must be set in
-// onReady (before samples flow) so onSamples fires during the same flush().
-// A fresh MP4Box instance is used so this works regardless of what the
-// info-parsing instance already consumed.
-function demux(buffer, videoId, audioId) {
-  return new Promise((resolve, reject) => {
-    const mp4 = MP4Box.createFile();
-    const res = { video: [], audio: [] };
-    mp4.onError = (e) => reject(new Error(typeof e === 'string' ? e : 'demux failed'));
-    mp4.onReady = () => {
-      mp4.setExtractionOptions(videoId, 'video', { nbSamples: Number.POSITIVE_INFINITY });
-      if (audioId != null) mp4.setExtractionOptions(audioId, 'audio', { nbSamples: Number.POSITIVE_INFINITY });
-      mp4.start();
-    };
-    mp4.onSamples = (_id, user, smps) => {
-      const arr = user === 'video' ? res.video : res.audio;
-      for (const s of smps) arr.push(s);
-    };
-    const ab = buffer.slice(0);
-    ab.fileStart = 0;
-    mp4.appendBuffer(ab);
-    mp4.flush();                       // fully-appended buffer → samples delivered synchronously
-    setTimeout(() => resolve(res), 0); // yield once in case delivery is deferred
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
 function showResult(blob, s, audioNote) {
-  resetResult();
+  if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; }
   lastUrl = URL.createObjectURL(blob);
   els.resultVideo.src = lastUrl;
   els.download.href = lastUrl;
@@ -456,7 +619,7 @@ function showResult(blob, s, audioNote) {
 
   const ratio = state.file.size / blob.size;
   els.resultMeta.innerHTML = [
-    `<strong>${fmtBytes(blob.size)}</strong> · ${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'}${audioNote}`,
+    `<strong>${fmtBytes(blob.size)}</strong> · ${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ${fmtTime(s.trimDur)}${audioNote}`,
     `${fmtBytes(state.file.size)} → ${fmtBytes(blob.size)} (${ratio >= 1 ? ratio.toFixed(1) + '× smaller' : 'larger — lower the bitrate'})`,
   ].join('<br>');
   els.paneResult.style.display = 'block';
@@ -473,7 +636,6 @@ function resetResult() {
 // Wiring
 // ---------------------------------------------------------------------------
 function initUI() {
-  // Drag & drop + file picker
   els.drop.addEventListener('click', () => els.file.click());
   els.file.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
@@ -490,7 +652,6 @@ function initUI() {
     if (f) handleFile(f);
   });
 
-  // Mode toggle
   document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener('change', () => {
     const mode = document.querySelector('input[name="mode"]:checked').value;
     els.fieldSize.hidden = mode !== 'size';
@@ -498,9 +659,10 @@ function initUI() {
     updateEstimate();
   }));
 
-  // Any setting change updates the estimate
   [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
+
+  window.addEventListener('resize', () => { if (state) renderTrim(); });
 
   els.btnCompress.addEventListener('click', compress);
   els.btnCancel.addEventListener('click', () => { cancelRequested = true; setStatus('Cancelling…'); });
@@ -509,10 +671,12 @@ function initUI() {
 async function handleFile(f) {
   try {
     setStatus('');
+    if (state && state.previewURL) { URL.revokeObjectURL(state.previewURL); }
     await loadFile(f);
   } catch (err) {
     console.error(err);
     els.info.textContent = `Could not load this file: ${err.message || err}`;
+    els.panePreview.hidden = true;
     els.paneSettings.hidden = true;
   }
 }
