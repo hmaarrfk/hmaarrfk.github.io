@@ -56,8 +56,16 @@
       </p>
     </div>
 
+    <!-- Step navigation -->
+    <nav class="steps" id="steps" hidden>
+      <button class="stepbtn active" data-step="source" type="button"><b>1</b> Source</button>
+      <button class="stepbtn" data-step="trim" type="button"><b>2</b> Trim &amp; cut</button>
+      <button class="stepbtn" data-step="settings" type="button"><b>3</b> Settings</button>
+      <button class="stepbtn" data-step="export" type="button"><b>4</b> Export</button>
+    </nav>
+
     <!-- STEP 1 · SOURCE -->
-    <section class="panel" id="pane-source">
+    <section class="panel step-pane" data-pane="source" id="pane-source">
       <h2 style="margin-top:0">Add your video</h2>
       <p class="tagline">
         No data is transmitted; all encoding happens on your device.
@@ -75,7 +83,7 @@
     </section>
 
     <!-- STEP 2 · PREVIEW & TRIM -->
-    <section class="panel" id="pane-preview" hidden>
+    <section class="panel step-pane" data-pane="trim" id="pane-preview" hidden>
       <h2 style="margin-top:0">Preview &amp; trim</h2>
       <p class="small muted" style="margin-top:-6px">
         Scrub to preview. Drag the green handles (or use <b>Set start</b> /
@@ -143,10 +151,14 @@
         <b>C</b> to mark, <b>C</b> again to cut). Click a red band to undo it.
         Removed sections are cut out and the clip is stitched back together.
       </p>
+
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button class="btn" id="next-settings" type="button">Next: Settings &rarr;</button>
+      </div>
     </section>
 
     <!-- STEP 3 · SETTINGS -->
-    <section class="panel" id="pane-settings" hidden>
+    <section class="panel step-pane" data-pane="settings" id="pane-settings" hidden>
       <h2 style="margin-top:0">Compression settings</h2>
 
       <!-- Size target mode -->
@@ -216,28 +228,42 @@
         </div>
       </div>
 
-      <div class="row" style="margin-top:20px; gap:14px; flex-wrap:wrap">
+      <div class="row" style="margin-top:16px">
+        <span class="status" id="est" style="margin-top:0"></span>
+      </div>
+
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button class="btn" id="next-export" type="button">Next: Export &rarr;</button>
+      </div>
+    </section>
+
+    <!-- STEP 4 · EXPORT -->
+    <section class="panel step-pane" data-pane="export" id="pane-export" hidden>
+      <h2 style="margin-top:0">Export</h2>
+      <p class="small muted" id="export-summary" style="margin-top:-6px"></p>
+
+      <div class="row" style="gap:14px; flex-wrap:wrap">
         <button class="btn" id="btn-compress" type="button">Compress video</button>
         <button class="btn" id="btn-cancel" type="button" hidden
                 style="background:var(--danger)">Cancel</button>
-        <span class="status" id="est" style="margin-top:0"></span>
       </div>
 
       <div class="progress" id="progress"><div></div></div>
       <div class="status" id="status"></div>
-    </section>
 
-    <!-- STEP 4 · RESULT -->
-    <section class="panel result" id="pane-result">
-      <h2 style="margin-top:0">Done</h2>
-      <div class="result-card" style="text-align:left">
-        <video id="result-video" controls playsinline style="max-width:100%;border-radius:var(--radius)"></video>
-        <div class="rc-meta" id="result-meta"></div>
-        <a class="btn" id="download" download>Download</a>
+      <!-- Result, revealed after a successful compress -->
+      <div class="result" id="pane-result" style="margin-top:18px">
+        <h3 style="margin:0 0 8px">Done</h3>
+        <div class="result-card" style="text-align:left">
+          <video id="result-video" controls playsinline style="max-width:100%;border-radius:var(--radius)"></video>
+          <div class="rc-meta" id="result-meta"></div>
+          <a class="btn" id="download" download>Download</a>
+        </div>
+        <p class="small muted" style="margin-top:14px">
+          Not happy with the size or quality? Go back to <b>Trim &amp; cut</b> or
+          <b>Settings</b> and compress again.
+        </p>
       </div>
-      <p class="small muted" style="margin-top:14px">
-        Not happy with the size or quality? Adjust the settings above and compress again.
-      </p>
     </section>
 
     <details class="help-details">

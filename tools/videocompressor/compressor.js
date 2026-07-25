@@ -26,8 +26,10 @@ const MP4Box = window.MP4Box;
 const $ = (id) => document.getElementById(id);
 const els = {
   unsupported: $('unsupported'), unsupportedWhy: $('unsupported-why'),
+  steps: $('steps'),
   paneSource: $('pane-source'), panePreview: $('pane-preview'),
-  paneSettings: $('pane-settings'), paneResult: $('pane-result'),
+  paneSettings: $('pane-settings'), paneExport: $('pane-export'), paneResult: $('pane-result'),
+  nextSettings: $('next-settings'), nextExport: $('next-export'), exportSummary: $('export-summary'),
   drop: $('drop-video'), file: $('file-video'), info: $('video-info'),
   // preview / trim
   preview: $('preview'), timecode: $('timecode'),
@@ -66,6 +68,30 @@ let state = null;   // { file, mp4, atoms, mdat, video, audio, durationS, fps, p
 let running = false;
 let cancelRequested = false;
 let lastUrl = null;
+let currentStep = 'source';
+
+// ---------------------------------------------------------------------------
+// Step navigation (one panel at a time, like the GIF Maker)
+// ---------------------------------------------------------------------------
+function showStep(name) {
+  currentStep = name;
+  document.querySelectorAll('.step-pane').forEach((p) => { p.hidden = p.dataset.pane !== name; });
+  document.querySelectorAll('.stepbtn').forEach((b) => b.classList.toggle('active', b.dataset.step === name));
+  if (state && name === 'trim') { renderTrim(); renderPlayhead(); }
+  if (state && name === 'export') updateExportSummary();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function updateExportSummary() {
+  if (!state) return;
+  const s = currentSettings();
+  const target = s.mode === 'size'
+    ? `target ${els.inSize.value} MB`
+    : `${parseFloat(els.inBitrate.value)} Mbps`;
+  els.exportSummary.textContent =
+    `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
+    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}`;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -219,9 +245,9 @@ async function loadFile(file) {
   // Preview + trim
   setupPreview();
 
-  els.panePreview.hidden = false;
-  els.paneSettings.hidden = false;
+  els.steps.hidden = false;      // reveal step nav now that a video is loaded
   updateEstimate();
+  showStep('trim');              // advance past the upload step
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +488,7 @@ function updateEstimate() {
     els.hintBitrate.textContent = `≈ ${fmtBytes(est)} output (${fmtTime(s.trimDur)})`;
   }
   els.est.textContent = '';
+  if (currentStep === 'export') updateExportSummary();
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +803,15 @@ function initUI() {
   [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
 
-  window.addEventListener('resize', () => { if (state) renderTrim(); });
+  window.addEventListener('resize', () => { if (state && currentStep === 'trim') renderTrim(); });
+
+  // Step navigation
+  document.querySelectorAll('.stepbtn').forEach((b) => b.addEventListener('click', () => {
+    if (!state && b.dataset.step !== 'source') return;   // locked until a video loads
+    showStep(b.dataset.step);
+  }));
+  els.nextSettings.addEventListener('click', () => showStep('settings'));
+  els.nextExport.addEventListener('click', () => showStep('export'));
 
   els.btnCompress.addEventListener('click', compress);
   els.btnCancel.addEventListener('click', () => { cancelRequested = true; setStatus('Cancelling…'); });
@@ -790,8 +825,8 @@ async function handleFile(f) {
   } catch (err) {
     console.error(err);
     els.info.textContent = `Could not load this file: ${err.message || err}`;
-    els.panePreview.hidden = true;
-    els.paneSettings.hidden = true;
+    els.steps.hidden = true;
+    showStep('source');
   }
 }
 
@@ -807,4 +842,5 @@ async function handleFile(f) {
     return;
   }
   initUI();
+  showStep('source');
 })();
