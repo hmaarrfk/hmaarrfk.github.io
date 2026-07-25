@@ -98,7 +98,7 @@
       <div id="preview-block">
       <p class="small muted" id="preview-caption" style="margin:0 0 8px" hidden></p>
       <video id="preview" playsinline preload="auto"
-             style="width:100%;max-height:52vh;background:#000;border-radius:var(--radius);display:block"></video>
+             style="display:block;width:100%;height:auto;max-height:52vh;object-fit:contain;background:#000;border-radius:var(--radius)"></video>
 
       <div class="transport">
         <button class="tbtn" data-act="toIn" title="Jump to start of selection (Home)" aria-label="Jump to selection start">
@@ -261,7 +261,7 @@
 
       <!-- Live view of frames as they're encoded (shown during compression) -->
       <figure id="encode-view" hidden style="margin:0 0 16px">
-        <canvas id="encode-canvas" style="width:100%;max-height:52vh;background:#000;border-radius:var(--radius);display:block"></canvas>
+        <canvas id="encode-canvas" style="display:block;margin:0 auto;max-width:100%;max-height:52vh;background:#000;border-radius:var(--radius)"></canvas>
         <figcaption class="small muted" style="margin-top:6px">Encoding &mdash; frames shown as they're written.</figcaption>
       </figure>
 

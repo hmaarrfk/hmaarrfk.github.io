@@ -853,7 +853,9 @@ async function compress() {
     // Live "playing while encoding" view (downscaled for cheap drawing).
     els.previewBlock.style.display = 'none';
     els.encodeView.hidden = false;
-    const ecW = Math.min(s.outW, 640);
+    // Intrinsic canvas dims carry the true aspect ratio; CSS (max-width/height +
+    // auto width/height) scales it down to fit while preserving that ratio.
+    const ecW = Math.min(s.outW, 960);
     const ecH = Math.max(1, Math.round(ecW * s.outH / s.outW));
     els.encodeCanvas.width = ecW;
     els.encodeCanvas.height = ecH;
