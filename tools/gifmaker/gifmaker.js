@@ -150,6 +150,88 @@ function markStale() {
   variants = [];
   cachedFrames = null;   // frames depend on the edit that just changed; re-extract
   updateGenerateView();  // un-collapse stage, hide star
+  queueSave();           // remember the change (skipped while restoring / no video)
+}
+
+// ---------------------------------------------------------------------------
+// Project persistence — remember settings/edits across refreshes. The video
+// file can't be stored, so we save the settings + crop/trim/cuts and re-apply
+// them when a video loads (fully for the same file, general options otherwise).
+// ---------------------------------------------------------------------------
+const LS_KEY = 'gifmaker:project:v1';
+let saveTimer = null;
+let restoring = false;      // true while applying a restored project (suppress saves)
+let pendingProject = null;  // project captured at load, applied once metadata is in
+
+function readProject() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { return null; }
+}
+function projectData() {
+  const val = (id) => document.getElementById(id).value;
+  const chk = (id) => document.getElementById(id).checked;
+  return {
+    v: 1,
+    file: videoFile ? { name: videoFile.name, size: videoFile.size, lastModified: videoFile.lastModified } : null,
+    general: {
+      fps: val('fps'), quality: val('quality'), timingMode: val('timing-mode'), speed: val('speed'),
+      duration: val('duration'), durationCustom: val('duration-custom'), loop: val('loop'),
+      rotate: val('rotate'), flip: val('flip'), filter: val('filter'), channel: val('channel'),
+      cropAspect: val('crop-aspect'),
+      reverseCmap: chk('reverse-colormap'), invert: chk('invert-input'),
+      oval: ovalMask ? chk('oval-mask') : false, customRes: chk('custom-res'),
+      colormapKey, curvePoints,
+    },
+    video: {
+      crop: crop ? { x: crop.x, y: crop.y, w: crop.w, h: crop.h } : null,
+      finalW, finalH, cropStart, cropEnd, cuts,
+    },
+  };
+}
+function saveProject() { if (!videoFile) return; try { localStorage.setItem(LS_KEY, JSON.stringify(projectData())); } catch {} }
+function queueSave() {
+  if (restoring || !videoFile) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveProject, 300);
+}
+function applyProject(p, sameFile) {
+  if (!p || !p.general) return false;
+  const g = p.general;
+  const set = (id, v) => { if (v != null) document.getElementById(id).value = v; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  set('fps', g.fps); set('quality', g.quality); qualityVal.textContent = g.quality ?? qualityIn.value;
+  set('timing-mode', g.timingMode); set('speed', g.speed); set('duration', g.duration);
+  set('duration-custom', g.durationCustom); set('loop', g.loop);
+  set('rotate', g.rotate); set('flip', g.flip); set('filter', g.filter); set('channel', g.channel);
+  set('crop-aspect', g.cropAspect);
+  setChk('reverse-colormap', g.reverseCmap); setChk('invert-input', g.invert); setChk('oval-mask', g.oval);
+  setChk('custom-res', g.customRes);
+  aspectMode = g.cropAspect || aspectMode;
+  customRes = !!g.customRes; outputSizeGroup.hidden = !customRes; gifNudgeField.hidden = !customRes;
+  lastRotation = parseInt(g.rotate, 10) || 0; lastFlip = g.flip || 'none';
+  if (Array.isArray(g.curvePoints) && g.curvePoints.length === 3) {
+    curvePoints = g.curvePoints.map((pt) => ({ x: +pt.x, y: +pt.y }));
+  }
+  buildCurveLut();
+  if (g.colormapKey) selectColormap(g.colormapKey);
+  updateColormapEnabled(); updateOvalUI(); updateAspectLockUI(); updateTimingFields(); refreshCurveUI();
+
+  if (sameFile && p.video) {
+    const vp = p.video;
+    if (vp.crop) {
+      const f = fullDims();
+      crop = {
+        x: clamp(vp.crop.x, 0, f.w), y: clamp(vp.crop.y, 0, f.h),
+        w: clamp(vp.crop.w, 1, f.w), h: clamp(vp.crop.h, 1, f.h),
+      };
+    }
+    if (vp.finalW) finalW = vp.finalW;
+    if (vp.finalH) finalH = vp.finalH;
+    if (isFinite(vp.cropStart)) cropStart = clamp(vp.cropStart, 0, duration);
+    if (isFinite(vp.cropEnd)) cropEnd = clamp(vp.cropEnd, cropStart + 0.01, duration);
+    cuts = Array.isArray(vp.cuts) ? vp.cuts.filter((c) => c && isFinite(c.start) && isFinite(c.end)) : [];
+    cropRectEl.hidden = !crop; syncCropInputs(); positionCropRect();
+  }
+  return true;
 }
 
 // Timeline editing state (seconds)
@@ -991,6 +1073,8 @@ async function loadLogo(file) {
 
 // ---- Video input -------------------------------------------------------
 function loadVideo(file) {
+  pendingProject = readProject();   // capture before markStale/saves can overwrite it
+  restoring = true;                 // suppress saves until the restore completes
   markStale();
   videoFile = file;
   if (preview.src) URL.revokeObjectURL(preview.src);
@@ -1009,6 +1093,15 @@ function loadVideo(file) {
     lastFlip = flipSel.value;
     updateAspectLockUI();
     initCropForVideo();
+    // Restore a saved project: same file → settings + crop/trim/cuts; different
+    // file → general settings only.
+    const same = pendingProject && pendingProject.file && file &&
+      pendingProject.file.name === file.name && pendingProject.file.size === file.size &&
+      pendingProject.file.lastModified === file.lastModified;
+    const restored = applyProject(pendingProject, same);
+    if (restored) videoInfo.textContent += same ? '  ·  restored your last project' : '  ·  applied your last settings';
+    restoring = false;
+    if (restored) saveProject();
     renderTimeline();
     showStep('trim');
     refreshReady();
@@ -1425,19 +1518,23 @@ function transport(act) {
     case 'nextFrame': preview.pause(); stepFrame(1); break;
     case 'toIn':      seek(cropStart); break;
     case 'toOut':     seek(cropEnd); break;
-    case 'setIn':     cropStart = clamp(preview.currentTime, 0, cropEnd - frameStep()); renderTimeline(); break;
-    case 'setOut':    cropEnd = clamp(preview.currentTime, cropStart + frameStep(), duration); renderTimeline(); break;
-    case 'cutStart':  pendingCutStart = preview.currentTime; renderTimeline(); break;
+    // Trim/cut edits change which frames are extracted, so they must invalidate
+    // the cached frames (markStale) — otherwise a re-Create reuses stale frames.
+    case 'setIn':     cropStart = clamp(preview.currentTime, 0, cropEnd - frameStep()); renderTimeline(); markStale(); break;
+    case 'setOut':    cropEnd = clamp(preview.currentTime, cropStart + frameStep(), duration); renderTimeline(); markStale(); break;
+    case 'cutStart':  pendingCutStart = preview.currentTime; renderTimeline(); break;  // arming only — no frame change yet
     case 'cutEnd': {
       if (pendingCutStart == null) { setStatus('Mark a cut start first.', true); break; }
       const a = Math.min(pendingCutStart, preview.currentTime);
       const b = Math.max(pendingCutStart, preview.currentTime);
-      if (b - a > 1e-3) cuts.push({ start: a, end: b });
+      let added = false;
+      if (b - a > 1e-3) { cuts.push({ start: a, end: b }); added = true; }
       pendingCutStart = null;
       renderTimeline();
+      if (added) markStale();
       break;
     }
-    case 'clearCuts': cuts = []; pendingCutStart = null; renderTimeline(); break;
+    case 'clearCuts': { const had = cuts.length > 0; cuts = []; pendingCutStart = null; renderTimeline(); if (had) markStale(); break; }
   }
 }
 
@@ -1499,7 +1596,12 @@ tlTrack.addEventListener('pointermove', (e) => {
   else if (dragging === 'out') { const t = tFromEvent(e); cropEnd = clamp(t, cropStart + frameStep(), duration); renderTimeline(); renderPlayhead(cropEnd); requestSeek(cropEnd); }
   else { const t = scrubTimeFromEvent(e); renderPlayhead(t); requestSeek(t); }
 });
-const endDrag = () => { dragging = null; };
+const endDrag = () => {
+  // Dragging an in/out handle changes the trim → invalidate cached frames so the
+  // next Create re-extracts (a scrub doesn't change the output, so leave it).
+  if (dragging === 'in' || dragging === 'out') markStale();
+  dragging = null;
+};
 tlTrack.addEventListener('pointerup', endDrag);
 tlTrack.addEventListener('pointercancel', endDrag);
 
@@ -1534,12 +1636,14 @@ finalWIn.addEventListener('change', () => {
   finalW = Math.max(1, readInt(finalWIn, finalW));
   finalH = Math.max(1, Math.round(finalW * crop.h / crop.w));
   syncCropInputs();
+  markStale();   // output resolution changes the extracted frame size → re-extract
 });
 finalHIn.addEventListener('change', () => {
   if (!crop) return;
   finalH = Math.max(1, readInt(finalHIn, finalH));
   finalW = Math.max(1, Math.round(finalH * crop.w / crop.h));
   syncCropInputs();
+  markStale();   // output resolution changes the extracted frame size → re-extract
 });
 
 customResChk.addEventListener('change', () => {
@@ -1575,7 +1679,7 @@ document.querySelectorAll('.ndg').forEach((b) => b.addEventListener('click', () 
   afterCropChange({ keepFinal: false });
 }));
 
-cropReset.addEventListener('click', () => initCropForVideo());
+cropReset.addEventListener('click', () => { initCropForVideo(); markStale(); });  // crop reset changes frames
 
 // Drag to move / handles to resize the crop box on the preview
 let cropDrag = null;
@@ -2053,7 +2157,13 @@ async function generateFormat(fmt) {
     const Q = parseInt(qualityIn.value, 10) || 80;
 
     // Extract every frame once at full rate, then reuse across formats/tiers.
-    if (!cachedFrames || cachedFrames.fps !== fps) {
+    // Self-validating: re-extract if fps changed OR the planned frame count no
+    // longer matches (e.g. Duration mode extracts fps×duration frames, so the
+    // count depends on the timing duration — which patches metadata live without
+    // markStale). Content edits (crop, colour, logo…) still invalidate via
+    // markStale; this is the backstop for count changes.
+    if (!cachedFrames || cachedFrames.fps !== fps
+        || cachedFrames.frames.length !== plannedFrameCount(fps)) {
       const tf = readTransform();
       const ex = await framesFromVideo(fps, tf);
       cachedFrames = { frames: ex.frames, w: ex.w, h: ex.h, fps };
@@ -2131,6 +2241,7 @@ function updateTimingFields() {
 function onTimingChange() {
   updateTimingFields();
   if (variants.length) applyMetadata();
+  queueSave();   // timing/loop aren't frame changes but are part of the project
 }
 timingMode.addEventListener('change', onTimingChange);
 speedSel.addEventListener('change', onTimingChange);
@@ -2167,6 +2278,14 @@ resetBtn.addEventListener('click', () => {
 
 showStep('source');
 refreshReady();
+
+// Tell returning users their last project will be restored when they load a video.
+(() => {
+  const p = readProject();
+  if (p && p.file && p.file.name) {
+    videoInfo.textContent = `Last project: “${p.file.name}”. Load it again to restore your edits & settings — or load any video to reuse your settings.`;
+  }
+})();
 
 // ---- Test hook ---------------------------------------------------------
 // Exercises the full transform + encode pipeline without the OS file picker.
