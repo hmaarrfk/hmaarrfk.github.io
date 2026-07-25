@@ -33,8 +33,11 @@ const els = {
   preview: $('preview'), timecode: $('timecode'),
   tlTrack: $('tl-track'), handleIn: $('handle-in'), handleOut: $('handle-out'),
   playhead: $('playhead'), dimHead: $('dim-head'), dimTail: $('dim-tail'),
+  cutsLayer: $('cuts-layer'), tlPending: $('tl-pending'),
   btnSetIn: $('btn-set-in'), btnSetOut: $('btn-set-out'), btnResetTrim: $('btn-reset-trim'),
   trimInfo: $('trim-info'),
+  btnCutStart: $('btn-cut-start'), btnCutEnd: $('btn-cut-end'), btnClearCuts: $('btn-clear-cuts'),
+  cutInfo: $('cut-info'),
   // settings
   fieldSize: $('field-size'), fieldBitrate: $('field-bitrate'),
   inSize: $('in-size'), inBitrate: $('in-bitrate'),
@@ -189,7 +192,10 @@ async function loadFile(file) {
   if (lastUrl) { /* keep result url logic separate */ }
   const previewURL = URL.createObjectURL(file);
 
-  state = { file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL, inS: 0, outS: durationS };
+  state = {
+    file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
+    inS: 0, outS: durationS, cuts: [], pendingCutStart: null,
+  };
 
   // Info line
   const parts = [
@@ -225,14 +231,84 @@ function trackWidth() { return els.tlTrack.clientWidth || 1; }
 function timeToX(t) { return (t / state.durationS) * trackWidth(); }
 function xToTime(x) { return clamp((x / trackWidth()) * state.durationS, 0, state.durationS); }
 
+// Cuts that fall inside the current [inS, outS] window, clipped to it, sorted.
+function activeCuts() {
+  const out = [];
+  for (const c of state.cuts) {
+    const a = clamp(c.start, state.inS, state.outS);
+    const b = clamp(c.end, state.inS, state.outS);
+    if (b - a > 1e-3) out.push({ start: a, end: b });
+  }
+  return out.sort((x, y) => x.start - y.start);
+}
+
+// Total kept seconds = selection minus the cut sections inside it.
+function keptDuration() {
+  let cut = 0;
+  for (const c of activeCuts()) cut += c.end - c.start;
+  return Math.max(0.05, (state.outS - state.inS) - cut);
+}
+
+// Whether a source time (seconds) lands inside a removed section.
+function inCut(t) {
+  for (const c of activeCuts()) if (t >= c.start && t < c.end) return true;
+  return false;
+}
+
+function removeCut(i) { state.cuts.splice(i, 1); renderTrim(); }
+
+// Merge overlapping / touching cut sections so they stay a clean, sorted set.
+function mergeCuts() {
+  state.cuts.sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const c of state.cuts) {
+    const last = merged[merged.length - 1];
+    if (last && c.start <= last.end + 1e-3) last.end = Math.max(last.end, c.end);
+    else merged.push({ ...c });
+  }
+  state.cuts = merged;
+}
+
+function renderCuts() {
+  els.cutsLayer.innerHTML = '';
+  activeCuts().forEach((c, i) => {
+    const el = document.createElement('div');
+    el.style.cssText =
+      `position:absolute;top:0;bottom:0;left:${timeToX(c.start)}px;width:${timeToX(c.end) - timeToX(c.start)}px;` +
+      'background:rgba(231,76,60,.55);border-left:1px solid #e74c3c;border-right:1px solid #e74c3c;cursor:pointer';
+    el.title = 'Click to undo this cut';
+    el.onclick = (e) => { e.stopPropagation(); removeCut(i); };
+    els.cutsLayer.appendChild(el);
+  });
+}
+
+function renderPending() {
+  const p = state.pendingCutStart;
+  if (p == null) { els.tlPending.style.display = 'none'; return; }
+  const t = els.preview.currentTime || 0;
+  const a = Math.min(p, t), b = Math.max(p, t);
+  els.tlPending.style.display = 'block';
+  els.tlPending.style.left = `${timeToX(a)}px`;
+  els.tlPending.style.width = `${Math.max(2, timeToX(b) - timeToX(a))}px`;
+}
+
 function renderTrim() {
   const inX = timeToX(state.inS), outX = timeToX(state.outS);
   els.handleIn.style.left = `${inX}px`;
   els.handleOut.style.left = `${outX}px`;
   els.dimHead.style.width = `${inX}px`;
   els.dimTail.style.width = `${trackWidth() - outX}px`;
-  const sel = state.outS - state.inS;
-  els.trimInfo.textContent = `Keep ${fmtTime(state.inS)} → ${fmtTime(state.outS)}  (${fmtTime(sel)})`;
+  renderCuts();
+  renderPending();
+
+  const kept = keptDuration();
+  const cuts = activeCuts();
+  els.trimInfo.textContent = `Keep ${fmtTime(state.inS)} → ${fmtTime(state.outS)}  (${fmtTime(kept)} kept)`;
+  els.cutInfo.textContent = state.pendingCutStart != null
+    ? 'Cut start marked — scrub, then “Remove section”'
+    : cuts.length ? `${cuts.length} cut${cuts.length > 1 ? 's' : ''} removed`
+    : 'No cuts';
+  els.btnCutEnd.style.outline = state.pendingCutStart != null ? '2px solid var(--good)' : 'none';
   updateEstimate();
 }
 
@@ -240,6 +316,7 @@ function renderPlayhead() {
   const t = els.preview.currentTime || 0;
   els.playhead.style.left = `${timeToX(t)}px`;
   els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
+  if (state.pendingCutStart != null) renderPending();
 }
 
 function frameStep() { return 1 / Math.max(1, state.fps); }
@@ -264,13 +341,34 @@ function setupPreview() {
     };
   });
 
-  v.ontimeupdate = renderPlayhead;
+  v.ontimeupdate = () => {
+    // During playback, skip over removed sections.
+    if (!v.paused) {
+      for (const c of activeCuts()) {
+        if (v.currentTime >= c.start && v.currentTime < c.end - 1e-3) { seek(c.end); break; }
+      }
+    }
+    renderPlayhead();
+  };
   v.onseeked = renderPlayhead;
   v.onloadedmetadata = () => { renderTrim(); renderPlayhead(); };
 
   els.btnSetIn.onclick = () => { state.inS = clamp(v.currentTime || 0, 0, state.outS - frameStep()); renderTrim(); };
   els.btnSetOut.onclick = () => { state.outS = clamp(v.currentTime || 0, state.inS + frameStep(), state.durationS); renderTrim(); };
   els.btnResetTrim.onclick = () => { state.inS = 0; state.outS = state.durationS; renderTrim(); };
+
+  // Cuts
+  els.btnCutStart.onclick = () => { state.pendingCutStart = v.currentTime || 0; renderTrim(); };
+  els.btnCutEnd.onclick = () => {
+    if (state.pendingCutStart == null) { setStatus('Mark a cut start first.'); return; }
+    const a = Math.min(state.pendingCutStart, v.currentTime || 0);
+    const b = Math.max(state.pendingCutStart, v.currentTime || 0);
+    if (b - a > 1e-3) { state.cuts.push({ start: a, end: b }); mergeCuts(); }
+    state.pendingCutStart = null;
+    setStatus('');
+    renderTrim();
+  };
+  els.btnClearCuts.onclick = () => { state.cuts = []; state.pendingCutStart = null; renderTrim(); };
 
   // Click track to seek
   els.tlTrack.onpointerdown = (e) => {
@@ -309,6 +407,7 @@ function setupPreview() {
     else if (e.key === 'ArrowRight') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) + frameStep()); }
     else if (e.key === 'Home') { seek(state.inS); }
     else if (e.key === 'End') { seek(state.outS); }
+    else if (e.key === 'c' || e.key === 'C') { e.preventDefault(); (state.pendingCutStart == null ? els.btnCutStart : els.btnCutEnd).click(); }
   };
 
   renderTrim();
@@ -326,7 +425,7 @@ function currentSettings() {
   const outFps = fpsSel > 0 ? Math.min(fpsSel, state.fps) : state.fps;
   const codec = els.inCodec.value;
   const keepAudio = els.inAudio.checked && !els.inAudio.disabled;
-  const trimDur = Math.max(0.05, state.outS - state.inS);
+  const trimDur = keptDuration();   // selection length minus removed sections
   return { mode, scale, outW, outH, outFps, codec, keepAudio, trimDur };
 }
 
@@ -409,6 +508,18 @@ async function compress() {
     const vBitrate = targetVideoBitrate(s);
     const inMicros = Math.round(state.inS * 1e6);
     const outMicros = Math.round(state.outS * 1e6);
+    // Cut sections in microseconds; output time compacts by removing them.
+    const cutsUS = activeCuts().map((c) => ({ start: Math.round(c.start * 1e6), end: Math.round(c.end * 1e6) }));
+    const inCutUS = (t) => cutsUS.some((c) => t >= c.start && t < c.end);
+    // Source time -> output time: subtract the trim start and every cut before t.
+    const toOutputUS = (t) => {
+      let shift = inMicros;
+      for (const c of cutsUS) {
+        if (t >= c.end) shift += c.end - c.start;
+        else if (t > c.start) shift += t - c.start;   // (frames inside a cut are skipped before this runs)
+      }
+      return t - shift;
+    };
 
     // ---- Verify source is decodable ----
     const description = await videoDescription(file, mp4, video.id);
@@ -472,10 +583,11 @@ async function compress() {
         const t = frame.timestamp;
         if (t >= outMicros) { reachedOut = true; return; }          // past selection
         if (t + 1 < inMicros) return;                               // before selection (decoded for refs)
+        if (inCutUS(t)) return;                                     // inside a removed section
         if (decimating && t + 1 < nextEmit) return;                 // frame-rate reduction
         nextEmit = t + frameInterval;
 
-        const outTs = t - inMicros;                                 // shift so output starts at 0
+        const outTs = toOutputUS(t);                                // compact past trim + cuts
         let out;
         if (needScale) {
           ctx.drawImage(frame, 0, 0, s.outW, s.outH);
@@ -515,10 +627,10 @@ async function compress() {
       } else if (user === 'audio') {
         for (const smp of smps) {
           const cts = (smp.cts / smp.timescale) * 1e6;
-          if (cts + 1 >= inMicros && cts < outMicros) {
+          if (cts + 1 >= inMicros && cts < outMicros && !inCutUS(cts)) {
             audioOut.push({
               data: smp.data.slice(0),                              // copy before release
-              ts: Math.round(cts - inMicros),
+              ts: Math.round(toOutputUS(cts)),                      // compact past trim + cuts
               dur: Math.round((smp.duration / smp.timescale) * 1e6),
             });
           }

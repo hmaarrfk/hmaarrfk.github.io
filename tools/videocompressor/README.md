@@ -18,9 +18,12 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
 - **Demux** — [MP4Box.js](https://github.com/gpac/mp4box.js) reads the MP4/MOV,
   yields the encoded video samples plus the codec configuration record
   (`avcC`/`hvcC`) the decoder needs.
-- **Preview & trim** — the source plays in a `<video>` element (streamed from a
-  Blob URL, so multi-GB files preview instantly). Drag the timeline handles to
-  keep only part of the clip; a shorter selection encodes to a smaller file.
+- **Preview, trim & cut** — the source plays in a `<video>` element (streamed
+  from a Blob URL, so multi-GB files preview instantly). Drag the timeline
+  handles to keep only part of the clip, and mark interior **cut** sections to
+  drop (mark start → mark end); removed sections are skipped during encode and
+  the output timestamps compact to stitch the clip back together (audio too). A
+  shorter kept duration encodes to a smaller file.
 - **Decode → scale → encode** — WebCodecs `VideoDecoder`/`VideoEncoder`.
   Resolution change happens on an `OffscreenCanvas`; frame-rate reduction drops
   frames by presentation timestamp.

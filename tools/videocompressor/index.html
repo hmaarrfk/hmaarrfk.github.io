@@ -112,6 +112,10 @@
             <div id="dim-head" style="position:absolute;top:0;bottom:0;left:0;background:rgba(0,0,0,.55);z-index:2"></div>
             <div id="dim-tail" style="position:absolute;top:0;bottom:0;right:0;background:rgba(0,0,0,.55);z-index:2"></div>
           </div>
+          <!-- interior cut sections (red), drawn above the dim layer -->
+          <div id="cuts-layer" style="position:absolute;inset:0;z-index:3"></div>
+          <!-- staged cut (yellow) while marking -->
+          <div class="tl-pending" id="tl-pending"></div>
           <div class="tl-handle in"  id="handle-in"  title="Selection start — drag"></div>
           <div class="tl-handle out" id="handle-out" title="Selection end — drag"></div>
           <div class="tl-playhead" id="playhead"></div>
@@ -124,6 +128,19 @@
         <button class="btn" id="btn-reset-trim" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Reset trim</button>
         <span class="status" id="trim-info" style="margin-top:0;margin-left:auto"></span>
       </div>
+
+      <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn" id="btn-cut-start"  type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Mark cut start</button>
+        <button class="btn" id="btn-cut-end"    type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Remove section</button>
+        <button class="btn" id="btn-clear-cuts" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Clear cuts</button>
+        <span class="status" id="cut-info" style="margin-top:0;margin-left:auto"></span>
+      </div>
+      <p class="small muted" style="margin-top:2px">
+        Drop interior sections: scrub to where a section starts, <b>Mark cut
+        start</b>, scrub to its end, then <b>Remove section</b> (or press
+        <b>C</b> to mark, <b>C</b> again to cut). Click a red band to undo it.
+        Removed sections are cut out and the clip is stitched back together.
+      </p>
     </section>
 
     <!-- STEP 3 · SETTINGS -->
