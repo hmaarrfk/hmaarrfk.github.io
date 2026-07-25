@@ -91,6 +91,12 @@
         compresses to a smaller file.
       </p>
 
+      <!-- Shared preview block: relocated into whichever step is active.
+           In Trim it's editable; in Settings/Export it previews the final
+           (trimmed, cuts-removed) clip. -->
+      <div id="host-trim">
+      <div id="preview-block">
+      <p class="small muted" id="preview-caption" style="margin:0 0 8px" hidden></p>
       <video id="preview" playsinline preload="auto"
              style="width:100%;max-height:52vh;background:#000;border-radius:var(--radius);display:block"></video>
 
@@ -131,6 +137,8 @@
           <div class="tl-playhead" id="playhead"></div>
         </div>
       </div>
+      </div><!-- /preview-block -->
+      </div><!-- /host-trim -->
 
       <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:6px">
         <button class="btn" id="btn-set-in"  type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Set start here</button>
@@ -160,6 +168,10 @@
     <!-- STEP 3 · SETTINGS -->
     <section class="panel step-pane" data-pane="settings" id="pane-settings" hidden>
       <h2 style="margin-top:0">Compression settings</h2>
+
+      <!-- Final-track preview is relocated here while on this step -->
+      <div id="host-settings" style="margin-bottom:16px"></div>
+
 
       <!-- Size target mode -->
       <div class="field-group" style="margin-bottom:14px">
@@ -241,6 +253,15 @@
     <section class="panel step-pane" data-pane="export" id="pane-export" hidden>
       <h2 style="margin-top:0">Export</h2>
       <p class="small muted" id="export-summary" style="margin-top:-6px"></p>
+
+      <!-- Final-track preview is relocated here before compressing -->
+      <div id="host-export" style="margin-bottom:16px"></div>
+
+      <!-- Live view of frames as they're encoded (shown during compression) -->
+      <figure id="encode-view" hidden style="margin:0 0 16px">
+        <canvas id="encode-canvas" style="width:100%;max-height:52vh;background:#000;border-radius:var(--radius);display:block"></canvas>
+        <figcaption class="small muted" style="margin-top:6px">Encoding &mdash; frames shown as they're written.</figcaption>
+      </figure>
 
       <div class="row" style="gap:14px; flex-wrap:wrap">
         <button class="btn" id="btn-compress" type="button">Compress video</button>

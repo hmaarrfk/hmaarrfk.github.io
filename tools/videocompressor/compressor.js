@@ -30,6 +30,9 @@ const els = {
   paneSource: $('pane-source'), panePreview: $('pane-preview'),
   paneSettings: $('pane-settings'), paneExport: $('pane-export'), paneResult: $('pane-result'),
   nextSettings: $('next-settings'), nextExport: $('next-export'), exportSummary: $('export-summary'),
+  previewBlock: $('preview-block'), previewCaption: $('preview-caption'),
+  hostTrim: $('host-trim'), hostSettings: $('host-settings'), hostExport: $('host-export'),
+  encodeView: $('encode-view'), encodeCanvas: $('encode-canvas'),
   drop: $('drop-video'), file: $('file-video'), info: $('video-info'),
   // preview / trim
   preview: $('preview'), timecode: $('timecode'),
@@ -73,11 +76,41 @@ let currentStep = 'source';
 // ---------------------------------------------------------------------------
 // Step navigation (one panel at a time, like the GIF Maker)
 // ---------------------------------------------------------------------------
+let previewMode = 'edit';   // 'edit' (trim) | 'output' (settings/export)
+
+function relocatePreview(name) {
+  // Move the single shared preview block into the active step's host.
+  const host = name === 'trim' ? els.hostTrim
+    : name === 'settings' ? els.hostSettings
+    : name === 'export' ? els.hostExport : null;
+  if (host && els.previewBlock && els.previewBlock.parentElement !== host) {
+    els.preview.pause();
+    host.appendChild(els.previewBlock);
+  }
+  previewMode = name === 'trim' ? 'edit' : 'output';
+  const editing = previewMode === 'edit';
+  // Handles are only meaningful while editing the trim.
+  els.handleIn.style.display = editing ? '' : 'none';
+  els.handleOut.style.display = editing ? '' : 'none';
+  els.previewCaption.hidden = editing;
+  if (!editing && state) {
+    els.previewCaption.textContent =
+      `Final preview — trimmed${activeCuts().length ? `, ${activeCuts().length} cut${activeCuts().length > 1 ? 's' : ''} removed` : ''} · ${fmtTime(keptDuration())}`;
+    // Snap playback into the kept range.
+    if ((els.preview.currentTime || 0) < state.inS || els.preview.currentTime >= state.outS || inCut(els.preview.currentTime)) {
+      seek(state.inS);
+    }
+  }
+}
+
 function showStep(name) {
   currentStep = name;
   document.querySelectorAll('.step-pane').forEach((p) => { p.hidden = p.dataset.pane !== name; });
   document.querySelectorAll('.stepbtn').forEach((b) => b.classList.toggle('active', b.dataset.step === name));
-  if (state && name === 'trim') { renderTrim(); renderPlayhead(); }
+  // During an export, keep the preview out of the way (the encode view shows).
+  if (name === 'export' && running) { els.encodeView.hidden = false; els.previewBlock.style.display = 'none'; }
+  else { els.encodeView.hidden = true; els.previewBlock.style.display = ''; if (state) relocatePreview(name); }
+  if (state && name !== 'source') { renderTrim(); renderPlayhead(); }
   if (state && name === 'export') updateExportSummary();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -370,8 +403,13 @@ function setupPreview() {
   });
 
   v.ontimeupdate = () => {
-    // During playback, skip over removed sections.
     if (!v.paused) {
+      // In output mode, keep playback inside the selection and loop it.
+      if (previewMode === 'output' && state) {
+        if (v.currentTime < state.inS - 1e-3) seek(state.inS);
+        else if (v.currentTime >= state.outS - 1e-3) seek(state.inS);
+      }
+      // Skip over removed sections.
       for (const c of activeCuts()) {
         if (v.currentTime >= c.start && v.currentTime < c.end - 1e-3) { seek(c.end); break; }
       }
@@ -428,14 +466,15 @@ function setupPreview() {
 
   // Keyboard
   document.onkeydown = (e) => {
-    if (els.panePreview.hidden) return;
+    if (!state || running) return;
+    if (currentStep === 'source' || els.previewBlock.style.display === 'none') return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === ' ') { e.preventDefault(); v.paused ? v.play() : v.pause(); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) - frameStep()); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) + frameStep()); }
     else if (e.key === 'Home') { seek(state.inS); }
     else if (e.key === 'End') { seek(state.outS); }
-    else if (e.key === 'c' || e.key === 'C') { e.preventDefault(); (state.pendingCutStart == null ? els.btnCutStart : els.btnCutEnd).click(); }
+    else if ((e.key === 'c' || e.key === 'C') && previewMode === 'edit') { e.preventDefault(); (state.pendingCutStart == null ? els.btnCutStart : els.btnCutEnd).click(); }
   };
 
   renderTrim();
@@ -600,6 +639,16 @@ async function compress() {
     const needScale = s.outW !== video.track_width || s.outH !== video.track_height;
     const canvas = new OffscreenCanvas(s.outW, s.outH);
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+
+    // Live "playing while encoding" view (downscaled for cheap drawing).
+    els.previewBlock.style.display = 'none';
+    els.encodeView.hidden = false;
+    const ecW = Math.min(s.outW, 640);
+    const ecH = Math.max(1, Math.round(ecW * s.outH / s.outW));
+    els.encodeCanvas.width = ecW;
+    els.encodeCanvas.height = ecH;
+    const ecx = els.encodeCanvas.getContext('2d', { alpha: false });
+
     const frameInterval = 1e6 / s.outFps;
     const decimating = s.outFps < state.fps - 0.01;
     const estFrames = Math.max(1, Math.round(s.outFps * s.trimDur));
@@ -625,6 +674,8 @@ async function compress() {
           out = new VideoFrame(frame, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
         }
         encoder.encode(out, { keyFrame: emitted % gop === 0 });
+        // Draw the frame we just encoded so the user watches it play out.
+        try { ecx.drawImage(needScale ? canvas : out, 0, 0, ecW, ecH); } catch (_) {}
         out.close();
         emitted++;
         if (emitted % 5 === 0) {
@@ -744,6 +795,9 @@ async function compress() {
     running = false;
     els.btnCompress.disabled = false;
     els.btnCancel.hidden = true;
+    els.encodeView.hidden = true;
+    els.previewBlock.style.display = '';
+    if (state && currentStep === 'export') relocatePreview('export');
   }
 }
 

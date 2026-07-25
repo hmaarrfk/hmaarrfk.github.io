@@ -24,6 +24,12 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   drop (mark start → mark end); removed sections are skipped during encode and
   the output timestamps compact to stitch the clip back together (audio too). A
   shorter kept duration encodes to a smaller file.
+- **Stepped workflow** — one panel at a time (Source → Trim & cut → Settings →
+  Export). The single `<video>` preview is *relocated* into the active step: it's
+  editable in Trim, and in Settings/Export it plays the **final** clip (loops the
+  selection, skips cuts) so you preview exactly what will be exported.
+- **Live encode view** — during export, each frame is drawn to a canvas as it's
+  encoded, so you watch the output play out while it's written.
 - **Decode → scale → encode** — WebCodecs `VideoDecoder`/`VideoEncoder`.
   Resolution change happens on an `OffscreenCanvas`; frame-rate reduction drops
   frames by presentation timestamp.
