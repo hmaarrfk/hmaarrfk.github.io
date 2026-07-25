@@ -49,6 +49,7 @@ const els = {
   inScale: $('in-scale'), inFps: $('in-fps'), inCodec: $('in-codec'), inAudio: $('in-audio'),
   hintSize: $('hint-size'), hintBitrate: $('hint-bitrate'), hintScale: $('hint-scale'),
   hintFps: $('hint-fps'), hintCodec: $('hint-codec'), hintAudio: $('hint-audio'),
+  encodeWarnSettings: $('encode-warn-settings'), encodeWarnExport: $('encode-warn-export'),
   btnCompress: $('btn-compress'), btnCancel: $('btn-cancel'),
   est: $('est'), progress: $('progress'), status: $('status'),
   resultVideo: $('result-video'), resultMeta: $('result-meta'), download: $('download'),
@@ -175,6 +176,47 @@ const fmtTime = (s) => {
 const even = (n) => Math.max(2, Math.round(n / 2) * 2);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Persisted settings (survive a page refresh). The video file itself can't be
+// stored, so we save the settings/trim/cuts and re-apply them next time a video
+// is loaded — fully if it's the same file, otherwise just the general options.
+// ---------------------------------------------------------------------------
+const LS_KEY = 'videocompressor:settings:v1';
+let saveTimer = null;
+
+function readSettings() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) { return null; }
+}
+function saveSettings() {
+  if (!state) return;
+  const data = {
+    v: 1,
+    general: {
+      mode: document.querySelector('input[name="mode"]:checked').value,
+      size: els.inSize.value, bitrate: els.inBitrate.value,
+      scale: els.inScale.value, fps: els.inFps.value, codec: els.inCodec.value,
+      keepAudio: els.inAudio.checked,
+    },
+    file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
+    trim: { inS: state.inS, outS: state.outS, cuts: state.cuts },
+  };
+  try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (_) {}
+}
+function queueSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveSettings, 300);
+}
+function applyGeneral(g) {
+  if (!g) return;
+  if (g.size != null) els.inSize.value = g.size;
+  if (g.bitrate != null) els.inBitrate.value = g.bitrate;
+  if (g.scale != null) els.inScale.value = g.scale;
+  if (g.fps != null) els.inFps.value = g.fps;
+  if (g.codec != null) els.inCodec.value = g.codec;
+  const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
+  if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
+}
 
 function setStatus(msg) { els.status.textContent = msg || ''; }
 function setProgress(frac) {
@@ -306,6 +348,34 @@ async function loadFile(file) {
   els.hintAudio.textContent = !audio ? 'This file has no audio track.'
     : isAac ? `${audio.audio.channel_count}ch · ${audio.audio.sample_rate} Hz — copied unchanged.`
     : `Audio is ${audio.codec} (not AAC) and will be dropped.`;
+
+  // Check up front whether the browser can decode this source (and cache the
+  // codec description so compress doesn't re-read it).
+  try { state.description = await videoDescription(file, mp4, video.id); } catch (_) { state.description = null; }
+  const decCfg = { codec: video.codec, codedWidth: video.track_width, codedHeight: video.track_height, description: state.description };
+  state.decoderSupported = (await VideoDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported;
+
+  // Restore saved settings (survive a refresh). General options always apply;
+  // trim + cuts only when the same file is loaded again.
+  const saved = readSettings();
+  let restoredNote = '';
+  if (saved) {
+    applyGeneral(saved.general);
+    if (isAac && saved.general && saved.general.keepAudio != null) els.inAudio.checked = !!saved.general.keepAudio;
+    const sameFile = saved.file && saved.file.name === file.name &&
+      saved.file.size === file.size && saved.file.lastModified === file.lastModified;
+    if (sameFile && saved.trim) {
+      state.inS = clamp(saved.trim.inS ?? 0, 0, durationS);
+      state.outS = clamp(saved.trim.outS ?? durationS, state.inS + 0.01, durationS);
+      state.cuts = Array.isArray(saved.trim.cuts)
+        ? saved.trim.cuts.filter((c) => c && isFinite(c.start) && isFinite(c.end))
+        : [];
+      restoredNote = '  ·  restored your last trim, cuts & settings';
+    } else if (saved.general) {
+      restoredNote = '  ·  applied your last settings';
+    }
+  }
+  if (restoredNote) els.info.textContent += restoredNote;
 
   // Preview + trim
   setupPreview();
@@ -619,15 +689,23 @@ function updateEstimate() {
   }
   els.est.textContent = '';
   if (currentStep === 'export') updateExportSummary();
+  queueSave();
+  queueValidate();
 }
 
 // ---------------------------------------------------------------------------
 // Encoder config probing
 // ---------------------------------------------------------------------------
 async function pickEncoderConfig(codec, width, height, bitrate, framerate) {
+  // Try a ladder of profile@level strings from high to low so large frames
+  // (e.g. 4K) find a level that supports them. AVC level 4.0 (…28) only covers
+  // ~2048px wide; 4K needs 5.1/5.2 (…33/…34). HEVC likewise needs L153/L156.
   const candidates = codec === 'hevc'
-    ? ['hvc1.1.6.L123.B0', 'hev1.1.6.L123.B0', 'hvc1.1.6.L93.B0']
-    : ['avc1.640028', 'avc1.4d0028', 'avc1.42001f'];
+    ? ['hvc1.1.6.L186.B0', 'hvc1.1.6.L156.B0', 'hvc1.1.6.L153.B0', 'hvc1.1.6.L150.B0',
+       'hvc1.1.6.L123.B0', 'hvc1.1.6.L120.B0', 'hvc1.1.6.L93.B0',
+       'hev1.1.6.L153.B0', 'hev1.1.6.L123.B0']
+    : ['avc1.640034', 'avc1.640033', 'avc1.640032', 'avc1.64002a', 'avc1.640029',
+       'avc1.640028', 'avc1.64001f', 'avc1.4d0028', 'avc1.42001f'];
   for (const accel of ['prefer-hardware', 'no-preference']) {
     for (const c of candidates) {
       const config = {
@@ -644,6 +722,48 @@ async function pickEncoderConfig(codec, width, height, bitrate, framerate) {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Early validation — check the chosen settings are actually encodable *before*
+// the user hits Compress, and disable it (with a reason) if not.
+// ---------------------------------------------------------------------------
+let validateToken = 0;
+let validateTimer = null;
+
+function setEncodeWarning(msg) {
+  const show = !!msg;
+  els.encodeWarnSettings.textContent = msg || '';
+  els.encodeWarnExport.textContent = msg || '';
+  els.encodeWarnSettings.style.display = show ? 'block' : 'none';
+  els.encodeWarnExport.style.display = show ? 'block' : 'none';
+  if (!running) els.btnCompress.disabled = show;
+}
+
+async function validateSettings() {
+  if (!state) return;
+  if (state.decoderSupported === false) {
+    setEncodeWarning(`Your browser can’t decode this video’s codec (${state.video.codec}). Try an H.264 or H.265 file.`);
+    return;
+  }
+  const token = ++validateToken;
+  const s = currentSettings();
+  const vBitrate = targetVideoBitrate(s);
+  const cfg = await pickEncoderConfig(s.codec, s.outW, s.outH, vBitrate, s.outFps);
+  if (token !== validateToken) return;                 // superseded by a newer change
+  if (cfg) { setEncodeWarning(''); return; }
+  // Unsupported — is the other codec OK? Advise accordingly.
+  const alt = s.codec === 'hevc' ? 'avc' : 'hevc';
+  const altCfg = await pickEncoderConfig(alt, s.outW, s.outH, vBitrate, s.outFps);
+  if (token !== validateToken) return;
+  const thisName = s.codec === 'hevc' ? 'H.265' : 'H.264';
+  setEncodeWarning(altCfg
+    ? `Your browser can’t encode ${thisName} at ${s.outW}×${s.outH}. Switch codec to ${alt === 'hevc' ? 'H.265' : 'H.264'}, or pick a smaller resolution.`
+    : `Your browser can’t encode ${s.outW}×${s.outH} at these settings. Pick a smaller resolution.`);
+}
+function queueValidate() {
+  if (validateTimer) clearTimeout(validateTimer);
+  validateTimer = setTimeout(validateSettings, 250);
 }
 
 // ---------------------------------------------------------------------------
@@ -680,16 +800,15 @@ async function compress() {
       return t - shift;
     };
 
-    // ---- Verify source is decodable ----
-    const description = await videoDescription(file, mp4, video.id);
+    // ---- Verify source is decodable (checked early at load; re-read desc here) ----
+    const description = state.description !== undefined ? state.description : await videoDescription(file, mp4, video.id);
     const decCfg = {
       codec: video.codec,
       codedWidth: video.track_width,
       codedHeight: video.track_height,
       description,
     };
-    const decSupport = await VideoDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }));
-    if (!decSupport.supported) {
+    if (state.decoderSupported === false) {
       throw new Error(`Your browser can't decode this video's codec (${video.codec}). Try an H.264 or H.265 file.`);
     }
 
@@ -988,4 +1107,8 @@ async function handleFile(f) {
   }
   initUI();
   showStep('source');
+  const saved = readSettings();
+  if (saved && saved.file && saved.file.name) {
+    els.info.textContent = `Last session: “${saved.file.name}”. Load it again to restore your trim, cuts & settings — or load any video to reuse your settings.`;
+  }
 })();

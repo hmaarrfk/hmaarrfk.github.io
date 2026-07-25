@@ -30,6 +30,14 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   selection, skips cuts) so you preview exactly what will be exported.
 - **Live encode view** — during export, each frame is drawn to a canvas as it's
   encoded, so you watch the output play out while it's written.
+- **Settings persistence** — settings, trim, and cuts are saved to
+  `localStorage` and re-applied when you load a video again (fully if it's the
+  same file; general options only otherwise). The file itself isn't stored.
+- **Early validation** — the chosen codec/resolution/bitrate are checked with
+  `VideoEncoder.isConfigSupported` as you change them; if the browser can't
+  encode them the Compress button is disabled with a reason, instead of failing
+  at the end. Codec strings walk a profile@level ladder (up to AVC 5.2 / HEVC
+  L186) so 4K frames find a supported level.
 - **Decode → scale → encode** — WebCodecs `VideoDecoder`/`VideoEncoder`.
   Resolution change happens on an `OffscreenCanvas`; frame-rate reduction drops
   frames by presentation timestamp.
