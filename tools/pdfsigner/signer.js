@@ -16,7 +16,7 @@
 
 import * as pdfjsLib from './vendor/pdfjs/pdf.min.js';
 import {
-  PDFDocument, StandardFonts, rgb, degrees,
+  PDFDocument, StandardFonts, PDFName, rgb, degrees,
 } from './vendor/pdf-lib/pdf-lib.esm.min.js';
 
 /* ------------------------------------------------------------------ *
@@ -541,8 +541,11 @@ async function collectFields(page, vp, num) {
 
     if (f.name && !(f.name in S.fieldValues)) {
       const v = a.fieldValue;
+      // A checkbox is on when its value matches the widget's own export value;
+      // that name is only "Yes" by convention, and /Off is the only reserved one.
       S.fieldValues[f.name] =
-        kind === 'checkbox' ? (v != null && v !== 'Off')
+        kind === 'checkbox' ? (v != null && v !== 'Off' &&
+          (f.exportValue == null || String(v) === String(f.exportValue)))
         : kind === 'radio' ? (v == null || v === 'Off' ? null : String(v))
         : kind === 'combo' || kind === 'list' ? (Array.isArray(v) ? v.map(String) : v == null ? [] : [String(v)])
         : v == null ? '' : String(v);
@@ -1349,12 +1352,16 @@ function makeMapper(page) {
  * @returns a human-readable suffix for the save status
  */
 function applyFormFields(doc) {
-  let form;
+  let form, libFields;
   try {
     form = doc.getForm();
+    // Resolve fields through pdf-lib's own list rather than getField(name).
+    // A lookup by name walks a dotted hierarchy, which misreads any field
+    // whose /T simply contains a dot.
+    libFields = new Map(form.getFields().map((lf) => [lf.getName(), lf]));
   } catch (err) {
     console.warn('form not readable', err);
-    return ' — form fields could not be written';
+    return { note: ' — form fields could not be written', failed: 1 };
   }
 
   // Read-only fields are left exactly as the document author set them, and so
@@ -1364,49 +1371,65 @@ function applyFormFields(doc) {
   for (const f of S.fields) if (f.name && f.kind !== 'sig' && !f.readOnly) byName.set(f.name, f);
 
   let written = 0, failed = 0, subs = 0;
+  const lost = [];
   for (const [name, f] of byName) {
     const value = S.fieldValues[name];
     if (JSON.stringify(value) === JSON.stringify(S.fieldOriginals[name])) continue;
     try {
+      const lf = libFields.get(name);
+      if (!lf) throw new Error('field not present in the document');
       switch (f.kind) {
         case 'checkbox': {
-          const cb = form.getCheckBox(name);
-          if (value) cb.check(); else cb.uncheck();
+          if (value) lf.check(); else lf.uncheck();
           break;
         }
         case 'radio': {
-          const rg = form.getRadioGroup(name);
-          if (value) rg.select(value); else rg.clear();
+          if (value) lf.select(value); else lf.clear();
           break;
         }
         case 'combo': {
-          const dd = form.getDropdown(name);
-          dd.setFontSize(fitFontSize(f, String((value || [])[0] ?? '')));
+          lf.setFontSize(fitFontSize(f, String((value || [])[0] ?? '')));
           const v = (value || [])[0];
-          if (!v) { dd.clear(); break; }
+          if (!v) { lf.clear(); break; }
           // An editable combo can hold text that was never an option.
-          if (!dd.getOptions().includes(v)) dd.addOptions([v]);
-          dd.select(v);
+          if (!lf.getOptions().includes(v)) lf.addOptions([v]);
+          lf.select(v);
           break;
         }
         case 'list': {
-          const ol = form.getOptionList(name);
-          ol.setFontSize(f.fontSize);
-          if (!value || !value.length) ol.clear(); else ol.select(value);
+          lf.setFontSize(f.fontSize);
+          if (!value || !value.length) lf.clear(); else lf.select(value);
           break;
         }
         default: {
-          const tf = form.getTextField(name);
           const { out, n } = sanitize(String(value ?? ''));
           subs += n;
-          tf.setFontSize(fitFontSize(f, out));
-          tf.setText(out);
+          lf.setFontSize(fitFontSize(f, out));
+          lf.setText(out);
         }
       }
       written++;
     } catch (err) {
       failed++;
+      lost.push(name);
       console.warn('could not write field "' + name + '"', err);
+    }
+  }
+
+  // A field is drawn from its appearance stream, not from its value. Where
+  // that stream can't be trusted, force pdf-lib to rebuild it from the value —
+  // otherwise every field the user *didn't* touch keeps whatever the stream
+  // holds, and for a form that left appearance generation to the viewer that
+  // is nothing at all. This is what makes pre-filled entries survive the save.
+  const needAppearances = String(form.acroForm.dict.lookup(PDFName.of('NeedAppearances'))) === 'true';
+  for (const f of S.fields) {
+    if (f.kind === 'sig' || !f.name) continue;
+    const lf = libFields.get(f.name);
+    if (!lf) continue;
+    try {
+      if (needAppearances || appearanceLooksBlank(lf)) form.markFieldAsDirty(lf.ref);
+    } catch (err) {
+      console.warn('could not refresh appearance for "' + f.name + '"', err);
     }
   }
 
@@ -1432,9 +1455,28 @@ function applyFormFields(doc) {
   if (written) bits.push(`${written} field${written === 1 ? '' : 's'} written`);
   if (flattened) bits.push('flattened');
   else if ($('in-flatten').checked) bits.push('but could not be flattened — the form is still editable');
-  if (failed) bits.push(`${failed} could not be written`);
   if (subs) bits.push(`${subs} unsupported character${subs === 1 ? '' : 's'} in fields written as “?”`);
-  return bits.length ? ' · ' + bits.join(', ') : '';
+  return {
+    note: bits.length ? ' · ' + bits.join(', ') : '',
+    failed,
+    // Naming them matters: a field that silently didn't make it into the saved
+    // file is the difference between a signed document and a wrong one.
+    lostNote: failed ? ` — could not write ${failed} field${failed === 1 ? '' : 's'}: ${lost.slice(0, 4).join(', ')}${lost.length > 4 ? '…' : ''}` : '',
+  };
+}
+
+/** An appearance stream too small to draw anything — or missing outright. */
+function appearanceLooksBlank(libField) {
+  for (const widget of libField.acroField.getWidgets()) {
+    let normal;
+    try { normal = widget.getAppearances()?.normal; } catch { return true; }
+    if (!normal) return true;
+    // Checkboxes and radios keep a dictionary of per-state streams; those are
+    // picked at flatten time and are fine.
+    if (!normal.contents) continue;
+    if (normal.contents.length <= 20) return true;
+  }
+  return false;
 }
 
 async function exportPdf() {
@@ -1452,7 +1494,7 @@ async function exportPdf() {
 
     // Form fields first, so a flattened field's contents can never be painted
     // over a signature that was deliberately placed on top of it.
-    const formNote = S.hasForm ? applyFormFields(doc) : '';
+    const formResult = S.hasForm ? applyFormFields(doc) : { note: '', failed: 0, lostNote: '' };
 
     for (const it of S.items) {
       const page = doc.getPage(it.page - 1);
@@ -1529,8 +1571,17 @@ async function exportPdf() {
 
     S.dirty = false;
     const mb = (blob.size / 1048576).toFixed(blob.size > 1048576 ? 1 : 2);
-    status.textContent = `Saved ${name} (${mb} MB)` + formNote +
+    const line = `Saved ${name} (${mb} MB)` + formResult.note +
       (replaced ? ` — ${replaced} unsupported character${replaced > 1 ? 's' : ''} written as “?”` : '');
+    status.textContent = line;
+    if (formResult.failed) {
+      status.textContent = '';
+      status.append(line);
+      const warn = document.createElement('span');
+      warn.style.color = 'var(--danger)';
+      warn.textContent = formResult.lostNote;
+      status.appendChild(warn);
+    }
   } catch (err) {
     console.error(err);
     status.innerHTML = '<span style="color:var(--danger)">Could not save: ' +

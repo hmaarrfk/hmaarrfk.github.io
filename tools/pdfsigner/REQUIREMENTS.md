@@ -154,6 +154,23 @@ substitutes Arial for Helvetica.
   live as you type, so the two can't disagree.
 - Only fields whose value actually **changed** are written; untouched fields
   keep their original appearance streams.
+- **A field is drawn from its appearance stream, not from its value** — and
+  that stream cannot always be trusted. Plenty of real forms carry their
+  entries only in `/V`, leave `/AP` empty, and set `/NeedAppearances true` to
+  tell the viewer to build the appearance itself. Flattening such a file draws
+  the empty stream, so every pre-filled entry the signer never touched
+  disappears from the saved copy. Before flattening, any field whose appearance
+  is missing, is too small to draw anything, or belongs to a document that sets
+  `NeedAppearances`, is marked dirty so pdf-lib rebuilds it from the value.
+  Fields with a good appearance stream keep it, which matters for comb fields
+  and anything else pdf-lib would regenerate less faithfully than the author
+  wrote it.
+- Fields are resolved through pdf-lib's own `getFields()` list rather than
+  `getField(name)`: a name lookup walks a dotted hierarchy, which misreads any
+  field whose `/T` simply contains a dot. Anything that still can't be written
+  is named in the save status, in red — a field that silently didn't make it
+  into the saved file is the difference between a signed document and a wrong
+  one.
 
 **Saving**
 - The image is embedded **once** and drawn at each placement, so stamping forty
@@ -193,6 +210,19 @@ Manual, in a browser, against `/tools/pdfsigner/` served statically:
    shrank to fit rather than being clipped. Then repeat with flattening off and
    confirm the fields are still present, carry the new values, and that fields
    you didn't touch were left alone.
+6. **Pre-filled forms** — the regression that matters most. Build a form whose
+   values live in `/V` with *empty* appearance streams and `NeedAppearances
+   true` (create it, then blank every widget's `/AP` in a second pass and save
+   with `updateFieldAppearances: false`, or pdf-lib quietly regenerates them
+   and the fixture tests nothing). Fill in one field, save flattened, and check
+   that the entries you never touched are still in the output. Before the fix
+   for this, they all vanished.
+
+**A warning about testing in a browser**: the default `python3 -m http.server`
+lets Chrome cache `signer.js`, and bumping a `?v=` query on the page URL does
+not bust it — a fix can look like it did nothing. Serve with `Cache-Control:
+no-store` while testing, and prefer checking the file the browser actually
+downloaded over one captured by patching `HTMLAnchorElement.prototype.click`.
 
 ## 7. Ideas not built
 
