@@ -153,6 +153,47 @@
     }
     .ov { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
     .ov.placing { cursor: crosshair; }
+
+    /* ---- interactive AcroForm fields ----
+       Sits above the stamp overlay so the controls are clickable, but only the
+       controls themselves take pointer events — the gaps between them stay
+       stamping surface. While stamping, the whole layer steps aside. */
+    .fieldlayer { position: absolute; inset: 0; pointer-events: none; }
+    .fieldlayer > * { position: absolute; pointer-events: auto; }
+    .pagelist.stamping .fieldlayer * { pointer-events: none !important; }
+
+    .fieldlayer input[type=text],
+    .fieldlayer textarea,
+    .fieldlayer select {
+      width: 100%; height: 100%; margin: 0; padding: 0 3px;
+      font-family: inherit; line-height: 1.15; color: #111;
+      background: rgba(255, 243, 176, .5);
+      border: 1px solid rgba(122, 100, 24, .55);
+      border-radius: 2px;
+      font-size: calc(var(--fs, 11) * var(--z, 1) * 1px);
+    }
+    .fieldlayer textarea { padding: 2px 3px; resize: none; overflow: auto; }
+    .fieldlayer select { padding: 0 2px; }
+    .fieldlayer input[type=text]:focus,
+    .fieldlayer textarea:focus,
+    .fieldlayer select:focus {
+      outline: none; background: #fff; border-color: #1c7ed6;
+      box-shadow: 0 0 0 2px rgba(28, 126, 214, .35);
+    }
+    .fieldlayer input[type=checkbox],
+    .fieldlayer input[type=radio] {
+      width: 100%; height: 100%; margin: 0; accent-color: #12306e; cursor: pointer;
+    }
+    /* Signature fields get a marker rather than a control: the answer to one is
+       a stamp, and leaving it click-through means you can put a stamp there. */
+    .fieldlayer .sigfield {
+      border: 1.5px dashed rgba(28, 126, 214, .75);
+      background: rgba(28, 126, 214, .07);
+      border-radius: 3px; pointer-events: none;
+      display: flex; align-items: center; justify-content: center;
+      color: #2b6ca8; font-size: calc(9 * var(--z, 1) * 1px); letter-spacing: .03em;
+      overflow: hidden; white-space: nowrap;
+    }
     .ov .hit { cursor: move; }
     .ov .handle { fill: #fff; stroke: #1c7ed6; stroke-width: 1; }
     .ov .selbox { fill: none; stroke: #1c7ed6; stroke-dasharray: 4 3; }
@@ -179,9 +220,10 @@
   <div class="wrap" id="landing">
     <p class="lede">
       Drop in a picture of your signature, place it anywhere on a PDF &mdash; on
-      one page or on every page &mdash; add typed text and dates, then save the
-      signed file. Everything happens inside this tab: the PDF is never uploaded,
-      and there is no tracking of any kind.
+      one page or on every page &mdash; add typed text and dates, fill in any form
+      fields the document already has, then save the signed file. Everything
+      happens inside this tab: the PDF is never uploaded, and there is no
+      tracking of any kind.
     </p>
 
     <div class="panel" id="unsupported" hidden>
@@ -209,8 +251,11 @@
           and use <b>Copy to every page</b> when a document wants initials
           throughout.</li>
       <li>Add text boxes for your printed name, title, or the date.</li>
-      <li>Save. The stamps are drawn into the page content, so the result is a
-          normal flat PDF that looks the same everywhere.</li>
+      <li>If the PDF is a fillable form, its fields are live &mdash; type into
+          them, tick the boxes, choose from the dropdowns.</li>
+      <li>Save. The stamps are drawn into the page content, and form fields are
+          flattened by default so nobody can edit or clear what you filled in.
+          The result is a normal flat PDF that looks the same everywhere.</li>
     </ol>
 
     <details class="help-details">
@@ -297,6 +342,24 @@
         <div class="btnrow">
           <button class="btn mini" id="btn-add-text" type="button">Add text box</button>
           <button class="btn mini ghost" id="btn-add-date" type="button">Add today's date</button>
+        </div>
+      </section>
+
+      <!-- Only shown for documents that actually carry an AcroForm -->
+      <section id="form-section" hidden>
+        <h3>Form fields</h3>
+        <p class="hintline" id="form-count" style="margin:0 0 10px"></p>
+        <label class="checkbox" style="cursor:pointer">
+          <input type="checkbox" id="in-flatten" checked> Flatten on save
+        </label>
+        <p class="hintline" style="margin:6px 0 0">
+          Flattening draws each field's contents into the page and removes the
+          field, so the saved copy can't be edited or cleared. Uncheck to keep
+          the form fillable.
+        </p>
+        <p class="warnline" id="form-warn" hidden style="margin:10px 0 0"></p>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="btn mini ghost" id="btn-reset-fields" type="button">Reset to original values</button>
         </div>
       </section>
 

@@ -81,6 +81,10 @@ const S = {
   encrypted: false,
   assets: [],             // signature images
   items: [],              // placements
+  hasForm: false,         // document carries an AcroForm
+  fields: [],             // one entry per visible widget, in display points
+  fieldValues: {},        // fully-qualified field name -> current value
+  fieldOriginals: {},     // the same, as the file was opened
   sel: null,              // selected item id
   armed: null,            // {kind:'image', assetId} | {kind:'text', text}
   editingAsset: null,     // asset id shown in the clean-up panel
@@ -195,6 +199,8 @@ function badChars(text) {
 const sanitize = (text) => {
   let n = 0;
   const out = [...String(text)].map((ch) => {
+    // Line breaks are structure, not glyphs — a multiline field keeps them.
+    if (ch === '\n' || ch === '\r') return ch;
     if (charSet && !charSet.has(ch.codePointAt(0))) { n++; return '?'; }
     return ch;
   }).join('');
@@ -257,6 +263,12 @@ async function openPdf(file) {
     S.dirty = false;
     S.pages = [];
 
+    // One cheap call answers "is there a form at all?" — and for the great
+    // majority of documents the answer is no, so nothing else is paid for.
+    S.hasForm = false;
+    S.fields = []; S.fieldValues = {}; S.fieldOriginals = {};
+    try { S.hasForm = !!(await doc.getFieldObjects()); } catch { S.hasForm = false; }
+
     for (let n = 1; n <= doc.numPages; n++) {
       const page = await doc.getPage(n);
       const vp = page.getViewport({ scale: 1 });
@@ -266,7 +278,9 @@ async function openPdf(file) {
         el: null, canvas: null, svg: null,
         renderedZoom: 0, task: null, lastSeen: 0,
       });
+      if (S.hasForm) await collectFields(page, vp, n);
     }
+    S.fieldOriginals = { ...S.fieldValues };
   } catch (err) {
     console.error(err);
     status.innerHTML = '<span style="color:var(--danger)">' +
@@ -285,6 +299,7 @@ async function openPdf(file) {
   $('doc-warn').hidden = true;
   $('save-status').textContent = '';
 
+  syncFormSection();
   buildPageElements();
   fitZoom();
   checkEncryption();
@@ -343,6 +358,7 @@ function buildPageElements() {
     p.el = wrap; p.canvas = cv; p.svg = svg;
     p.renderedZoom = 0;
     svg.addEventListener('pointerdown', (ev) => onPagePointerDown(ev, p));
+    if (S.hasForm) buildFieldLayer(p, wrap);
     list.appendChild(wrap);
   }
 
@@ -368,6 +384,9 @@ function applyZoom() {
     p.renderedZoom = 0;           // canvases are now the wrong resolution
     if (p.visible) renderPage(p);
   }
+  // Field controls are sized in percentages, so they scale for free; only
+  // their text needs the zoom, which they read from this custom property.
+  $('pagelist').style.setProperty('--z', S.zoom);
   $('zoom-val').textContent = Math.round(S.zoom * 100) + '%';
   drawAllOverlays();
 }
@@ -410,7 +429,14 @@ async function renderPage(p) {
     p.canvas.width = Math.max(1, Math.round(vp.width));
     p.canvas.height = Math.max(1, Math.round(vp.height));
 
-    p.task = p.page.render({ canvas: p.canvas, viewport: vp });
+    // With a form present, keep widget annotations off the canvas — the live
+    // controls above the page are the only copy of a field's value that should
+    // be visible. Without one, render exactly as before.
+    p.task = p.page.render({
+      canvas: p.canvas,
+      viewport: vp,
+      annotationMode: S.hasForm ? pdfjsLib.AnnotationMode.ENABLE_FORMS : undefined,
+    });
     await p.task.promise;
     p.task = null;
     p.renderedZoom = want;
@@ -444,6 +470,264 @@ function updatePageIndicator() {
     if (d < bestD) { bestD = d; best = p.num; }
   }
   $('page-ind').textContent = 'Page ' + best + ' of ' + S.pages.length;
+}
+
+/* ------------------------------------------------------------------ *
+ * AcroForm fields
+ *
+ * PDF.js is asked to leave widget annotations off the canvas
+ * (`AnnotationMode.ENABLE_FORMS`) and we render our own controls over the
+ * page instead — otherwise the value baked into the widget's appearance
+ * stream would show through underneath whatever the user types.
+ *
+ * Field geometry comes straight from the page viewport, so it lands in the
+ * same display-point space as everything else. A widget on a rotated page is
+ * sized with its *logical* (unrotated) width and height and then spun about
+ * its centre, which is what keeps the text reading the right way round.
+ * ------------------------------------------------------------------ */
+
+const FIELD_FLAG_EDIT = 1 << 18;   // Ch: combo box accepts typed-in values
+
+async function collectFields(page, vp, num) {
+  let anns = [];
+  try { anns = await page.getAnnotations({ intent: 'display' }); } catch { return; }
+
+  for (const a of anns) {
+    if (a.subtype !== 'Widget' || a.hidden || a.noHTML) continue;
+    if (a.pushButton) continue;                      // an action, not a value
+
+    const [ax, ay] = vp.convertToViewportPoint(a.rect[0], a.rect[1]);
+    const [bx, by] = vp.convertToViewportPoint(a.rect[2], a.rect[3]);
+    const lw = Math.abs(a.rect[2] - a.rect[0]);
+    const lh = Math.abs(a.rect[3] - a.rect[1]);
+
+    const kind = a.fieldType === 'Sig' ? 'sig'
+      : a.checkBox ? 'checkbox'
+      : a.radioButton ? 'radio'
+      : a.fieldType === 'Ch' ? (a.combo ? 'combo' : 'list')
+      : a.multiLine ? 'multiline'
+      : a.fieldType === 'Tx' ? 'text'
+      : null;
+    if (!kind) continue;
+
+    const f = {
+      page: num, name: a.fieldName || '', kind,
+      x: Math.min(ax, bx), y: Math.min(ay, by),
+      w: Math.abs(bx - ax), h: Math.abs(by - ay),
+      lw, lh,
+      // /R turns the widget anticlockwise within the page; the page's own
+      // /Rotate turns everything clockwise on screen.
+      rot: (vp.rotation - (a.rotation || 0) + 360) % 360,
+      readOnly: !!a.readOnly,
+      maxLen: a.maxLen > 0 ? a.maxLen : 0,
+      align: a.textAlignment,
+      // A field whose /DA asks for size 0 is "auto": pdf-lib would then grow
+      // the text until it fills the box, so a two-word note in a big box comes
+      // out enormous. Pick a readable size instead, and write that same size
+      // into the saved file so the preview is not a lie.
+      fontSize: a.defaultAppearanceData?.fontSize > 0
+        ? a.defaultAppearanceData.fontSize
+        : clamp(Math.min(12, lh * (a.multiLine ? 0.9 : 0.62)), 6, 12),
+      fontName: a.defaultAppearanceData?.fontName || 'Helvetica',
+      options: (a.options || []).map((o) => ({
+        value: o.exportValue ?? o.displayValue, label: o.displayValue ?? o.exportValue,
+      })),
+      multiSelect: !!a.multiSelect,
+      editable: !!(a.fieldFlags & FIELD_FLAG_EDIT),
+      buttonValue: a.buttonValue,       // radio: this widget's export value
+      exportValue: a.exportValue,       // checkbox: its "on" value
+    };
+    S.fields.push(f);
+
+    if (f.name && !(f.name in S.fieldValues)) {
+      const v = a.fieldValue;
+      S.fieldValues[f.name] =
+        kind === 'checkbox' ? (v != null && v !== 'Off')
+        : kind === 'radio' ? (v == null || v === 'Off' ? null : String(v))
+        : kind === 'combo' || kind === 'list' ? (Array.isArray(v) ? v.map(String) : v == null ? [] : [String(v)])
+        : v == null ? '' : String(v);
+    }
+  }
+}
+
+/**
+ * The size a field's text will actually be written at.
+ *
+ * Starts from the document's own intent — the /DA size, or a readable default
+ * where /DA says "auto" — and shrinks only as far as it must for the value to
+ * fit the box. Without this, a value longer than the field's font allows is
+ * silently clipped when the appearance is regenerated, which loses part of
+ * what the user typed. Shrinking is applied to the preview and written into
+ * the saved file, so the two always agree.
+ */
+function fitFontSize(f, text) {
+  const max = f.fontSize;
+  if (!text) return max;
+  const fam = /times/i.test(f.fontName) ? 'times' : /cour|mono/i.test(f.fontName) ? 'courier' : 'helvetica';
+  const m = metrics[fam + ':0'];
+  if (!m) return max;
+
+  const innerW = Math.max(4, f.lw - 4);
+  const innerH = Math.max(4, f.lh - 2);
+  const fits = (size) => {
+    if (f.kind !== 'multiline') {
+      return m.widthOf(text, size) <= innerW && (m.ascent + m.descent) * size <= innerH;
+    }
+    let lines = 0;
+    for (const para of text.split('\n')) {
+      lines++;
+      let line = '';
+      for (const word of para.split(/(\s+)/)) {
+        const next = line + word;
+        if (line && m.widthOf(next, size) > innerW) { lines++; line = word.trimStart(); }
+        else line = next;
+      }
+    }
+    return lines * size * LINE_RATIO <= innerH;
+  };
+
+  let size = max;
+  while (size > 4 && !fits(size)) size -= 0.5;
+  return Math.max(4, size);
+}
+
+function buildFieldLayer(p, wrap) {
+  const fields = S.fields.filter((f) => f.page === p.num);
+  if (!fields.length) return;
+  const layer = document.createElement('div');
+  layer.className = 'fieldlayer';
+
+  for (const f of fields) {
+    const el = makeFieldControl(f, p);
+    if (!el) continue;
+    // Positioned by centre so the rotation of a widget on a rotated page turns
+    // about the middle of the box rather than dragging it off across the page.
+    el.style.left = ((f.x + f.w / 2) / p.dispW * 100) + '%';
+    el.style.top = ((f.y + f.h / 2) / p.dispH * 100) + '%';
+    el.style.width = (f.lw / p.dispW * 100) + '%';
+    el.style.height = (f.lh / p.dispH * 100) + '%';
+    el.style.transform = `translate(-50%, -50%) rotate(${f.rot}deg)`;
+    layer.appendChild(el);
+  }
+  wrap.appendChild(layer);
+  p.fieldLayer = layer;
+}
+
+function makeFieldControl(f, p) {
+  // PDF.js paints read-only widgets onto the canvas even in ENABLE_FORMS mode
+  // (they aren't interactive, so there's nothing to hand to an HTML layer).
+  // Adding our own control on top would draw the value a second time.
+  if (f.readOnly) return null;
+
+  if (f.kind === 'sig') {
+    const d = document.createElement('div');
+    d.className = 'sigfield';
+    d.textContent = 'Signature field';
+    d.title = 'A signature field. Stamp your signature over it, then save.';
+    return d;
+  }
+
+  // Exactly the size the saved file will use — see fitFontSize().
+  const size = fitFontSize(f, String(S.fieldValues[f.name] ?? ''));
+
+  let el;
+  if (f.kind === 'checkbox' || f.kind === 'radio') {
+    el = document.createElement('input');
+    el.type = f.kind === 'checkbox' ? 'checkbox' : 'radio';
+    if (f.kind === 'radio') { el.name = 'fld:' + f.name; el.value = f.buttonValue ?? ''; }
+    el.checked = f.kind === 'checkbox'
+      ? !!S.fieldValues[f.name]
+      : S.fieldValues[f.name] === f.buttonValue;
+    el.addEventListener('change', () => {
+      setFieldValue(f.name, f.kind === 'checkbox' ? el.checked : f.buttonValue);
+    });
+  } else if (f.kind === 'combo' || f.kind === 'list') {
+    el = document.createElement('select');
+    const cur = S.fieldValues[f.name] || [];
+    if (f.kind === 'list') {
+      el.multiple = true;
+      el.size = Math.max(2, Math.round(f.lh / Math.max(8, size * 1.25)));
+    }
+    if (f.kind === 'combo') el.appendChild(new Option('—', ''));
+    for (const o of f.options) el.appendChild(new Option(o.label, o.value, false, cur.includes(o.value)));
+    // A value the file carries that isn't in the option list (editable combo)
+    // would otherwise vanish the moment the page is drawn.
+    for (const v of cur) {
+      if (!f.options.some((o) => o.value === v)) el.appendChild(new Option(v, v, false, true));
+    }
+    el.addEventListener('change', () => {
+      setFieldValue(f.name, [...el.selectedOptions].map((o) => o.value).filter((v) => v !== ''));
+    });
+  } else {
+    el = document.createElement(f.kind === 'multiline' ? 'textarea' : 'input');
+    if (f.kind !== 'multiline') el.type = 'text';
+    el.value = S.fieldValues[f.name] ?? '';
+    if (f.maxLen) el.maxLength = f.maxLen;
+    if (f.align === 1) el.style.textAlign = 'center';
+    if (f.align === 2) el.style.textAlign = 'right';
+    el.addEventListener('input', () => {
+      setFieldValue(f.name, el.value);
+      // Shrink live, the way the saved appearance will.
+      el.style.setProperty('--fs', fitFontSize(f, el.value));
+    });
+  }
+
+  el.style.setProperty('--fs', size);
+  el.dataset.field = f.name;
+  if (f.name) el.title = f.name;
+  return el;
+}
+
+/** One value per field name, mirrored into every widget that shows it. */
+function setFieldValue(name, value) {
+  S.fieldValues[name] = value;
+  S.dirty = true;
+  for (const el of document.querySelectorAll(`.fieldlayer [data-field="${CSS.escape(name)}"]`)) {
+    if (el.type === 'checkbox') el.checked = !!value;
+    else if (el.type === 'radio') el.checked = el.value === value;
+    else if (el.tagName === 'SELECT') {
+      const want = value || [];
+      for (const o of el.options) o.selected = want.includes(o.value);
+    } else if (el.value !== value) el.value = value;
+  }
+  updateFormCount();
+}
+
+function syncFormSection() {
+  const on = S.hasForm && S.fields.length > 0;
+  $('form-section').hidden = !on;
+  const warn = $('form-warn');
+  warn.hidden = true;
+  if (!on) return;
+  if (S.doc?.isPureXfa) {
+    warn.hidden = false;
+    warn.textContent = 'This is an XFA form. Its fields can be filled here only if it also ' +
+      'carries a classic AcroForm; otherwise fill it in Acrobat first, then sign the result.';
+  }
+  updateFormCount();
+}
+
+function updateFormCount() {
+  const names = new Set(S.fields.filter((f) => f.kind !== 'sig' && !f.readOnly).map((f) => f.name));
+  const locked = new Set(S.fields.filter((f) => f.readOnly).map((f) => f.name)).size;
+  const sigs = S.fields.filter((f) => f.kind === 'sig').length;
+  const filled = [...names].filter((n) => {
+    const v = S.fieldValues[n];
+    return Array.isArray(v) ? v.length : typeof v === 'boolean' ? v : String(v ?? '').length > 0;
+  }).length;
+  $('form-count').textContent =
+    `${names.size} fillable field${names.size === 1 ? '' : 's'}, ${filled} filled` +
+    (locked ? ` · ${locked} read-only` : '') +
+    (sigs ? ` · ${sigs} signature field${sigs === 1 ? '' : 's'} outlined on the page` : '');
+}
+
+function resetFields() {
+  S.fieldValues = { ...S.fieldOriginals };
+  for (const p of S.pages) {
+    if (p.fieldLayer) { p.fieldLayer.remove(); p.fieldLayer = null; }
+    if (S.hasForm) buildFieldLayer(p, p.el);
+  }
+  updateFormCount();
 }
 
 /* ------------------------------------------------------------------ *
@@ -659,12 +943,16 @@ function setArmed(a) {
   if (a) {
     bar.hidden = false;
     $('arm-text').textContent = a.kind === 'image'
-      ? 'Click any page to stamp “' + (S.assets.find((x) => x.id === a.assetId) || {}).name + '”. Keep clicking to place it again.'
+      ? 'Click blank page to stamp “' + (S.assets.find((x) => x.id === a.assetId) || {}).name +
+        '” — keep clicking to place it again. Stamps already on the page still drag.'
       : 'Click where the text should start.';
   } else {
     bar.hidden = true;
   }
   for (const p of S.pages) if (p.svg) p.svg.classList.toggle('placing', !!a);
+  // While stamping, form controls stop swallowing clicks so a signature can be
+  // dropped on top of a field (a "sign here" text box, typically).
+  $('pagelist').classList.toggle('stamping', !!a);
   renderAssetGrid();
 }
 const armImage = (assetId) => setArmed({ kind: 'image', assetId });
@@ -821,25 +1109,10 @@ function onPagePointerDown(ev, p) {
   if (ev.button !== 0 && ev.pointerType === 'mouse') return;
   const [lx, ly] = toLocal(p, ev);
 
-  // Stamping mode: every click drops a copy, and dragging straight away
-  // positions the copy you just dropped.
-  if (S.armed) {
-    ev.preventDefault();
-    let it;
-    if (S.armed.kind === 'image') {
-      it = addImageAt(p, lx, ly, S.armed.assetId);
-    } else {
-      it = addTextAt(p, lx, ly, S.armed.text);
-      setArmed(null);
-      focusTextField();
-    }
-    if (!it) return;
-    drawOverlay(p);
-    syncInspector();
-    if (it.type === 'image') beginDrag(ev, p, it, 'move', lx, ly, false);
-    return;
-  }
-
+  // Something already on the page always wins, even mid-stamping run: the
+  // cursor over a stamp says "move", so a drag there has to move that stamp
+  // rather than drop a second one on top of it. Empty space is where new
+  // stamps land, and the crosshair cursor marks exactly that.
   const handleEl = ev.target.closest('[data-handle]');
   if (handleEl) {
     const it = S.items.find((i) => i.id === handleEl.dataset.id);
@@ -858,6 +1131,25 @@ function onPagePointerDown(ev, p) {
       beginDrag(ev, p, it, 'move', lx, ly, true);
       return;
     }
+  }
+
+  // Stamping mode: a click on bare page drops a copy, and dragging straight
+  // away positions the copy you just dropped.
+  if (S.armed) {
+    ev.preventDefault();
+    let it;
+    if (S.armed.kind === 'image') {
+      it = addImageAt(p, lx, ly, S.armed.assetId);
+    } else {
+      it = addTextAt(p, lx, ly, S.armed.text);
+      setArmed(null);
+      focusTextField();
+    }
+    if (!it) return;
+    drawOverlay(p);
+    syncInspector();
+    if (it.type === 'image') beginDrag(ev, p, it, 'move', lx, ly, false);
+    return;
   }
 
   if (S.sel) { S.sel = null; drawAllOverlays(); syncInspector(); }
@@ -1045,6 +1337,106 @@ function makeMapper(page) {
   return { map, dispW: swap ? H : W, dispH: swap ? W : H };
 }
 
+/**
+ * Write the edited field values into the document, then optionally flatten.
+ *
+ * Flattening draws each field's appearance into the page content and drops the
+ * field itself, which is what makes the saved copy un-editable. Every step is
+ * defensive: a form this tool can't fully understand must still produce a
+ * saved file with the signatures on it, so failures degrade to a note in the
+ * status line rather than an aborted save.
+ *
+ * @returns a human-readable suffix for the save status
+ */
+function applyFormFields(doc) {
+  let form;
+  try {
+    form = doc.getForm();
+  } catch (err) {
+    console.warn('form not readable', err);
+    return ' — form fields could not be written';
+  }
+
+  // Read-only fields are left exactly as the document author set them, and so
+  // is anything the user didn't actually change — rewriting an untouched field
+  // would regenerate its appearance for no reason.
+  const byName = new Map();
+  for (const f of S.fields) if (f.name && f.kind !== 'sig' && !f.readOnly) byName.set(f.name, f);
+
+  let written = 0, failed = 0, subs = 0;
+  for (const [name, f] of byName) {
+    const value = S.fieldValues[name];
+    if (JSON.stringify(value) === JSON.stringify(S.fieldOriginals[name])) continue;
+    try {
+      switch (f.kind) {
+        case 'checkbox': {
+          const cb = form.getCheckBox(name);
+          if (value) cb.check(); else cb.uncheck();
+          break;
+        }
+        case 'radio': {
+          const rg = form.getRadioGroup(name);
+          if (value) rg.select(value); else rg.clear();
+          break;
+        }
+        case 'combo': {
+          const dd = form.getDropdown(name);
+          dd.setFontSize(fitFontSize(f, String((value || [])[0] ?? '')));
+          const v = (value || [])[0];
+          if (!v) { dd.clear(); break; }
+          // An editable combo can hold text that was never an option.
+          if (!dd.getOptions().includes(v)) dd.addOptions([v]);
+          dd.select(v);
+          break;
+        }
+        case 'list': {
+          const ol = form.getOptionList(name);
+          ol.setFontSize(f.fontSize);
+          if (!value || !value.length) ol.clear(); else ol.select(value);
+          break;
+        }
+        default: {
+          const tf = form.getTextField(name);
+          const { out, n } = sanitize(String(value ?? ''));
+          subs += n;
+          tf.setFontSize(fitFontSize(f, out));
+          tf.setText(out);
+        }
+      }
+      written++;
+    } catch (err) {
+      failed++;
+      console.warn('could not write field "' + name + '"', err);
+    }
+  }
+
+  let flattened = false;
+  if ($('in-flatten').checked) {
+    try {
+      form.flatten();
+      flattened = true;
+    } catch (err) {
+      // Usually a field whose appearance references a font the file doesn't
+      // carry. Keep the values that are already in place and flatten the rest.
+      console.warn('flatten with appearance update failed, retrying', err);
+      try {
+        form.flatten({ updateFieldAppearances: false });
+        flattened = true;
+      } catch (err2) {
+        console.warn('flatten failed', err2);
+      }
+    }
+  }
+
+  const bits = [];
+  if (written) bits.push(`${written} field${written === 1 ? '' : 's'} written`);
+  if (flattened) bits.push('flattened');
+  else if ($('in-flatten').checked) bits.push('but could not be flattened — the form is still editable');
+  if (failed) bits.push(`${failed} could not be written`);
+  if (subs) bits.push(`${subs} unsupported character${subs === 1 ? '' : 's'} in fields written as “?”`);
+  return bits.length ? ' · ' + bits.join(', ') : '';
+}
+
 async function exportPdf() {
   if (S.encrypted) return;
   const btn = $('btn-save');
@@ -1057,6 +1449,10 @@ async function exportPdf() {
     const images = new Map();   // assetId -> PDFImage, embedded once and reused
     const fonts = new Map();    // StandardFonts key -> PDFFont
     let replaced = 0;
+
+    // Form fields first, so a flattened field's contents can never be painted
+    // over a signature that was deliberately placed on top of it.
+    const formNote = S.hasForm ? applyFormFields(doc) : '';
 
     for (const it of S.items) {
       const page = doc.getPage(it.page - 1);
@@ -1133,7 +1529,7 @@ async function exportPdf() {
 
     S.dirty = false;
     const mb = (blob.size / 1048576).toFixed(blob.size > 1048576 ? 1 : 2);
-    status.textContent = `Saved ${name} (${mb} MB)` +
+    status.textContent = `Saved ${name} (${mb} MB)` + formNote +
       (replaced ? ` — ${replaced} unsupported character${replaced > 1 ? 's' : ''} written as “?”` : '');
   } catch (err) {
     console.error(err);
@@ -1183,6 +1579,9 @@ function wireSidebar() {
   }
   $('a-done').addEventListener('click', () => { S.editingAsset = null; $('asset-editor').hidden = true; });
   $('a-delete').addEventListener('click', () => deleteAsset(S.editingAsset));
+
+  $('btn-reset-fields').addEventListener('click', resetFields);
+  $('in-flatten').addEventListener('change', () => { S.dirty = true; });
 
   $('btn-add-text').addEventListener('click', () => setArmed({ kind: 'text', text: 'Text' }));
   $('btn-add-date').addEventListener('click', () => setArmed({

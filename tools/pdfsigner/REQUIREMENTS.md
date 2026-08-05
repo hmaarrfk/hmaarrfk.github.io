@@ -124,9 +124,47 @@ substitutes Arial for Helvetica.
 - Undo/redo over snapshots, with continuous edits (sliders, typing) coalesced
   into single steps.
 
+**Form fields (AcroForm)**
+- Detected with one `getFieldObjects()` call at open time; documents without a
+  form pay nothing and render exactly as they did before the feature existed.
+- Pages are rendered with `AnnotationMode.ENABLE_FORMS`, which keeps PDF.js from
+  painting widget appearances onto the canvas, and an HTML layer of real
+  `<input>`/`<select>` controls is positioned over each widget instead.
+  Otherwise the value baked into the appearance stream would show through
+  underneath whatever the user types.
+- **Read-only widgets are the exception**: PDF.js *does* paint those on the
+  canvas (they aren't interactive, so there's nothing to hand to an HTML
+  layer), so no control is created for them — one would draw the value twice.
+  They're also never written on save.
+- Signature (`Sig`) fields get a dashed marker rather than a control, and it is
+  click-through, so a signature stamp can be dropped straight onto it.
+- Widgets on rotated pages are sized with their *logical* (unrotated) width and
+  height and then rotated about their centre by `pageRotation - widgetRotation`,
+  which is what keeps the text reading the right way round.
+- The control layer stops taking pointer events while stamping, so a signature
+  can be placed on top of a field.
+- **Font size** is the one place the tool doesn't simply obey the document. A
+  `/DA` size of 0 means "auto", and pdf-lib's auto-sizing grows text until it
+  fills the box — a two-word note in a big box comes out enormous. So: start
+  from the `/DA` size (or a readable default when it says auto), then shrink
+  only as far as needed for the value to fit, and write that size into the
+  saved file with `setFontSize()`. Without the shrink, text longer than the
+  field's font allows is silently clipped when the appearance is regenerated,
+  which loses part of what the user typed. The same number drives the preview,
+  live as you type, so the two can't disagree.
+- Only fields whose value actually **changed** are written; untouched fields
+  keep their original appearance streams.
+
 **Saving**
 - The image is embedded **once** and drawn at each placement, so stamping forty
   pages costs one copy of the bitmap.
+- Form fields are written and flattened *before* the stamps are drawn, so a
+  signature deliberately placed over a field can never end up underneath it.
+- **Flatten on save** (default on) draws each field's appearance into the page
+  and removes the field, so the saved copy can't be edited or cleared. It falls
+  back to `flatten({ updateFieldAppearances: false })` and then to "no flatten"
+  with a note in the status line — a form this tool can't fully understand must
+  still produce a saved file with the signatures on it.
 - `updateMetadata: false` preserves the original document's metadata.
 - Output is `<name>-signed.pdf`; `beforeunload` warns about unsaved placements.
 
@@ -147,11 +185,21 @@ Manual, in a browser, against `/tools/pdfsigner/` served statically:
    in with the background already knocked out and the margins trimmed.
 4. **Persistence** — reload; the signature library should still be there and the
    document should not.
+5. **Forms** — build a fixture with one of every field type (text, multiline,
+   checkbox, radio group, dropdown, option list, read-only) plus a field on a
+   rotated page. Fill them all, stamp a signature, save with flattening on, and
+   check in an independent engine that every value is baked in, that
+   `getForm().getFields()` on the result is **empty**, and that long text
+   shrank to fit rather than being clipped. Then repeat with flattening off and
+   confirm the fields are still present, carry the new values, and that fields
+   you didn't touch were left alone.
 
 ## 7. Ideas not built
 
 - Draw-your-own signature with a pointer/trackpad.
 - Checkbox / initial / "X" marks and a snap-to-signature-line helper.
-- Filling AcroForm fields rather than drawing over them.
+- XFA forms. `isPureXfa` is detected and warned about; filling one needs a
+  completely different engine.
 - Page-range placement ("pages 2–7") alongside "every page".
 - A unit toggle (inches ⇄ mm) instead of showing mm as a hint.
+- Per-field font control for forms whose `/DA` asks for something unusable.
