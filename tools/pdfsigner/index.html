@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<!--
+  PDF Signer — stamp a signature image and text onto a PDF, entirely offline.
+
+  Nothing is uploaded and nothing is tracked: the PDF is parsed, drawn and
+  re-written inside the browser tab.
+
+    render : PDF.js       (vendored, ./vendor/pdfjs/)
+    write  : pdf-lib      (vendored, ./vendor/pdf-lib/)
+
+  Signature images are cleaned up (white background knocked out, edges
+  trimmed) with a plain <canvas> pass, then embedded once and drawn at every
+  placement, so stamping the same signature on forty pages costs one copy of
+  the image.
+
+  This page deliberately carries no Jekyll front matter so its JavaScript is
+  copied verbatim and never processed by Liquid.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Signer — sign a PDF in your browser</title>
+  <meta name="description" content="Place a signature image and text anywhere on a PDF, on as many pages as you like, and save it — entirely in your browser. Nothing is uploaded.">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/tools/assets/tools.css">
+  <style>
+    /* ---------------------------------------------------------------
+       This tool is an editor, not a wizard: it takes over the viewport
+       (sidebar + scrolling page stage) instead of using the shared
+       narrow .wrap column, which is only used for the landing screen.
+       --------------------------------------------------------------- */
+    [hidden] { display: none !important; }
+
+    body.editing { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+    body.editing .topbar { flex: 0 0 auto; }
+
+    .app { flex: 1 1 auto; display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+    @media (max-width: 900px) { .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; } }
+
+    /* ---- sidebar ---- */
+    .side {
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      overflow: auto;
+      padding: 16px 16px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    @media (max-width: 900px) {
+      .side { border-right: none; border-bottom: 1px solid var(--border); max-height: 42vh; }
+    }
+    .side h3 {
+      margin: 0 0 8px;
+      font-size: .78rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .side section { border-bottom: 1px solid rgba(255,255,255,.07); padding-bottom: 16px; }
+    .side section:last-of-type { border-bottom: none; padding-bottom: 0; }
+
+    .docline { font-size: .92rem; word-break: break-all; }
+    .docline b { display: block; }
+
+    .btn.mini {
+      padding: 7px 12px; font-size: .84rem; background: var(--panel-2);
+      border: 1px solid rgba(255,255,255,.10);
+    }
+    .btn.mini:hover:not(:disabled) { background: #454c55; }
+    .btn.ghost { background: transparent; border: 1px solid rgba(255,255,255,.18); }
+    .btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* ---- signature library ---- */
+    .siggrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .sigtile {
+      position: relative; border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
+      background:
+        linear-gradient(45deg, rgba(255,255,255,.05) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.05) 75%) 0 0 / 14px 14px,
+        linear-gradient(45deg, rgba(255,255,255,.05) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.05) 75%) 7px 7px / 14px 14px,
+        #f4f6f8;
+      height: 74px; cursor: pointer; overflow: hidden; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .sigtile img { max-width: 92%; max-height: 84%; object-fit: contain; pointer-events: none; }
+    .sigtile:hover { border-color: #6f96c4; }
+    .sigtile.armed { border-color: var(--good); box-shadow: 0 0 0 2px rgba(0,188,140,.45); }
+    .sigtile .gear {
+      position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; line-height: 20px;
+      border-radius: 5px; border: none; background: rgba(20,24,28,.72); color: #fff;
+      font-size: .8rem; cursor: pointer; padding: 0;
+    }
+    .sigtile .gear:hover { background: #000; }
+    .sigadd {
+      border: 1px dashed rgba(255,255,255,.28); border-radius: 8px; height: 74px;
+      background: transparent; color: var(--muted); cursor: pointer; font-size: .84rem;
+      display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px;
+    }
+    .sigadd:hover { border-color: var(--good); color: var(--text); }
+
+    /* ---- inspector fields ---- */
+    .insp { display: grid; gap: 12px; }
+    .frow { display: grid; grid-template-columns: 82px 1fr; align-items: center; gap: 10px; }
+    .frow > label { font-size: .84rem; color: var(--muted); }
+    .frow > label .lu { color: #7a8590; font-size: .78rem; }
+    .frow input[type=number], .frow select, .frow input[type=text] {
+      width: 100%; background: var(--bg); color: var(--text);
+      border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 6px 8px; font-size: .9rem;
+    }
+    .frow input[type=range] { width: 100%; }
+    .frow input[type=color] {
+      width: 44px; height: 30px; padding: 0; border: 1px solid rgba(255,255,255,.16);
+      border-radius: 6px; background: var(--bg);
+    }
+    .insp textarea {
+      width: 100%; min-height: 66px; resize: vertical; background: var(--bg); color: var(--text);
+      border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 8px; font-size: .92rem;
+      font-family: inherit;
+    }
+    .hintline { font-size: .78rem; color: var(--muted); }
+    .warnline { font-size: .82rem; color: #f0b37e; }
+
+    /* ---- stage ---- */
+    .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #1b1e21; }
+    .stagebar {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 9px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+    }
+    .stagebar .spacer { flex: 1 1 auto; }
+    .zoomgrp { display: flex; align-items: center; gap: 4px; }
+    .zoomgrp button {
+      width: 30px; height: 30px; border-radius: 6px; border: 1px solid rgba(255,255,255,.14);
+      background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 1rem; line-height: 1;
+    }
+    .zoomgrp button:hover { background: #454c55; }
+    .zoomgrp .zval { min-width: 52px; text-align: center; font-size: .86rem; color: var(--muted); }
+    .pageind { font-size: .86rem; color: var(--muted); }
+
+    .armbar {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
+      padding: 8px 14px; background: rgba(0,188,140,.14);
+      border-bottom: 1px solid rgba(0,188,140,.35); font-size: .88rem;
+    }
+
+    .pagescroll { flex: 1 1 auto; overflow: auto; padding: 22px 16px 60px; }
+    .pagelist { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+    .pagewrap { position: relative; box-shadow: 0 3px 14px rgba(0,0,0,.5); background: #fff; }
+    .pagewrap canvas { display: block; width: 100%; height: 100%; }
+    .pagewrap .plabel {
+      position: absolute; left: 0; top: -18px; font-size: .72rem; color: var(--muted);
+    }
+    .ov { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+    .ov.placing { cursor: crosshair; }
+
+    /* ---- interactive AcroForm fields ----
+       Sits above the stamp overlay so the controls are clickable, but only the
+       controls themselves take pointer events — the gaps between them stay
+       stamping surface. While stamping, the whole layer steps aside. */
+    .fieldlayer { position: absolute; inset: 0; pointer-events: none; }
+    .fieldlayer > * { position: absolute; pointer-events: auto; }
+    .pagelist.stamping .fieldlayer * { pointer-events: none !important; }
+
+    .fieldlayer input[type=text],
+    .fieldlayer textarea,
+    .fieldlayer select {
+      width: 100%; height: 100%; margin: 0; padding: 0 3px;
+      font-family: inherit; line-height: 1.15; color: #111;
+      background: rgba(255, 243, 176, .5);
+      border: 1px solid rgba(122, 100, 24, .55);
+      border-radius: 2px;
+      font-size: calc(var(--fs, 11) * var(--z, 1) * 1px);
+    }
+    .fieldlayer textarea { padding: 2px 3px; resize: none; overflow: auto; }
+    .fieldlayer select { padding: 0 2px; }
+    .fieldlayer input[type=text]:focus,
+    .fieldlayer textarea:focus,
+    .fieldlayer select:focus {
+      outline: none; background: #fff; border-color: #1c7ed6;
+      box-shadow: 0 0 0 2px rgba(28, 126, 214, .35);
+    }
+    .fieldlayer input[type=checkbox],
+    .fieldlayer input[type=radio] {
+      width: 100%; height: 100%; margin: 0; accent-color: #12306e; cursor: pointer;
+    }
+    /* Signature fields get a marker rather than a control: the answer to one is
+       a stamp, and leaving it click-through means you can put a stamp there. */
+    .fieldlayer .sigfield {
+      border: 1.5px dashed rgba(28, 126, 214, .75);
+      background: rgba(28, 126, 214, .07);
+      border-radius: 3px; pointer-events: none;
+      display: flex; align-items: center; justify-content: center;
+      color: #2b6ca8; font-size: calc(9 * var(--z, 1) * 1px); letter-spacing: .03em;
+      overflow: hidden; white-space: nowrap;
+    }
+    .ov .hit { cursor: move; }
+    .ov .handle { fill: #fff; stroke: #1c7ed6; stroke-width: 1; }
+    .ov .selbox { fill: none; stroke: #1c7ed6; stroke-dasharray: 4 3; }
+
+    /* Landing screen */
+    .privacy { display: flex; gap: 10px; align-items: flex-start; font-size: .9rem; color: var(--muted); }
+    .steplist { margin: 0; padding-left: 20px; color: var(--muted); font-size: .93rem; }
+    .steplist li { margin-bottom: 5px; }
+    kbd {
+      background: var(--panel-2); border: 1px solid rgba(255,255,255,.18); border-bottom-width: 2px;
+      border-radius: 4px; padding: 0 5px; font-size: .8em; font-family: inherit;
+    }
+    .shortcuts { font-size: .82rem; color: var(--muted); line-height: 1.9; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/tools/">&larr; Tools</a>
+    <span class="title">PDF Signer</span>
+    <a class="brand" href="/">Mark Harfouche</a>
+  </div>
+
+  <!-- ================= LANDING ================= -->
+  <div class="wrap" id="landing">
+    <p class="lede">
+      Drop in a picture of your signature, place it anywhere on a PDF &mdash; on
+      one page or on every page &mdash; add typed text and dates, fill in any form
+      fields the document already has, then save the signed file. Everything
+      happens inside this tab: the PDF is never uploaded, and there is no
+      tracking of any kind.
+    </p>
+
+    <div class="panel" id="unsupported" hidden>
+      <h2 style="margin-top:0">Your browser can't run this tool</h2>
+      <p class="muted" id="unsupported-why"></p>
+    </div>
+
+    <div class="drop" id="drop-pdf">
+      <input type="file" id="file-pdf" accept="application/pdf,.pdf">
+      <p><strong>Drop a PDF here</strong> or click to choose</p>
+      <p class="small muted" style="margin-bottom:0">
+        Opened on your device. Never uploaded.
+      </p>
+    </div>
+
+    <div class="status" id="open-status"></div>
+
+    <h2>How it works</h2>
+    <ol class="steplist">
+      <li>Photograph or scan your signature on white paper &mdash; or export it as a
+          transparent PNG.</li>
+      <li>Add it to the signature library. The white paper is knocked out
+          automatically so only the ink lands on the page.</li>
+      <li>Click a page to stamp it. Drag to reposition, drag a corner to resize,
+          and use <b>Copy to every page</b> when a document wants initials
+          throughout.</li>
+      <li>Add text boxes for your printed name, title, or the date.</li>
+      <li>If the PDF is a fillable form, its fields are live &mdash; type into
+          them, tick the boxes, choose from the dropdowns.</li>
+      <li>Save. The stamps are drawn into the page content, and form fields are
+          flattened by default so nobody can edit or clear what you filled in.
+          The result is a normal flat PDF that looks the same everywhere.</li>
+    </ol>
+
+    <details class="help-details">
+      <summary>Privacy, and what this tool is not</summary>
+      <p>
+        The PDF is read with <a href="https://mozilla.github.io/pdf.js/" target="_blank" rel="noopener">PDF.js</a>
+        and rewritten with <a href="https://pdf-lib.js.org/" target="_blank" rel="noopener">pdf-lib</a>,
+        both vendored into this site &mdash; no CDN, no network requests, no
+        analytics. You can disconnect from the internet and it still works.
+        Signatures you add are kept in your browser's local storage on this
+        device so they are there next time; the PDF itself is never stored.
+      </p>
+      <p>
+        This draws your signature onto the page, which is what almost everyone
+        means by "sign this PDF". It is <em>not</em> a cryptographic digital
+        signature &mdash; it does not certify the document or prove it hasn't
+        been altered since. If a counterparty asks for a certificate-based
+        signature, you need a different tool.
+      </p>
+      <p class="small muted">
+        <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/pdfsigner" target="_blank" rel="noopener">Open source on GitHub</a>.
+      </p>
+    </details>
+  </div>
+
+  <!-- ================= EDITOR ================= -->
+  <div class="app" id="app" hidden>
+    <aside class="side">
+
+      <section>
+        <h3>Document</h3>
+        <div class="docline" id="doc-name"><b>&nbsp;</b><span class="muted small" id="doc-meta"></span></div>
+        <p class="warnline" id="doc-warn" hidden style="margin:8px 0 0"></p>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="btn mini ghost" id="btn-open-other" type="button">Open another PDF</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Signatures &amp; stamps</h3>
+        <div class="siggrid" id="siggrid"></div>
+        <input type="file" id="file-sig" accept="image/*" hidden>
+        <p class="hintline" style="margin:10px 0 0" id="sig-hint">
+          Add a photo, scan, or transparent PNG. You can also paste an image with
+          <kbd>&#8984;V</kbd>&nbsp;/&nbsp;<kbd>Ctrl&nbsp;V</kbd>.
+        </p>
+
+        <!-- Per-signature clean-up controls -->
+        <div id="asset-editor" hidden style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.07)">
+          <div class="insp">
+            <div class="frow">
+              <label for="a-name">Name</label>
+              <input type="text" id="a-name">
+            </div>
+            <label class="checkbox" style="cursor:pointer">
+              <input type="checkbox" id="a-bg"> Knock out white background
+            </label>
+            <div class="frow" id="a-thr-row">
+              <label for="a-thr">Threshold</label>
+              <input type="range" id="a-thr" min="20" max="98" step="1">
+            </div>
+            <div class="frow">
+              <label for="a-ink">Ink</label>
+              <select id="a-ink">
+                <option value="original">Keep original</option>
+                <option value="#101010">Black</option>
+                <option value="#12306e">Blue</option>
+                <option value="#7a1020">Red</option>
+              </select>
+            </div>
+            <label class="checkbox" style="cursor:pointer">
+              <input type="checkbox" id="a-trim"> Trim empty margins
+            </label>
+            <div class="btnrow">
+              <button class="btn mini" id="a-done" type="button">Done</button>
+              <button class="btn mini ghost" id="a-delete" type="button">Remove from library</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3>Text</h3>
+        <div class="btnrow">
+          <button class="btn mini" id="btn-add-text" type="button">Add text box</button>
+          <button class="btn mini ghost" id="btn-add-date" type="button">Add today's date</button>
+        </div>
+      </section>
+
+      <!-- Only shown for documents that actually carry an AcroForm -->
+      <section id="form-section" hidden>
+        <h3>Form fields</h3>
+        <p class="hintline" id="form-count" style="margin:0 0 10px"></p>
+        <label class="checkbox" style="cursor:pointer">
+          <input type="checkbox" id="in-flatten" checked> Flatten on save
+        </label>
+        <p class="hintline" style="margin:6px 0 0">
+          Flattening draws each field's contents into the page and removes the
+          field, so the saved copy can't be edited or cleared. Uncheck to keep
+          the form fillable.
+        </p>
+        <p class="warnline" id="form-warn" hidden style="margin:10px 0 0"></p>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="btn mini ghost" id="btn-reset-fields" type="button">Reset to original values</button>
+        </div>
+      </section>
+
+      <section id="inspector" hidden>
+        <h3 id="insp-title">Selected</h3>
+        <div class="insp">
+
+          <div id="insp-text" hidden>
+            <div style="display:grid;gap:12px">
+              <textarea id="i-text" spellcheck="false" placeholder="Type here"></textarea>
+              <div class="frow">
+                <label for="i-font">Font</label>
+                <select id="i-font">
+                  <option value="helvetica">Helvetica</option>
+                  <option value="times">Times</option>
+                  <option value="courier">Courier</option>
+                </select>
+              </div>
+              <div class="frow">
+                <label for="i-size">Size <span class="lu">(pt)</span></label>
+                <input type="number" id="i-size" min="4" max="288" step="0.5">
+              </div>
+              <div class="frow">
+                <label>Style</label>
+                <div class="btnrow">
+                  <label class="checkbox" style="cursor:pointer"><input type="checkbox" id="i-bold"> Bold</label>
+                  <label class="checkbox" style="cursor:pointer"><input type="checkbox" id="i-italic"> Italic</label>
+                </div>
+              </div>
+              <div class="frow">
+                <label for="i-color">Colour</label>
+                <input type="color" id="i-color">
+              </div>
+              <p class="warnline" id="i-charwarn" hidden style="margin:0"></p>
+            </div>
+          </div>
+
+          <div id="insp-image" hidden>
+            <div style="display:grid;gap:12px">
+              <div class="frow">
+                <label for="i-w">Width <span class="lu">(in)</span></label>
+                <input type="number" id="i-w" min="0.1" max="40" step="0.05">
+              </div>
+              <div class="frow">
+                <label for="i-h">Height <span class="lu">(in)</span></label>
+                <input type="number" id="i-h" min="0.1" max="40" step="0.05">
+              </div>
+              <p class="hintline" id="i-mm" style="margin:0"></p>
+            </div>
+          </div>
+
+          <div class="frow">
+            <label for="i-rot">Rotation</label>
+            <input type="range" id="i-rot" min="-180" max="180" step="1">
+          </div>
+          <div class="frow">
+            <label for="i-op">Opacity</label>
+            <input type="range" id="i-op" min="10" max="100" step="1">
+          </div>
+
+          <div class="btnrow">
+            <button class="btn mini" id="i-allpages" type="button">Copy to every page</button>
+            <button class="btn mini ghost" id="i-dupe" type="button">Duplicate</button>
+            <button class="btn mini ghost" id="i-center" type="button">Centre across</button>
+            <button class="btn mini ghost" id="i-del" type="button" style="color:#ffb3ab">Delete</button>
+          </div>
+          <p class="hintline" id="i-where" style="margin:0"></p>
+        </div>
+      </section>
+
+      <section>
+        <h3>Shortcuts</h3>
+        <div class="shortcuts">
+          <kbd>Esc</kbd> stop stamping / deselect<br>
+          <kbd>&larr;&uarr;&rarr;&darr;</kbd> nudge &nbsp; <kbd>Shift</kbd>+ bigger steps<br>
+          <kbd>&#8984;/Ctrl</kbd>+<kbd>D</kbd> duplicate &nbsp; <kbd>Delete</kbd> remove<br>
+          <kbd>&#8984;/Ctrl</kbd>+<kbd>Z</kbd> undo &nbsp; <kbd>&#8679;&#8984;/Ctrl</kbd>+<kbd>Z</kbd> redo<br>
+          <kbd>&#8984;/Ctrl</kbd>+<kbd>S</kbd> save
+        </div>
+      </section>
+    </aside>
+
+    <main class="stage">
+      <div class="stagebar">
+        <div class="zoomgrp">
+          <button id="zoom-out" type="button" title="Zoom out">&minus;</button>
+          <span class="zval" id="zoom-val">100%</span>
+          <button id="zoom-in" type="button" title="Zoom in">+</button>
+          <button id="zoom-fit" type="button" title="Fit page width" style="width:auto;padding:0 9px;font-size:.8rem">Fit</button>
+        </div>
+        <span class="pageind" id="page-ind"></span>
+        <span class="spacer"></span>
+        <span class="pageind" id="save-status"></span>
+        <button class="btn" id="btn-save" type="button" style="padding:9px 16px;font-size:.92rem">Save signed PDF</button>
+      </div>
+
+      <div class="armbar" id="armbar" hidden>
+        <span id="arm-text"></span>
+        <span class="spacer" style="flex:1 1 auto"></span>
+        <button class="btn mini ghost" id="arm-stop" type="button">Done stamping</button>
+      </div>
+
+      <div class="pagescroll" id="pagescroll">
+        <div class="pagelist" id="pagelist"></div>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/tools/pdfsigner/signer.js"></script>
+</body>
+</html>
