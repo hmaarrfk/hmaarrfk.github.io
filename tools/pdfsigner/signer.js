@@ -1433,6 +1433,10 @@ function applyFormFields(doc) {
     }
   }
 
+  // Flattening turns each appearance stream into a page XObject, and an XObject
+  // without /Subtype /Form is invalid — so repair them before that happens.
+  repairAppearanceSubtypes(form);
+
   let flattened = false;
   if ($('in-flatten').checked) {
     try {
@@ -1463,6 +1467,55 @@ function applyFormFields(doc) {
     // file is the difference between a signed document and a wrong one.
     lostNote: failed ? ` — could not write ${failed} field${failed === 1 ? '' : 's'}: ${lost.slice(0, 4).join(', ')}${lost.length > 4 ? '…' : ''}` : '',
   };
+}
+
+/**
+ * Every appearance stream a widget carries, with per-state streams unwrapped.
+ * A checkbox or radio keeps a dictionary of one stream per state (/Off, /On);
+ * a text field keeps a single stream.
+ */
+function* widgetAppearanceStreams(widget) {
+  let ap;
+  try { ap = widget.getAppearances(); } catch { return; }
+  if (!ap) return;
+  for (const entry of [ap.normal, ap.rollover, ap.down]) {
+    if (!entry) continue;
+    if (entry.contents) { yield entry; continue; }
+    if (typeof entry.keys !== 'function') continue;
+    for (const key of entry.keys()) {
+      let state;
+      try { state = entry.lookup(key); } catch { continue; }
+      if (state?.contents) yield state;
+    }
+  }
+}
+
+/**
+ * Give every appearance stream the /Subtype /Form the spec asks for.
+ *
+ * While a stream is only an annotation's appearance, viewers draw it whether
+ * or not the key is there, so plenty of real forms ship without it. Flattening
+ * copies those streams into the page as XObjects, and there the missing key
+ * makes them invalid: the value is silently not drawn, so a pre-filled entry
+ * vanishes from the saved copy while the entries this tool wrote — whose
+ * appearances pdf-lib regenerated — survive.
+ */
+function repairAppearanceSubtypes(form) {
+  for (const lf of form.getFields()) {
+    let widgets;
+    try { widgets = lf.acroField.getWidgets(); } catch { continue; }
+    for (const widget of widgets) {
+      for (const stream of widgetAppearanceStreams(widget)) {
+        try {
+          if (!stream.dict.lookup(PDFName.of('Subtype'))) {
+            stream.dict.set(PDFName.of('Subtype'), PDFName.of('Form'));
+          }
+        } catch (err) {
+          console.warn('could not repair an appearance stream', err);
+        }
+      }
+    }
+  }
 }
 
 /** An appearance stream too small to draw anything — or missing outright. */

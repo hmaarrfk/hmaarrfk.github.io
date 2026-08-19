@@ -1,6 +1,6 @@
 # PDF Signer — requirements & design notes
 
-Last updated: 2026-08-05
+Last updated: 2026-08-19
 
 A static, offline page that stamps a signature image and typed text onto a PDF
 and writes the result back out. Lives at `/tools/pdfsigner/` on
@@ -165,6 +165,16 @@ substitutes Arial for Helvetica.
   Fields with a good appearance stream keep it, which matters for comb fields
   and anything else pdf-lib would regenerate less faithfully than the author
   wrote it.
+- **An appearance stream that a viewer draws happily can still be an invalid
+  XObject.** `/Subtype /Form` is required by the spec but ignored by every
+  viewer while the stream is merely an annotation's appearance, so real forms
+  ship without it — the USPTO's fillable PTO/AIA forms among them. Flattening
+  copies those streams into the page as XObjects, where the missing key makes
+  them invalid and they are simply not drawn: every pre-filled entry vanishes
+  while the entries this tool wrote survive, because pdf-lib regenerated *those*
+  appearances properly. So each widget's appearance streams — including the
+  per-state streams of a checkbox or radio — get `/Subtype /Form` written in
+  before flattening.
 - Fields are resolved through pdf-lib's own `getFields()` list rather than
   `getField(name)`: a name lookup walks a dotted hierarchy, which misreads any
   field whose `/T` simply contains a dot. Anything that still can't be written
@@ -217,6 +227,14 @@ Manual, in a browser, against `/tools/pdfsigner/` served statically:
    and the fixture tests nothing). Fill in one field, save flattened, and check
    that the entries you never touched are still in the output. Before the fix
    for this, they all vanished.
+
+7. **Pre-filled forms whose appearances lack `/Subtype`** — the other way
+   pre-filled entries disappear, and the one that survives test 6. Use a form
+   whose widgets have real, non-empty `/AP` streams that carry no
+   `/Subtype /Form` (a USPTO PTO/AIA declaration filled in Acrobat is one).
+   Save flattened, then run `pdftotext` over the result: the pre-filled values
+   must be in the text, and it must report no "XObject subtype is missing or
+   wrong type" errors.
 
 **A warning about testing in a browser**: the default `python3 -m http.server`
 lets Chrome cache `signer.js`, and bumping a `?v=` query on the page URL does
