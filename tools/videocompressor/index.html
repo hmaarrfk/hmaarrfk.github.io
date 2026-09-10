@@ -340,11 +340,15 @@
         video still passes through the hardware encoder untouched).
         <strong>Auto-boost</strong> measures loudness in the human-voice band
         (~300&ndash;3400&nbsp;Hz) so a quiet voice track is judged on the voice
-        itself, not on a single loud non-voice sound, then raises the whole
-        track by a flat amount &mdash; through a soft limiter, so it can't
-        clip &mdash; up to +24&nbsp;dB. It only ever turns audio up, never
-        down. The Trim/Settings/Export preview plays the same boost live so
-        you can listen before exporting.
+        itself, not on a single loud non-voice sound, then rides the gain up
+        to rescue it &mdash; up to +24&nbsp;dB &mdash; and automatically backs
+        that off the instant anything gets loud (a music jingle, a shout), so
+        a boost sized for a whisper can't blast a louder passage through the
+        roof. It only ever turns audio up, never down.
+        <strong>Manual boost</strong> is a flat dB you choose yourself, with
+        no automatic backing-off, through a limiter so it can't clip. The
+        Trim/Settings/Export preview plays the same boost live so you can
+        listen before exporting.
       </p>
     </details>
 

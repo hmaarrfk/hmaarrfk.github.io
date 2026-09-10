@@ -46,14 +46,21 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
 - **Audio** — AAC audio is **copied through unchanged** via
   `addAudioChunkRaw` (remuxed, never re-encoded) by default. Non-AAC audio is
   dropped, and the UI says so.
-- **Volume boost** (optional) — decodes just the audio (`AudioDecoder`),
-  applies a gain through a soft limiter (`audio-boost.js`), and re-encodes it
-  to AAC (`AudioEncoder`) instead of remuxing it raw. Two modes:
-  - **Manual** — a flat dB boost you set with a slider.
-  - **Auto** — measures loudness in the human-voice band (~300&ndash;3400 Hz)
-    so a quiet voice track is judged on the voice itself rather than a single
-    loud non-voice sound, then computes the flat gain (0&ndash;24 dB) needed
-    to bring it up to a target level. It only ever turns audio up.
+- **Volume boost** (optional) — decodes just the audio (`AudioDecoder`), gains
+  it, and re-encodes it to AAC (`AudioEncoder`) instead of remuxing it raw
+  (`audio-boost.js` has the gain math). Two modes:
+  - **Manual** — a flat dB boost you set with a slider, through a soft
+    limiter so it can't clip.
+  - **Auto** — a small lookahead AGC (`createLeveler`) driven by loudness in
+    the human-voice band (~300&ndash;3400 Hz), so a quiet voice track is
+    judged on the voice itself rather than a single loud non-voice sound. It
+    rides the gain up to rescue quiet voice (0&ndash;24 dB) and automatically
+    ducks it back down the instant *anything* gets loud (a music jingle, a
+    shout) — a few milliseconds of internal audio delay give the gain a head
+    start on a sudden transient, so it eases down smoothly to meet it instead
+    of clamping at the last instant (which would otherwise flatten the
+    waveform into audible distortion, even under a *soft* limiter). It only
+    ever turns audio up, never down.
 
   Requires the browser to support AAC *encoding* via WebCodecs
   (`AudioEncoder.isConfigSupported`) — checked per file at load; if it isn't

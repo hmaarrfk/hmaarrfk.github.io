@@ -19,7 +19,7 @@
 //
 // MP4Box is loaded as a global (window.MP4Box) by a <script> tag in index.html.
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
-import { dbToLinear, analyzeVoiceLevel, applyGainInPlace } from './audio-boost.js';
+import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from './audio-boost.js';
 
 const MP4Box = window.MP4Box;
 const AAC_CODEC = 'mp4a.40.2';   // AAC-LC — what we re-encode audio to when a boost is on
@@ -95,13 +95,15 @@ function ensureAudioGraph() {
     previewSrcNode = audioCtx.createMediaElementSource(els.preview);
     previewGainNode = audioCtx.createGain();
     previewLimiterNode = audioCtx.createDynamicsCompressor();
-    // A fast, hard-kneed limiter — just enough to keep a boosted preview from
-    // clipping the speakers; the actual export uses its own soft limiter.
-    previewLimiterNode.threshold.value = -3;
+    // A fast, hard-kneed compressor standing in for the export's lookahead
+    // leveler — auto mode's gain is a *ceiling*, not a flat boost (the real
+    // encode ducks it automatically on loud passages), so this needs real
+    // headroom to compress into rather than just catching the odd peak.
+    previewLimiterNode.threshold.value = -18;
     previewLimiterNode.knee.value = 6;
     previewLimiterNode.ratio.value = 20;
     previewLimiterNode.attack.value = 0.003;
-    previewLimiterNode.release.value = 0.15;
+    previewLimiterNode.release.value = 0.25;
     previewSrcNode.connect(previewGainNode).connect(previewLimiterNode).connect(audioCtx.destination);
   } catch (e) { console.warn('Live audio preview unavailable:', e); }
 }
@@ -123,7 +125,8 @@ function currentAudioGainDb() {
 function updatePreviewGain() {
   const db = currentAudioGainDb();
   if (els.audioLiveNote) {
-    els.audioLiveNote.textContent = db > 0.05 ? `🔊 live preview: +${db.toFixed(1)} dB` : '';
+    const auto = currentVolumeMode() === 'auto';
+    els.audioLiveNote.textContent = db > 0.05 ? `🔊 live preview: ${auto ? 'up to ' : ''}+${db.toFixed(1)} dB` : '';
   }
   if (previewGainNode) previewGainNode.gain.value = dbToLinear(db);
 }
@@ -208,7 +211,9 @@ function updateExportSummary() {
   const target = s.mode === 'size'
     ? `target ${els.inSize.value} MB`
     : `${parseFloat(els.inBitrate.value)} Mbps`;
-  const volumeNote = s.keepAudio && s.audioGainDb > 0.05 ? ` · +${s.audioGainDb.toFixed(1)} dB (${s.volumeMode})` : '';
+  const volumeNote = s.keepAudio && s.audioGainDb > 0.05
+    ? ` · ${s.volumeMode === 'auto' ? 'up to ' : ''}+${s.audioGainDb.toFixed(1)} dB (${s.volumeMode})`
+    : '';
   els.exportSummary.textContent =
     `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
     `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}`;
@@ -767,7 +772,7 @@ function updateAudioUI() {
       : '';
   } else if (mode === 'auto') {
     els.hintVolume.textContent = state.audioAnalysis
-      ? `Voice-band level ≈ ${state.audioAnalysis.voiceDbfs.toFixed(0)} dBFS → boosting +${state.audioAnalysis.autoGainDb.toFixed(1)} dB.`
+      ? `Voice-band level ≈ ${state.audioAnalysis.voiceDbfs.toFixed(0)} dBFS → boosts quiet parts up to +${state.audioAnalysis.autoGainDb.toFixed(1)} dB, automatically backing off on loud parts (a jingle, a shout) so they aren’t driven any louder.`
       : 'Analyzing audio…';
   } else if (mode === 'manual') {
     els.hintVolume.textContent = 'Applied to the whole track, then limited so it can’t clip.';
@@ -1054,6 +1059,21 @@ async function compress() {
     const needAudioBoost = s.keepAudio && !!audio && s.audioGainDb > 0.05 && state.audioEncoderSupported;
     const asc = (s.keepAudio && audio) ? await aacDescription(file, mp4, audio.id).catch(() => null) : null;
     let audioEmitted = 0;
+    // "Auto" runs a lookahead leveler (audio-boost.js) that rides the gain up
+    // during quiet voice and automatically ducks on anything loud (a jingle,
+    // a shout) — it introduces a few ms of internal audio delay, so its
+    // output length doesn't line up 1:1 with each input frame;
+    // audioOutFrames/audioOutStartUS track a running output timeline instead
+    // of using each frame's own timestamp. "Manual" is a flat, user-chosen
+    // gain with no ducking — output matches input 1:1. Declared out here (not
+    // inside the `if` below) so the post-loop flush can still reach them.
+    let leveler = null, audioOutFrames = 0, audioOutStartUS = null;
+    const emitAudio = (data, numberOfFrames, ch, sampleRate, timestamp) => {
+      if (numberOfFrames <= 0) return;
+      const out = new AudioData({ format: 'f32', sampleRate, numberOfFrames, numberOfChannels: ch, timestamp, data });
+      audioEncoder.encode(out);
+      out.close();
+    };
 
     if (needAudioBoost) {
       audioEncoder = new AudioEncoder({
@@ -1065,7 +1085,9 @@ async function compress() {
         numberOfChannels: audio.audio.channel_count, bitrate: audio.bitrate || 160_000,
       });
 
-      const gainLinear = dbToLinear(s.audioGainDb);
+      leveler = s.volumeMode === 'auto' ? createLeveler(audio.audio.sample_rate, { maxGainDb: s.audioGainDb }) : null;
+      const gainLinear = leveler ? null : dbToLinear(s.audioGainDb);
+
       const onAudioDecoded = (frame) => {
         try {
           if (cancelRequested) return;
@@ -1076,15 +1098,25 @@ async function compress() {
           const plane = new Float32Array(n);
           for (let c = 0; c < ch; c++) {
             frame.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
-            applyGainInPlace(plane, gainLinear);
+            if (!leveler) applyGainInPlace(plane, gainLinear);
             for (let i = 0; i < n; i++) interleaved[i * ch + c] = plane[i];
           }
-          const out = new AudioData({
-            format: 'f32', sampleRate: frame.sampleRate, numberOfFrames: n, numberOfChannels: ch,
-            timestamp: toOutputUS(t), data: interleaved,
-          });
-          audioEncoder.encode(out);
-          out.close();
+
+          if (leveler) {
+            if (audioOutStartUS === null) audioOutStartUS = toOutputUS(t);
+            const mono = new Float32Array(n);
+            for (let i = 0; i < n; i++) {
+              let sum = 0;
+              for (let c = 0; c < ch; c++) sum += interleaved[i * ch + c];
+              mono[i] = sum / ch;
+            }
+            const leveled = leveler.process(interleaved, ch, mono);
+            const framesOut = leveled.length / ch;
+            emitAudio(leveled, framesOut, ch, frame.sampleRate, audioOutStartUS + Math.round((audioOutFrames / frame.sampleRate) * 1e6));
+            audioOutFrames += framesOut;
+          } else {
+            emitAudio(interleaved, n, ch, frame.sampleRate, toOutputUS(t));
+          }
         } finally {
           frame.close();
         }
@@ -1247,6 +1279,17 @@ async function compress() {
     await encoder.flush();
     if (needAudioBoost) {
       await audioDecoder.flush();
+      if (leveler) {
+        // Drain the few ms of audio still sitting in the leveler's lookahead
+        // buffer — otherwise the very tail of the track goes missing.
+        const tail = leveler.flush();
+        const ch = audio.audio.channel_count;
+        const framesOut = tail.length / ch;
+        if (framesOut > 0 && audioOutStartUS !== null) {
+          emitAudio(tail, framesOut, ch, audio.audio.sample_rate, audioOutStartUS + Math.round((audioOutFrames / audio.audio.sample_rate) * 1e6));
+          audioOutFrames += framesOut;
+        }
+      }
       await audioEncoder.flush();
     }
     if (encodeErr) throw encodeErr;
@@ -1257,7 +1300,9 @@ async function compress() {
     let audioNote = '';
     if (s.keepAudio && audio) {
       if (needAudioBoost) {
-        audioNote = audioEmitted > 0 ? ` · boosted +${s.audioGainDb.toFixed(1)} dB` : ' (no audio in the selected range)';
+        audioNote = audioEmitted > 0
+          ? (leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`)
+          : ' (no audio in the selected range)';
       } else if (audioOut.length) {
         let first = true;
         for (const a of audioOut) {
