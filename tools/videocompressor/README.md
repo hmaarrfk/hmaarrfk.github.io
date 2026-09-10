@@ -52,7 +52,7 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   - **Manual** — a flat dB boost you set with a slider.
   - **Auto** — measures loudness in the human-voice band (~300&ndash;3400 Hz)
     so a quiet voice track is judged on the voice itself rather than a single
-    loud non-voice sound, then computes the flat gain (0&ndash;18 dB) needed
+    loud non-voice sound, then computes the flat gain (0&ndash;24 dB) needed
     to bring it up to a target level. It only ever turns audio up.
 
   Requires the browser to support AAC *encoding* via WebCodecs

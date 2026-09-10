@@ -82,7 +82,7 @@ export function activeRmsDbfs(samples, sampleRate, opts = {}) {
 // already-loud track, and never runs away on a near-silent/empty track.
 export function computeAutoGainDb(voiceDbfs, opts = {}) {
   const target = opts.targetDbfs ?? -20;
-  const maxGain = opts.maxGainDb ?? 18;
+  const maxGain = opts.maxGainDb ?? 24;
   const gain = target - voiceDbfs;
   if (!isFinite(gain)) return 0;
   return Math.min(maxGain, Math.max(0, gain));
