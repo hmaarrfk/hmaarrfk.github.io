@@ -44,8 +44,29 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
 - **Mux** — [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) writes the
   encoded chunks back into an MP4 with `fastStart` (moov at the front).
 - **Audio** — AAC audio is **copied through unchanged** via
-  `addAudioChunkRaw` (remuxed, never re-encoded). Non-AAC audio is dropped, and
-  the UI says so.
+  `addAudioChunkRaw` (remuxed, never re-encoded) by default. Non-AAC audio is
+  dropped, and the UI says so.
+- **Volume boost** (optional) — decodes just the audio (`AudioDecoder`), gains
+  it, and re-encodes it to AAC (`AudioEncoder`) instead of remuxing it raw
+  (`audio-boost.js` has the gain math). Two modes:
+  - **Manual** — a flat dB boost you set with a slider, through a soft
+    limiter so it can't clip.
+  - **Auto** — a small lookahead AGC (`createLeveler`) driven by loudness in
+    the human-voice band (~300&ndash;3400 Hz), so a quiet voice track is
+    judged on the voice itself rather than a single loud non-voice sound. It
+    rides the gain up to rescue quiet voice (0&ndash;36 dB) and automatically
+    ducks it back down the instant *anything* gets loud (a music jingle, a
+    shout) — a few milliseconds of internal audio delay give the gain a head
+    start on a sudden transient, so it eases down smoothly to meet it instead
+    of clamping at the last instant (which would otherwise flatten the
+    waveform into audible distortion, even under a *soft* limiter). It only
+    ever turns audio up, never down.
+
+  Requires the browser to support AAC *encoding* via WebCodecs
+  (`AudioEncoder.isConfigSupported`) — checked per file at load; if it isn't
+  available, boost is disabled and audio still passes through unchanged.
+  The Trim/Settings/Export preview applies the same gain live (Web Audio
+  `GainNode` + `DynamicsCompressorNode`) so you can listen before exporting.
 
 ## Large files (multi-GB)
 
@@ -71,6 +92,7 @@ reached, so trims near the start of a long video finish quickly.
 |------|------------|
 | `index.html` | The page. No Jekyll front matter, so the JS is served verbatim. Loads MP4Box as a global `<script>`, then the module. |
 | `compressor.js` | ES module: streaming demux, preview/trim, transcode, mux, and all UI wiring. |
+| `audio-boost.js` | ES module: the voice-band loudness analysis, auto-gain, and soft-limiter math. Pure functions on `Float32Array`s — no DOM/WebCodecs — so it's usable standalone (e.g. under Node, fed raw PCM from `ffmpeg`) to sanity-check the algorithm outside the browser. |
 | `vendor/mp4box/` | Vendored MP4Box.js UMD bundle + license. |
 | `vendor/mp4-muxer/` | Vendored mp4-muxer ESM bundle (`.mjs` renamed to `.js` so GitHub Pages serves it with a JS MIME type) + license. |
 | `vendor/update-vendor.sh` | Re-vendors both deps from npm (see below). |

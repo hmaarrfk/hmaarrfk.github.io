@@ -13,7 +13,9 @@
     mux    : mp4-muxer         (vendored, ./vendor/mp4-muxer/)
 
   Audio (AAC) is copied through untouched — remuxed, never re-encoded — so it
-  costs no quality and little time.
+  costs no quality and little time. Turning on a volume boost (manual, or
+  auto-detected from the voice band) decodes and re-encodes just the audio
+  track instead.
 
   This page deliberately carries no Jekyll front matter so its JavaScript is
   copied verbatim and never processed by Liquid.
@@ -117,6 +119,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.6 5H17v14h-2.4z"/><path d="M4 5l10.4 7L4 19z"/></svg>
         </button>
         <span class="timecode" id="timecode">0:00.00 / 0:00.00</span>
+        <span class="small muted" id="audio-live-note" style="margin-left:auto"></span>
       </div>
 
       <div class="timeline">
@@ -234,10 +237,33 @@
         <div class="field">
           <label>Audio</label>
           <label class="checkbox" style="margin-top:4px">
-            <input type="checkbox" id="in-audio" checked> Keep audio (copied, no re-encode)
+            <input type="checkbox" id="in-audio" checked> Keep audio
           </label>
           <span class="hint" id="hint-audio"></span>
         </div>
+      </div>
+
+      <div class="field-group" id="volume-group" style="margin-top:14px">
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Volume</label>
+        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:6px">
+          <label class="checkbox" style="cursor:pointer">
+            <input type="radio" name="volume" value="none" checked> Unchanged <span class="lu">(no re-encode)</span>
+          </label>
+          <label class="checkbox" style="cursor:pointer">
+            <input type="radio" name="volume" value="auto"> Auto-boost quiet voice
+          </label>
+          <label class="checkbox" style="cursor:pointer">
+            <input type="radio" name="volume" value="manual"> Manual boost
+          </label>
+        </div>
+        <div class="controls" style="margin-top:10px">
+          <div class="field" id="field-gain" hidden>
+            <label for="in-gain">Boost <span class="lu">(dB)</span></label>
+            <input type="range" id="in-gain" min="0" max="42" step="0.5" value="6">
+            <span class="hint" id="hint-gain"></span>
+          </div>
+        </div>
+        <p class="small muted" id="hint-volume" style="margin:8px 0 0"></p>
       </div>
 
       <div class="row" style="margin-top:16px">
@@ -308,6 +334,21 @@
         re-encoded), so keeping audio costs no extra quality and almost no time.
         Video with an audio codec other than AAC will have its audio dropped
         &mdash; you'll be told when that happens.
+      </p>
+      <p>
+        Turning on a volume boost decodes and re-encodes just the audio (the
+        video still passes through the hardware encoder untouched).
+        <strong>Auto-boost</strong> measures loudness in the human-voice band
+        (~300&ndash;3400&nbsp;Hz) so a quiet voice track is judged on the voice
+        itself, not on a single loud non-voice sound, then rides the gain up
+        to rescue it &mdash; up to +36&nbsp;dB &mdash; and automatically backs
+        that off the instant anything gets loud (a music jingle, a shout), so
+        a boost sized for a whisper can't blast a louder passage through the
+        roof. It only ever turns audio up, never down.
+        <strong>Manual boost</strong> is a flat dB you choose yourself, with
+        no automatic backing-off, through a limiter so it can't clip. The
+        Trim/Settings/Export preview plays the same boost live so you can
+        listen before exporting.
       </p>
     </details>
 

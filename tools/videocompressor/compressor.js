@@ -12,13 +12,17 @@
 //     compression, feeding the decoder with backpressure and releasing each
 //     batch so memory stays bounded.
 //
-// AAC audio is copied through untouched (remuxed, never re-encoded).
+// AAC audio is copied through untouched (remuxed, never re-encoded) — unless
+// a volume boost is on, in which case just the audio is decoded, gained
+// (audio-boost.js), and re-encoded to AAC; the video path is unaffected.
 // Everything runs locally; no file ever leaves the machine.
 //
 // MP4Box is loaded as a global (window.MP4Box) by a <script> tag in index.html.
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
+import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from './audio-boost.js';
 
 const MP4Box = window.MP4Box;
+const AAC_CODEC = 'mp4a.40.2';   // AAC-LC — what we re-encode audio to when a boost is on
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -49,6 +53,8 @@ const els = {
   inScale: $('in-scale'), inFps: $('in-fps'), inCodec: $('in-codec'), inAudio: $('in-audio'),
   hintSize: $('hint-size'), hintBitrate: $('hint-bitrate'), hintScale: $('hint-scale'),
   hintFps: $('hint-fps'), hintCodec: $('hint-codec'), hintAudio: $('hint-audio'),
+  fieldGain: $('field-gain'), inGain: $('in-gain'), hintGain: $('hint-gain'), hintVolume: $('hint-volume'),
+  audioLiveNote: $('audio-live-note'),
   encodeWarnSettings: $('encode-warn-settings'), encodeWarnExport: $('encode-warn-export'),
   btnCompress: $('btn-compress'), btnCancel: $('btn-cancel'),
   est: $('est'), progress: $('progress'), status: $('status'),
@@ -73,6 +79,57 @@ let running = false;
 let cancelRequested = false;
 let lastUrl = null;
 let currentStep = 'source';
+
+// ---------------------------------------------------------------------------
+// Live audio-boost preview — a Web Audio graph patched onto the shared
+// <video> element so scrubbing/playing the preview is heard with the same
+// gain that a compress would bake in. Not started until the first play (a
+// user gesture is required to create/resume an AudioContext).
+// ---------------------------------------------------------------------------
+let audioCtx = null, previewGainNode = null, previewLimiterNode = null, previewSrcNode = null;
+
+function ensureAudioGraph() {
+  if (audioCtx || !els.preview) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    previewSrcNode = audioCtx.createMediaElementSource(els.preview);
+    previewGainNode = audioCtx.createGain();
+    previewLimiterNode = audioCtx.createDynamicsCompressor();
+    // A fast, hard-kneed compressor standing in for the export's lookahead
+    // leveler — auto mode's gain is a *ceiling*, not a flat boost (the real
+    // encode ducks it automatically on loud passages), so this needs real
+    // headroom to compress into rather than just catching the odd peak.
+    previewLimiterNode.threshold.value = -24;
+    previewLimiterNode.knee.value = 6;
+    previewLimiterNode.ratio.value = 20;
+    previewLimiterNode.attack.value = 0.003;
+    previewLimiterNode.release.value = 0.25;
+    previewSrcNode.connect(previewGainNode).connect(previewLimiterNode).connect(audioCtx.destination);
+  } catch (e) { console.warn('Live audio preview unavailable:', e); }
+}
+
+// The volume mode + gain currently selected in the UI, resolved to a dB
+// value (0 when off, the slider value in manual mode, the analyzed value in
+// auto mode — 0 until that analysis finishes).
+function currentVolumeMode() {
+  const el = document.querySelector('input[name="volume"]:checked');
+  return el ? el.value : 'none';
+}
+function currentAudioGainDb() {
+  if (!state) return 0;
+  const mode = currentVolumeMode();
+  if (mode === 'manual') return parseFloat(els.inGain.value) || 0;
+  if (mode === 'auto') return state.audioAnalysis ? state.audioAnalysis.autoGainDb : 0;
+  return 0;
+}
+function updatePreviewGain() {
+  const db = currentAudioGainDb();
+  if (els.audioLiveNote) {
+    const auto = currentVolumeMode() === 'auto';
+    els.audioLiveNote.textContent = db > 0.05 ? `🔊 live preview: ${auto ? 'up to ' : ''}+${db.toFixed(1)} dB` : '';
+  }
+  if (previewGainNode) previewGainNode.gain.value = dbToLinear(db);
+}
 
 // ---------------------------------------------------------------------------
 // Step navigation (one panel at a time, like the GIF Maker)
@@ -154,9 +211,12 @@ function updateExportSummary() {
   const target = s.mode === 'size'
     ? `target ${els.inSize.value} MB`
     : `${parseFloat(els.inBitrate.value)} Mbps`;
+  const volumeNote = s.keepAudio && s.audioGainDb > 0.05
+    ? ` · ${s.volumeMode === 'auto' ? 'up to ' : ''}+${s.audioGainDb.toFixed(1)} dB (${s.volumeMode})`
+    : '';
   els.exportSummary.textContent =
     `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
-    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}`;
+    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +257,7 @@ function saveSettings() {
       size: els.inSize.value, bitrate: els.inBitrate.value,
       scale: els.inScale.value, fps: els.inFps.value, codec: els.inCodec.value,
       keepAudio: els.inAudio.checked,
+      volume: currentVolumeMode(), gain: els.inGain.value,
     },
     file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
     trim: { inS: state.inS, outS: state.outS, cuts: state.cuts },
@@ -214,8 +275,13 @@ function applyGeneral(g) {
   if (g.scale != null) els.inScale.value = g.scale;
   if (g.fps != null) els.inFps.value = g.fps;
   if (g.codec != null) els.inCodec.value = g.codec;
+  if (g.gain != null) els.inGain.value = g.gain;
   const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
   if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
+  if (g.volume) {
+    const volRadio = document.querySelector(`input[name="volume"][value="${g.volume}"]`);
+    if (volRadio && !volRadio.disabled) volRadio.checked = true;
+  }
 }
 
 function setStatus(msg) { els.status.textContent = msg || ''; }
@@ -328,6 +394,7 @@ async function loadFile(file) {
   state = {
     file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
     inS: 0, outS: durationS, cuts: [], pendingCutStart: null,
+    audioAnalysis: null, audioEncoderSupported: false,
   };
 
   // Info line
@@ -355,6 +422,30 @@ async function loadFile(file) {
   const decCfg = { codec: video.codec, codedWidth: video.track_width, codedHeight: video.track_height, description: state.description };
   state.decoderSupported = (await VideoDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported;
 
+  // Volume boost needs to decode + re-encode the audio (passthrough only
+  // remuxes it), so check the browser can actually encode AAC before
+  // offering it.
+  if (isAac && typeof AudioEncoder !== 'undefined') {
+    const aacEncCfg = { codec: AAC_CODEC, sampleRate: audio.audio.sample_rate, numberOfChannels: audio.audio.channel_count, bitrate: audio.bitrate || 160_000 };
+    state.audioEncoderSupported = (await AudioEncoder.isConfigSupported(aacEncCfg).catch(() => ({ supported: false }))).supported;
+  }
+  document.querySelectorAll('input[name="volume"][value="manual"], input[name="volume"][value="auto"]')
+    .forEach((r) => { r.disabled = !state.audioEncoderSupported; });
+  if (!state.audioEncoderSupported) {
+    const noneRadio = document.querySelector('input[name="volume"][value="none"]');
+    if (noneRadio) noneRadio.checked = true;
+  }
+  // Kick off (background, non-blocking) analysis for Auto mode's hint. Cheap
+  // relative to the encode itself — it's a decode-only pass over the audio.
+  if (isAac && state.audioEncoderSupported) {
+    const loadedFor = state;
+    analyzeAudio(loadedFor).then((result) => {
+      if (state !== loadedFor) return;   // a different file was loaded meanwhile
+      state.audioAnalysis = result;
+      updateAudioUI();
+    }).catch((e) => console.error('Audio analysis failed:', e));
+  }
+
   // Restore saved settings (survive a refresh). General options always apply;
   // trim + cuts only when the same file is loaded again.
   const saved = readSettings();
@@ -381,6 +472,7 @@ async function loadFile(file) {
   setupPreview();
 
   els.steps.hidden = false;      // reveal step nav now that a video is loaded
+  updateAudioUI();
   updateEstimate();
   showStep('trim');              // advance past the upload step
 }
@@ -541,7 +633,10 @@ function setupPreview() {
   els.panePreview.querySelectorAll('.transport [data-act]').forEach((btn) => {
     btn.onclick = () => {
       switch (btn.dataset.act) {
-        case 'play': v.paused ? v.play() : v.pause(); break;
+        case 'play':
+          if (v.paused) { ensureAudioGraph(); if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); updatePreviewGain(); v.play(); }
+          else v.pause();
+          break;
         case 'prevFrame': v.pause(); seek((v.currentTime || 0) - frameStep()); break;
         case 'nextFrame': v.pause(); seek((v.currentTime || 0) + frameStep()); break;
         case 'toIn': seek(state.inS); break;
@@ -630,7 +725,11 @@ function setupPreview() {
     if (!state || running) return;
     if (currentStep === 'source' || els.previewBlock.style.display === 'none') return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-    if (e.key === ' ') { e.preventDefault(); v.paused ? v.play() : v.pause(); }
+    if (e.key === ' ') {
+      e.preventDefault();
+      if (v.paused) { ensureAudioGraph(); if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); updatePreviewGain(); v.play(); }
+      else v.pause();
+    }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) - frameStep()); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) + frameStep()); }
     else if (e.key === 'Home') { seek(state.inS); }
@@ -654,7 +753,33 @@ function currentSettings() {
   const codec = els.inCodec.value;
   const keepAudio = els.inAudio.checked && !els.inAudio.disabled;
   const trimDur = keptDuration();   // selection length minus removed sections
-  return { mode, scale, outW, outH, outFps, codec, keepAudio, trimDur };
+  const volumeMode = currentVolumeMode();
+  const audioGainDb = currentAudioGainDb();
+  return { mode, scale, outW, outH, outFps, codec, keepAudio, trimDur, volumeMode, audioGainDb };
+}
+
+// Keep the Volume controls, hint text, and live preview gain in sync with
+// the selected mode and (for Auto) the background analysis.
+function updateAudioUI() {
+  if (!state) return;
+  const mode = currentVolumeMode();
+  els.fieldGain.hidden = mode !== 'manual';
+  if (mode === 'manual') els.hintGain.textContent = `+${parseFloat(els.inGain.value).toFixed(1)} dB, through a soft limiter.`;
+
+  if (!state.audioEncoderSupported) {
+    els.hintVolume.textContent = state.audio
+      ? "This browser can't encode AAC, so volume boost isn't available here — audio will pass through unchanged."
+      : '';
+  } else if (mode === 'auto') {
+    els.hintVolume.textContent = state.audioAnalysis
+      ? `Voice-band level ≈ ${state.audioAnalysis.voiceDbfs.toFixed(0)} dBFS → boosts quiet parts up to +${state.audioAnalysis.autoGainDb.toFixed(1)} dB, automatically backing off on loud parts (a jingle, a shout) so they aren’t driven any louder.`
+      : 'Analyzing audio…';
+  } else if (mode === 'manual') {
+    els.hintVolume.textContent = 'Applied to the whole track, then limited so it can’t clip.';
+  } else {
+    els.hintVolume.textContent = '';
+  }
+  updatePreviewGain();
 }
 
 function audioBytesPerSecond() {
@@ -688,9 +813,94 @@ function updateEstimate() {
     els.hintBitrate.textContent = `≈ ${fmtBytes(est)} output (${fmtTime(s.trimDur)})`;
   }
   els.est.textContent = '';
+  updateAudioUI();
   if (currentStep === 'export') updateExportSummary();
   queueSave();
   queueValidate();
+}
+
+// ---------------------------------------------------------------------------
+// Auto-boost analysis — a decode-only pass over the whole audio track that
+// measures voice-band loudness (see audio-boost.js). Runs once per loaded
+// file, in the background; its result just feeds the "Auto" hint and gain.
+// ---------------------------------------------------------------------------
+async function analyzeAudio(st) {
+  const { file, mp4, mdat, audio } = st;
+  const description = await aacDescription(file, mp4, audio.id).catch(() => null);
+  const decCfg = { codec: audio.codec, sampleRate: audio.audio.sample_rate, numberOfChannels: audio.audio.channel_count, description };
+  if (!(await AudioDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported) {
+    return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0 };
+  }
+
+  const channels = audio.audio.channel_count;
+  const sampleRate = audio.audio.sample_rate;
+  const chunks = [];   // mono-mixed Float32Array pieces, concatenated at the end
+  let decodeErr = null;
+  const decoder = new AudioDecoder({
+    output: (frame) => {
+      try {
+        const n = frame.numberOfFrames;
+        const mono = new Float32Array(n);
+        const plane = new Float32Array(n);
+        for (let c = 0; c < frame.numberOfChannels; c++) {
+          frame.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+          for (let i = 0; i < n; i++) mono[i] += plane[i] / frame.numberOfChannels;
+        }
+        chunks.push(mono);
+      } catch (e) { decodeErr = e; } finally { frame.close(); }
+    },
+    error: (e) => { decodeErr = e; },
+  });
+  decoder.configure(decCfg);
+
+  const aq = [];
+  mp4.onSamples = (id, user, smps) => {
+    for (const smp of smps) aq.push({ data: smp.data.slice(0), cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync });
+    mp4.releaseUsedSamples(id, smps[smps.length - 1].number);
+  };
+  mp4.setExtractionOptions(audio.id, 'audio', { nbSamples: 200 });
+  mp4.start();
+
+  const feed = async () => {
+    while (aq.length) {
+      const smp = aq.shift();
+      decoder.decode(new EncodedAudioChunk({
+        type: smp.is_sync ? 'key' : 'delta',
+        timestamp: Math.round((smp.cts / smp.timescale) * 1e6),
+        duration: Math.round((smp.duration / smp.timescale) * 1e6),
+        data: smp.data,
+      }));
+      while (decoder.decodeQueueSize > 8) await sleep(4);
+      if (decodeErr) throw decodeErr;
+    }
+  };
+
+  const CHUNK = 8 * 1024 * 1024;
+  let off = mdat.start + mdat.hdr;
+  const endByte = mdat.start + mdat.size;
+  while (off < endByte) {
+    const e = Math.min(off + CHUNK, endByte);
+    const ab = await readRange(file, off, e);
+    ab.fileStart = off;
+    off = e;
+    mp4.appendBuffer(ab);
+    await feed();
+  }
+  mp4.flush();
+  await feed();
+  await decoder.flush();
+  decoder.close();
+  try { mp4.onSamples = null; mp4.stop(); } catch (_) {}
+  if (decodeErr) throw decodeErr;
+
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const mono = new Float32Array(total);
+  let off2 = 0;
+  for (const c of chunks) { mono.set(c, off2); off2 += c.length; }
+  if (channels === 0 || !mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0 };
+
+  return analyzeVoiceLevel(mono, sampleRate);
 }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +992,7 @@ async function compress() {
   setProgress(0);
   setStatus('Preparing…');
 
-  let decoder, encoder, muxer;
+  let decoder, encoder, muxer, audioDecoder, audioEncoder;
   try {
     const vBitrate = targetVideoBitrate(s);
     const inMicros = Math.round(state.inS * 1e6);
@@ -844,6 +1054,80 @@ async function compress() {
     });
     encoder.configure(encCfg);
 
+    // ---- Audio: boost needs a decode → gain → re-encode round trip;
+    // everything else about the audio track (unchanged, or dropped) doesn't. ----
+    const needAudioBoost = s.keepAudio && !!audio && s.audioGainDb > 0.05 && state.audioEncoderSupported;
+    const asc = (s.keepAudio && audio) ? await aacDescription(file, mp4, audio.id).catch(() => null) : null;
+    let audioEmitted = 0;
+    // "Auto" runs a lookahead leveler (audio-boost.js) that rides the gain up
+    // during quiet voice and automatically ducks on anything loud (a jingle,
+    // a shout) — it introduces a few ms of internal audio delay, so its
+    // output length doesn't line up 1:1 with each input frame;
+    // audioOutFrames/audioOutStartUS track a running output timeline instead
+    // of using each frame's own timestamp. "Manual" is a flat, user-chosen
+    // gain with no ducking — output matches input 1:1. Declared out here (not
+    // inside the `if` below) so the post-loop flush can still reach them.
+    let leveler = null, audioOutFrames = 0, audioOutStartUS = null;
+    const emitAudio = (data, numberOfFrames, ch, sampleRate, timestamp) => {
+      if (numberOfFrames <= 0) return;
+      const out = new AudioData({ format: 'f32', sampleRate, numberOfFrames, numberOfChannels: ch, timestamp, data });
+      audioEncoder.encode(out);
+      out.close();
+    };
+
+    if (needAudioBoost) {
+      audioEncoder = new AudioEncoder({
+        output: (chunk, meta) => { muxer.addAudioChunk(chunk, meta); audioEmitted++; },
+        error: (e) => { encodeErr = encodeErr || e; },
+      });
+      audioEncoder.configure({
+        codec: AAC_CODEC, sampleRate: audio.audio.sample_rate,
+        numberOfChannels: audio.audio.channel_count, bitrate: audio.bitrate || 160_000,
+      });
+
+      leveler = s.volumeMode === 'auto' ? createLeveler(audio.audio.sample_rate, { maxGainDb: s.audioGainDb }) : null;
+      const gainLinear = leveler ? null : dbToLinear(s.audioGainDb);
+
+      const onAudioDecoded = (frame) => {
+        try {
+          if (cancelRequested) return;
+          const t = frame.timestamp;
+          if (t + 1 < inMicros || t >= outMicros || inCutUS(t)) return;   // outside the kept range
+          const n = frame.numberOfFrames, ch = frame.numberOfChannels;
+          const interleaved = new Float32Array(n * ch);
+          const plane = new Float32Array(n);
+          for (let c = 0; c < ch; c++) {
+            frame.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+            if (!leveler) applyGainInPlace(plane, gainLinear);
+            for (let i = 0; i < n; i++) interleaved[i * ch + c] = plane[i];
+          }
+
+          if (leveler) {
+            if (audioOutStartUS === null) audioOutStartUS = toOutputUS(t);
+            const mono = new Float32Array(n);
+            for (let i = 0; i < n; i++) {
+              let sum = 0;
+              for (let c = 0; c < ch; c++) sum += interleaved[i * ch + c];
+              mono[i] = sum / ch;
+            }
+            const leveled = leveler.process(interleaved, ch, mono);
+            const framesOut = leveled.length / ch;
+            emitAudio(leveled, framesOut, ch, frame.sampleRate, audioOutStartUS + Math.round((audioOutFrames / frame.sampleRate) * 1e6));
+            audioOutFrames += framesOut;
+          } else {
+            emitAudio(interleaved, n, ch, frame.sampleRate, toOutputUS(t));
+          }
+        } finally {
+          frame.close();
+        }
+      };
+      audioDecoder = new AudioDecoder({ output: onAudioDecoded, error: (e) => { encodeErr = encodeErr || e; } });
+      audioDecoder.configure({
+        codec: audio.codec, sampleRate: audio.audio.sample_rate,
+        numberOfChannels: audio.audio.channel_count, description: asc,
+      });
+    }
+
     // ---- Decode → (trim window) → scale → encode ----
     const gop = Math.max(1, Math.round(s.outFps * 2));
     const needScale = s.outW !== video.track_width || s.outH !== video.track_height;
@@ -904,8 +1188,8 @@ async function compress() {
 
     // Set up sample extraction on the already-parsed file, then stream mdat.
     const vq = [];                 // queued encoded video samples
+    const aq = [];                 // queued encoded audio samples (only used when re-encoding)
     const audioOut = [];           // AAC samples inside the trim window (passthrough)
-    const asc = (s.keepAudio && audio) ? await aacDescription(file, mp4, audio.id) : null;
 
     mp4.onSamples = (id, user, smps) => {
       if (user === 'video') {
@@ -917,14 +1201,23 @@ async function compress() {
           cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync,
         });
       } else if (user === 'audio') {
-        for (const smp of smps) {
-          const cts = (smp.cts / smp.timescale) * 1e6;
-          if (cts + 1 >= inMicros && cts < outMicros && !inCutUS(cts)) {
-            audioOut.push({
-              data: smp.data.slice(0),                              // copy before release
-              ts: Math.round(toOutputUS(cts)),                      // compact past trim + cuts
-              dur: Math.round((smp.duration / smp.timescale) * 1e6),
-            });
+        if (needAudioBoost) {
+          // Decode every sample (like video does) — the boost/limiter and
+          // range filtering happen once it comes back out of the decoder.
+          for (const smp of smps) aq.push({
+            data: smp.data.slice(0),
+            cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync,
+          });
+        } else {
+          for (const smp of smps) {
+            const cts = (smp.cts / smp.timescale) * 1e6;
+            if (cts + 1 >= inMicros && cts < outMicros && !inCutUS(cts)) {
+              audioOut.push({
+                data: smp.data.slice(0),                              // copy before release
+                ts: Math.round(toOutputUS(cts)),                      // compact past trim + cuts
+                dur: Math.round((smp.duration / smp.timescale) * 1e6),
+              });
+            }
           }
         }
       }
@@ -935,15 +1228,30 @@ async function compress() {
     mp4.start();
 
     const feed = async () => {
-      while (vq.length && !cancelRequested && !reachedOut) {
-        const smp = vq.shift();
-        decoder.decode(new EncodedVideoChunk({
-          type: smp.is_sync ? 'key' : 'delta',
-          timestamp: Math.round((smp.cts / smp.timescale) * 1e6),
-          duration: Math.round((smp.duration / smp.timescale) * 1e6),
-          data: smp.data,
-        }));
-        while ((encoder.encodeQueueSize > 8 || decoder.decodeQueueSize > 8) && !cancelRequested) {
+      while ((vq.length && !reachedOut) || aq.length) {
+        if (!cancelRequested && vq.length && !reachedOut) {
+          const smp = vq.shift();
+          decoder.decode(new EncodedVideoChunk({
+            type: smp.is_sync ? 'key' : 'delta',
+            timestamp: Math.round((smp.cts / smp.timescale) * 1e6),
+            duration: Math.round((smp.duration / smp.timescale) * 1e6),
+            data: smp.data,
+          }));
+        }
+        if (!cancelRequested && needAudioBoost && aq.length) {
+          const smp = aq.shift();
+          audioDecoder.decode(new EncodedAudioChunk({
+            type: smp.is_sync ? 'key' : 'delta',
+            timestamp: Math.round((smp.cts / smp.timescale) * 1e6),
+            duration: Math.round((smp.duration / smp.timescale) * 1e6),
+            data: smp.data,
+          }));
+        }
+        if (cancelRequested) break;
+        while ((
+          encoder.encodeQueueSize > 8 || decoder.decodeQueueSize > 8 ||
+          (needAudioBoost && (audioEncoder.encodeQueueSize > 8 || audioDecoder.decodeQueueSize > 8))
+        ) && !cancelRequested) {
           await sleep(4);
         }
         if (encodeErr) throw encodeErr;
@@ -969,13 +1277,33 @@ async function compress() {
 
     await decoder.flush();
     await encoder.flush();
+    if (needAudioBoost) {
+      await audioDecoder.flush();
+      if (leveler) {
+        // Drain the few ms of audio still sitting in the leveler's lookahead
+        // buffer — otherwise the very tail of the track goes missing.
+        const tail = leveler.flush();
+        const ch = audio.audio.channel_count;
+        const framesOut = tail.length / ch;
+        if (framesOut > 0 && audioOutStartUS !== null) {
+          emitAudio(tail, framesOut, ch, audio.audio.sample_rate, audioOutStartUS + Math.round((audioOutFrames / audio.audio.sample_rate) * 1e6));
+          audioOutFrames += framesOut;
+        }
+      }
+      await audioEncoder.flush();
+    }
     if (encodeErr) throw encodeErr;
     try { mp4.stop(); } catch (_) {}
 
-    // ---- Audio passthrough (trim-windowed) ----
+    // ---- Audio: passthrough (trim-windowed), or boosted (already streamed
+    // through the encoder above) ----
     let audioNote = '';
     if (s.keepAudio && audio) {
-      if (audioOut.length) {
+      if (needAudioBoost) {
+        audioNote = audioEmitted > 0
+          ? (leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`)
+          : ' (no audio in the selected range)';
+      } else if (audioOut.length) {
         let first = true;
         for (const a of audioOut) {
           muxer.addAudioChunkRaw(a.data, 'key', a.ts, a.dur, first && asc ? { decoderConfig: { description: asc } } : undefined);
@@ -1003,6 +1331,8 @@ async function compress() {
   } finally {
     try { if (decoder && decoder.state !== 'closed') decoder.close(); } catch (_) {}
     try { if (encoder && encoder.state !== 'closed') encoder.close(); } catch (_) {}
+    try { if (audioDecoder && audioDecoder.state !== 'closed') audioDecoder.close(); } catch (_) {}
+    try { if (audioEncoder && audioEncoder.state !== 'closed') audioEncoder.close(); } catch (_) {}
     try { mp4.onSamples = null; } catch (_) {}
     running = false;
     els.btnCompress.disabled = false;
@@ -1066,8 +1396,9 @@ function initUI() {
     updateEstimate();
   }));
 
-  [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio]
+  [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
+  document.querySelectorAll('input[name="volume"]').forEach((r) => r.addEventListener('change', updateEstimate));
 
   window.addEventListener('resize', () => { if (state && currentStep === 'trim') renderTrim(); });
 
