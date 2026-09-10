@@ -84,8 +84,8 @@ export function activeRmsDbfs(samples, sampleRate, opts = {}) {
 // Clamped to [0, maxGainDb] — never turns audio down, never boosts an
 // already-loud track, and never runs away on a near-silent/empty track.
 export function computeAutoGainDb(voiceDbfs, opts = {}) {
-  const target = opts.targetDbfs ?? -20;
-  const maxGain = opts.maxGainDb ?? 24;
+  const target = opts.targetDbfs ?? -12;
+  const maxGain = opts.maxGainDb ?? 36;
   const gain = target - voiceDbfs;
   if (!isFinite(gain)) return 0;
   return Math.min(maxGain, Math.max(0, gain));
@@ -171,8 +171,8 @@ export function createVoiceBandpassStream(sampleRate, loHz = 300, hiHz = 3400) {
 // instance per track, feed it every chunk in order via process(), and call
 // flush() once at the end to drain the last bit of buffered audio.
 export function createLeveler(sampleRate, opts = {}) {
-  const targetLinear = dbToLinear(opts.targetDbfs ?? -20);
-  const maxGainLinear = dbToLinear(opts.maxGainDb ?? 24);
+  const targetLinear = dbToLinear(opts.targetDbfs ?? -12);
+  const maxGainLinear = dbToLinear(opts.maxGainDb ?? 36);
   const ceiling = opts.ceiling ?? 0.89;   // ~-1 dBFS
   const timeConst = (sec) => Math.exp(-1 / (Math.max(1e-4, sec) * sampleRate));
   // Attack can be fast (it no longer has to protect anything by itself —

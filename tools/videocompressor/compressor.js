@@ -99,7 +99,7 @@ function ensureAudioGraph() {
     // leveler — auto mode's gain is a *ceiling*, not a flat boost (the real
     // encode ducks it automatically on loud passages), so this needs real
     // headroom to compress into rather than just catching the odd peak.
-    previewLimiterNode.threshold.value = -18;
+    previewLimiterNode.threshold.value = -24;
     previewLimiterNode.knee.value = 6;
     previewLimiterNode.ratio.value = 20;
     previewLimiterNode.attack.value = 0.003;

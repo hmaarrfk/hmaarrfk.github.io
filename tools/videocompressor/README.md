@@ -54,7 +54,7 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   - **Auto** — a small lookahead AGC (`createLeveler`) driven by loudness in
     the human-voice band (~300&ndash;3400 Hz), so a quiet voice track is
     judged on the voice itself rather than a single loud non-voice sound. It
-    rides the gain up to rescue quiet voice (0&ndash;24 dB) and automatically
+    rides the gain up to rescue quiet voice (0&ndash;36 dB) and automatically
     ducks it back down the instant *anything* gets loud (a music jingle, a
     shout) — a few milliseconds of internal audio delay give the gain a head
     start on a sudden transient, so it eases down smoothly to meet it instead
