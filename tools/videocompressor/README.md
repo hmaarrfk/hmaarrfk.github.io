@@ -87,9 +87,17 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     network the first time. The audio itself never leaves the page.
   - **Audio** — only the kept sections (trim minus cuts) are decoded,
     resampled to 16 kHz mono and joined back to back, i.e. exactly the
-    output's audio. It's cut into ≤ 29 s pieces at the quietest 100 ms near
-    each boundary (so a cut rarely splits a word); near-silent pieces are
-    skipped (Whisper hallucinates "Thank you." in silence).
+    output's audio. Near-silent windows are skipped (Whisper hallucinates
+    "Thank you." in silence).
+  - **Overlapping windows** — Whisper hears at most 30 s, so the audio goes in
+    as 29 s windows that **overlap by 5 s** (~21 % more compute). Nothing is
+    then heard only at a window edge, where the model is weakest and would
+    start a fresh sentence mid-phrase. `mergeChunkWords()` throws the doubled
+    seconds away again: each seam gets one junction time — just after the last
+    **sentence ending** in the overlap, else the middle of the longest pause,
+    else the middle — and every word lands on exactly one side of it (by its
+    own midpoint), so nothing is duplicated or dropped, not even a word
+    straddling the seam.
   - **Language** — detected automatically (transformers.js doesn't do this for
     Whisper yet, so the worker runs one decoder step after
     `<|startoftranscript|>` and takes the most likely language token), or

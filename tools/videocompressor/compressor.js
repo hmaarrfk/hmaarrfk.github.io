@@ -24,7 +24,7 @@
 // MP4Box is loaded as a global (window.MP4Box) by a <script> tag in index.html.
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
 import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from './audio-boost.js';
-import { ASR_SAMPLE_RATE, createResampler, planChunks, wordsToCues, cueAt, drawCaption } from './captions.js';
+import { ASR_SAMPLE_RATE, createResampler, planChunks, mergeChunkWords, wordsToCues, cueAt, drawCaption } from './captions.js';
 
 const MP4Box = window.MP4Box;
 const AAC_CODEC = 'mp4a.40.2';   // AAC-LC — what we re-encode audio to when a boost is on
@@ -1129,7 +1129,10 @@ function onCaptionMessage(job, m) {
     }
     case 'language': job.language = m.language; break;
     case 'chunk':
-      job.words.push(...m.words);
+      // The windows overlap, so the transcript is re-stitched from scratch
+      // each time one lands — a seam can only be placed once both sides exist.
+      job.chunkWords[m.index] = m.words;
+      job.words = mergeChunkWords(job.chunkWords, job.chunks);
       applyCaptionWords(job);
       setProgress((m.index + 1) / m.total, els.capProgress);
       setCapStatus(`Transcribing${job.language ? ` (${langName(job.language)})` : ''}… part ${m.index + 1} of ${m.total}`);
@@ -1156,7 +1159,7 @@ async function generateCaptions() {
   if (!state || !state.isAac || capJob) return;
   const st = state;
   const preset = asrPreset(els.inCapModel.value);
-  const job = capJob = { id: ++capJobSeq, st, preset, segs: keptSegments(), words: [], files: {}, language: null, stop: false };
+  const job = capJob = { id: ++capJobSeq, st, preset, segs: keptSegments(), chunks: [], chunkWords: [], words: [], files: {}, language: null, stop: false };
   const prev = st.captions;
   els.inCapBurn.checked = true;
   updateCaptionUI();
@@ -1168,6 +1171,7 @@ async function generateCaptions() {
     if (job.stop) { outcome = 'cancelled'; return; }
     const chunks = planChunks(audio);
     if (!chunks.length || chunks.every((c) => c.silent)) throw new Error('the kept audio is silent — nothing to transcribe.');
+    job.chunks = chunks;
     setProgress(0, els.capProgress);
     const finished = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
     captionWorker().postMessage({

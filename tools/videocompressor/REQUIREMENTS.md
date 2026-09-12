@@ -69,8 +69,11 @@ encoder via WebCodecs — entirely client-side — and optionally add
     Default: turbo with WebGPU, base without.
   - Language: auto-detect (our own one-step language-token argmax — the
     library has no Whisper language detection yet) or a fixed choice.
-  - Transcribes only the kept audio (trim minus cuts, joined), in ≤ 29 s
-    pieces cut at quiet points; silent pieces skipped.
+  - Transcribes only the kept audio (trim minus cuts, joined), in 29 s
+    windows overlapping by 5 s; silent windows skipped. `mergeChunkWords()`
+    drops the duplicated overlap, placing each seam at a sentence ending
+    (else the longest pause, else the middle) and assigning every word to one
+    side by its midpoint.
   - Word timestamps → cues (≈ 2 lines, ≤ 6 s, split at pauses/sentences),
     stored in source time; cues in later-removed sections are hidden.
   - Live preview overlay uses the same `drawCaption()` as the encoder.

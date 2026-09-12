@@ -53,31 +53,76 @@ export function createResampler(inRate, outRate = ASR_SAMPLE_RATE) {
 
 // ---------------------------------------------------------------------------
 // Chunk planning. Whisper hears at most 30 s at a time, so long audio is cut
-// into pieces — at the quietest 100 ms inside each piece's last stretch, so a
-// cut rarely lands mid-word. Near-silent pieces are flagged so the caller can
-// skip them (Whisper famously "hears" phrases like "Thank you." in silence).
+// into *overlapping* windows: every window repeats the last `overlapS`
+// seconds of the one before it. Nothing is then heard only at a window edge,
+// where the model is at its worst and where it would start a fresh sentence
+// mid-phrase. The doubled-up seconds are thrown away again by
+// mergeChunkWords(). Near-silent windows are flagged so the caller can skip
+// them (Whisper famously "hears" phrases like "Thank you." in silence).
 // ---------------------------------------------------------------------------
-export function planChunks(audio, sampleRate = ASR_SAMPLE_RATE, { maxS = 29, minS = 18, silentDb = -50 } = {}) {
-  const win = Math.round(sampleRate * 0.1);
-  const maxLen = Math.round(maxS * sampleRate);
-  const minLen = Math.round(minS * sampleRate);
+export function planChunks(audio, sampleRate = ASR_SAMPLE_RATE, { windowS = 29, overlapS = 5, silentDb = -50 } = {}) {
+  const win = Math.round(windowS * sampleRate);
+  const hop = Math.max(1, win - Math.round(overlapS * sampleRate));
   const chunks = [];
-  let start = 0;
-  while (start < audio.length) {
-    let end = audio.length;
-    if (audio.length - start > maxLen) {
-      let best = start + maxLen, bestE = Infinity;
-      for (let w = start + minLen; w + win <= start + maxLen; w += win) {
-        let e = 0;
-        for (let i = w; i < w + win; i++) e += audio[i] * audio[i];
-        if (e < bestE) { bestE = e; best = w + (win >> 1); }
-      }
-      end = best;
-    }
+  for (let start = 0; ; start += hop) {
+    const end = Math.min(audio.length, start + win);
     chunks.push({ start, end, silent: rmsDb(audio, start, end) < silentDb });
-    start = end;
+    if (end >= audio.length) break;
   }
   return chunks;
+}
+
+// Stitch the per-window word lists back into one transcript. Each seam gets a
+// single junction time, and every word falls on exactly one side of it (by its
+// own midpoint), so nothing is duplicated and nothing is dropped — including a
+// word that straddles the seam. The junction prefers, in order: just after the
+// last sentence ending inside the overlap, the middle of the longest pause
+// there, or failing both, the middle of the overlap.
+//
+// Windows still being transcribed are simply absent; call this again as each
+// one lands (it's cheap, and a seam can only be placed once both sides exist).
+export function mergeChunkWords(wordsByChunk, chunks, sampleRate = ASR_SAMPLE_RATE, { minPauseS = 0.25 } = {}) {
+  const out = [];
+  let from = -Infinity;
+  for (let i = 0; i < chunks.length; i++) {
+    const words = wordsByChunk[i] || [];
+    const next = wordsByChunk[i + 1];
+    const to = (i + 1 < chunks.length && Array.isArray(next))
+      ? junctionTime(words, next, chunks[i + 1].start / sampleRate, chunks[i].end / sampleRate, minPauseS)
+      : Infinity;
+    for (const w of words) {
+      const mid = (w.start + w.end) / 2;
+      if (mid >= from && mid < to) out.push(w);
+    }
+    from = to;
+  }
+  return out;
+}
+
+function junctionTime(a, b, overlapStart, overlapEnd, minPauseS) {
+  const inOverlap = (w) => w.end > overlapStart && w.start < overlapEnd;
+  // 1. the end of a sentence — the most natural place to hand over
+  let sentenceEnd = null;
+  for (const list of [a, b]) {
+    for (const w of list || []) {
+      if (!inOverlap(w) || w.end >= overlapEnd) continue;
+      if (/[.?!…]["')\]]?$/.test((w.text || '').trim())) sentenceEnd = Math.max(sentenceEnd ?? -Infinity, w.end);
+    }
+  }
+  if (sentenceEnd != null) return sentenceEnd + 1e-3;
+  // 2. the middle of the longest pause
+  let bestGap = 0, bestAt = null;
+  for (const list of [a, b]) {
+    const ws = (list || []).filter(inOverlap);
+    for (let i = 1; i < ws.length; i++) {
+      const gap = ws[i].start - ws[i - 1].end;
+      const at = (ws[i - 1].end + ws[i].start) / 2;
+      if (gap > bestGap && at > overlapStart && at < overlapEnd) { bestGap = gap; bestAt = at; }
+    }
+  }
+  if (bestAt != null && bestGap >= minPauseS) return bestAt;
+  // 3. nothing to go on — split the difference
+  return (overlapStart + overlapEnd) / 2;
 }
 
 function rmsDb(a, s, e) {
