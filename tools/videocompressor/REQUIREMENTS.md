@@ -69,6 +69,12 @@ encoder via WebCodecs — entirely client-side — and optionally add
 - Target size or bitrate; resolution 100/75/50/25 %; fps cap; H.264 / H.265
   with early `isConfigSupported` validation.
 - Trim handles + interior cuts, stitched output; final-clip preview.
+- The timeline is laid out in pixels, so it repaints on **any** change of the
+  track's width — a `ResizeObserver` on the track (and the preview block, for
+  the caption overlay), not just a window `resize` on the Trim step. Before
+  that, the green kept-bar and the playhead kept stale pixel widths on
+  Settings/Export after a resize, and a scrollbar appearing or the cue list
+  growing was missed everywhere.
 - AAC audio passthrough, or volume boost (manual / auto).
 - **Captions**
   - Models: `onnx-community/whisper-{large-v3-turbo,small,base}_timestamped`.

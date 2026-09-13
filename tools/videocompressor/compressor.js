@@ -1476,7 +1476,28 @@ function initUI() {
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
   document.querySelectorAll('input[name="volume"]').forEach((r) => r.addEventListener('change', updateEstimate));
 
-  window.addEventListener('resize', () => { if (state && currentStep === 'trim') renderTrim(); captions.renderOverlay(); });
+  // The timeline is laid out in pixels, so it has to be repainted whenever its
+  // width changes — on every step, not just Trim, and not only on a window
+  // resize: a scrollbar appearing, the cue list growing, or the preview moving
+  // between steps all change it while the window stays put. A ResizeObserver
+  // catches the lot; the size guard stops the pixel widths we write inside the
+  // track from feeding back into another notification.
+  const repaintTimeline = () => {
+    if (state && currentStep !== 'source') { renderTrim(); renderPlayhead(); }
+    captions.renderOverlay();
+  };
+  window.addEventListener('resize', repaintTimeline);
+  if (typeof ResizeObserver !== 'undefined') {
+    let lastSize = '';
+    const ro = new ResizeObserver(() => {
+      const size = `${els.tlTrack.clientWidth}x${els.previewBlock.clientWidth}x${els.previewBlock.clientHeight}`;
+      if (size === lastSize) return;
+      lastSize = size;
+      requestAnimationFrame(repaintTimeline);
+    });
+    ro.observe(els.tlTrack);
+    ro.observe(els.previewBlock);   // the caption overlay follows the video's box
+  }
 
   captions.wire();
 
