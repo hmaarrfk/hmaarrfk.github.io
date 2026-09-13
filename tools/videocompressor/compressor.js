@@ -260,7 +260,11 @@ const captions = createCaptions({
   els,
   getState: () => state,
   timeline: { keptSegments, toOutputTime, fromOutputTime, seek },
-  audio: { decodeAudioTrack, mixToMono, concatFloat32 },
+  audio: {
+    decodeAudioTrack, mixToMono, concatFloat32,
+    // Captions transcribe the boosted signal, so they need what Volume is set to.
+    gain: () => ({ mode: currentVolumeMode(), db: currentAudioGainDb() }),
+  },
   fmt: { fmtTime, fmtBytes },
   setProgress,
   onChanged: () => { if (currentStep === 'export') updateExportSummary(); },

@@ -13,6 +13,7 @@ import {
   ASR_SAMPLE_RATE, createResampler, detectSpeech, compactSpeech, mapCompactSpan,
   planChunks, mergeChunkWords, wordsToCues, cueAt, drawCaption,
 } from './captions.js';
+import { dbToLinear, applyGainInPlace, createLeveler, analyzeVoiceLevel } from './audio-boost.js';
 
 // The `_timestamped` exports carry the cross-attention outputs word-level
 // timestamps need. Sizes (MB) are what the chosen dtypes download.
@@ -161,6 +162,47 @@ export function createCaptions(ctx) {
     return kept;
   }
 
+  // Whisper hears what the viewer will hear: if the export is boosting the
+  // audio, transcribe the boosted signal. Quiet recordings are exactly the
+  // case where speech detection gives up otherwise — a screen recording at
+  // -60 dBFS sits below the detector's floor until the boost lifts it.
+  //
+  // Manual is the flat dB the slider asks for, through the same soft limiter
+  // as the export. Auto re-measures the voice-band level of *this* audio (the
+  // kept range, already at 16 kHz mono) rather than waiting on the whole-track
+  // analysis, then rides the same lookahead leveler, so a quiet voice comes up
+  // without a loud passage being driven any harder.
+  function boostForSpeech(pcm) {
+    const { mode, db } = audioApi.gain();
+    if (mode === 'manual' && db > 0.05) {
+      applyGainInPlace(pcm, dbToLinear(db));
+      return { audio: pcm, gainDb: db, mode };
+    }
+    if (mode === 'auto') {
+      const { autoGainDb } = analyzeVoiceLevel(pcm, ASR_SAMPLE_RATE);
+      if (autoGainDb > 0.05) {
+        const leveler = createLeveler(ASR_SAMPLE_RATE, { maxGainDb: autoGainDb });
+        const out = new Float32Array(pcm.length);
+        let o = 0;
+        const CHUNK = 1 << 16;
+        for (let i = 0; i < pcm.length; i += CHUNK) {
+          const piece = pcm.subarray(i, Math.min(pcm.length, i + CHUNK));
+          const y = leveler.process(piece, 1, piece);          // mono: one channel, its own mixdown
+          out.set(y.subarray(0, Math.min(y.length, out.length - o)), o);
+          o += Math.min(y.length, out.length - o);
+        }
+        const tail = leveler.flush();                          // the lookahead buffer's last few ms
+        if (tail.length && o < out.length) {
+          out.set(tail.subarray(0, out.length - o), o);
+          o += Math.min(tail.length, out.length - o);
+        }
+        return { audio: out.subarray(0, o), gainDb: autoGainDb, mode };
+      }
+      return { audio: pcm, gainDb: 0, mode };
+    }
+    return { audio: pcm, gainDb: 0, mode };
+  }
+
   // ---- the worker ----------------------------------------------------------
   function ensureWorker() {
     if (worker) return worker;
@@ -237,14 +279,26 @@ export function createCaptions(ctx) {
     let outcome = 'error', errMsg = '';
     try {
       setStatus('Reading the audio…');
-      const pcm = await decodeSpeechAudio(st, j.segs, (f) => setProgress(f, els.capProgress));
+      const decoded = await decodeSpeechAudio(st, j.segs, (f) => setProgress(f, els.capProgress));
       if (j.stop) { outcome = 'cancelled'; return; }
+
+      // Transcribe what the export will sound like, boost included.
+      const boosted = boostForSpeech(decoded);
+      const pcm = boosted.audio;
+      if (boosted.gainDb > 0.05) {
+        j.boostNote = ` · heard it ${boosted.mode === 'auto' ? 'auto-boosted up to ' : 'boosted '}+${boosted.gainDb.toFixed(1)} dB`;
+        setStatus(`Boosted the audio by ${boosted.mode === 'auto' ? 'up to ' : ''}+${boosted.gainDb.toFixed(1)} dB for transcription…`);
+      }
 
       // Find the speech and splice the silences out: Whisper charges a padded
       // 30 s per call either way, so a clip full of pauses would otherwise cost
       // far more than the talking in it — and silence is where it hallucinates.
       const speech = detectSpeech(pcm);
-      if (!speech.length) throw new Error('no speech found in the kept audio.');
+      if (!speech.length) {
+        throw new Error(boosted.gainDb > 0.05
+          ? 'no speech found in the kept audio.'
+          : 'no speech found — if the recording is quiet, turn on a volume boost above and try again.');
+      }
       const compact = compactSpeech(pcm, speech);
       j.map = compact.map;
       j.chunks = planChunks(compact.audio);
@@ -272,7 +326,7 @@ export function createCaptions(ctx) {
         const n = st.captions ? st.captions.cues.length : 0;
         setStatus(
           outcome === 'done' ? (n
-            ? `${n} captions · ${langName(j.language)} · ${p.label.split(' — ')[0]}. Fix any line below; they’re burned in when you compress.`
+            ? `${n} captions · ${langName(j.language)} · ${p.label.split(' — ')[0]}${j.boostNote || ''}. Fix any line below; they’re burned in when you compress.`
             : 'No speech found in the kept audio.')
           : outcome === 'cancelled' ? (j.words.length ? `Stopped — kept the ${n} captions transcribed so far.` : 'Stopped.')
           : `Captions failed: ${errMsg}${p.key !== 'base' ? ' A smaller model may work better on this device.' : ''}`);

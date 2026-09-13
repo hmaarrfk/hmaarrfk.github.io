@@ -88,6 +88,17 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   - **Audio** — only the kept sections (trim minus cuts) are decoded,
     resampled to 16 kHz mono and joined back to back, i.e. exactly the
     output's audio.
+  - **The volume boost applies to captions too** — Whisper hears what the
+    viewer will hear. **Manual** applies the slider's dB through the same soft
+    limiter as the export; **Auto** re-measures the voice-band level of the
+    caption audio itself (rather than waiting on the whole-track analysis,
+    which may still be running) and rides the same lookahead leveler. The
+    leveler's output is sample-exact in length, so caption timings can't
+    drift. This matters for quiet recordings: a screen capture at −60 dBFS
+    sits below the speech detector's floor, and only 2 % of it registers as
+    speech until the boost lifts it — with the boost on, 50 %. Captions on a
+    very quiet video with **Volume: unchanged** are expected to find nothing,
+    and say so.
   - **Only the speech is transcribed** — `detectSpeech()` finds the talking by
     short-time energy against a noise floor measured from the clip itself
     (with hysteresis, so it doesn't chatter mid-word), and `compactSpeech()`
