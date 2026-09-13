@@ -4,7 +4,14 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-11 (**Auto-captions, burned in.** Settings gains a
+_Last updated: 2026-09-13 (**Captions: transcribe only the speech, and split
+the source up.** Voice activity detection + silence compaction (with a span
+map back to real time) replace "feed it everything"; cues break at punctuation
+rather than a hard character count; the caption UI/job code moved out of
+`compressor.js` (1903 → 1529 lines) into `captions-ui.js`, leaving
+`compressor.js` for video and `captions.js` for pure logic.)_
+
+_Earlier: 2026-09-11 (**Auto-captions, burned in.** Settings gains a
 Captions group: pick a Whisper model (large-v3-turbo / small / base), a
 language (or auto-detect), size and position, then **Generate captions**. The
 kept audio is transcribed on-device by transformers.js in a Web Worker (WebGPU,
@@ -52,7 +59,8 @@ encoder via WebCodecs — entirely client-side — and optionally add
 | `index.html` | Page + UI (raw HTML) |
 | `compressor.js` | Demux, preview/trim/cuts, transcode, mux, caption orchestration, all UI wiring |
 | `audio-boost.js` | Pure gain / voice-band leveler math |
-| `captions.js` | Pure caption helpers: resampler, chunk planning, words → cues, `cueAt`, `drawCaption` |
+| `captions.js` | Pure caption logic: resampler, voice activity + compaction + time mapping, window planning, seam merging, words → cues, `cueAt`, `drawCaption` |
+| `captions-ui.js` | Caption UI + job orchestration: model presets, worker, cue list, overlay, persistence (given a `ctx` by `compressor.js`) |
 | `captions-worker.js` | Module worker running Whisper (transformers.js) |
 | `vendor/` | Vendored deps + `update-vendor.sh` |
 
@@ -61,6 +69,12 @@ encoder via WebCodecs — entirely client-side — and optionally add
 - Target size or bitrate; resolution 100/75/50/25 %; fps cap; H.264 / H.265
   with early `isConfigSupported` validation.
 - Trim handles + interior cuts, stitched output; final-clip preview.
+- The timeline is laid out in pixels, so it repaints on **any** change of the
+  track's width — a `ResizeObserver` on the track (and the preview block, for
+  the caption overlay), not just a window `resize` on the Trim step. Before
+  that, the green kept-bar and the playhead kept stale pixel widths on
+  Settings/Export after a resize, and a scrollbar appearing or the cue list
+  growing was missed everywhere.
 - AAC audio passthrough, or volume boost (manual / auto).
 - **Captions**
   - Models: `onnx-community/whisper-{large-v3-turbo,small,base}_timestamped`.
@@ -69,11 +83,19 @@ encoder via WebCodecs — entirely client-side — and optionally add
     Default: turbo with WebGPU, base without.
   - Language: auto-detect (our own one-step language-token argmax — the
     library has no Whisper language detection yet) or a fixed choice.
-  - Transcribes only the kept audio (trim minus cuts, joined), in 29 s
-    windows overlapping by 5 s; silent windows skipped. `mergeChunkWords()`
-    drops the duplicated overlap, placing each seam at a sentence ending
-    (else the longest pause, else the middle) and assigning every word to one
-    side by its midpoint.
+  - Transcribes only the kept audio (trim minus cuts, joined). Voice activity
+    detection (`detectSpeech`, energy vs. a measured noise floor, hysteresis)
+    finds the talking; `compactSpeech` splices the speech together and drops
+    the silences — Whisper costs a padded 30 s per call either way, so this
+    is real compute saved (35 s clip with two 12 s gaps: 13 s sent, not 40 s)
+    and removes the silence it hallucinates into.
+  - The compacted audio goes in as 29 s windows overlapping by 5 s;
+    `mergeChunkWords()` drops the duplicated overlap, placing each seam at a
+    sentence ending (else the longest pause, else the middle) and assigning
+    every word to one side by its midpoint.
+  - `mapCompactSpan()` puts word times back on the real timeline, resolving
+    each word's start and end against the same speech region so a word can't
+    swallow a spliced-out pause.
   - Word timestamps → cues (≈ 2 lines, ≤ 6 s, split at pauses/sentences),
     stored in source time; cues in later-removed sections are hidden.
   - Live preview overlay uses the same `drawCaption()` as the encoder.
@@ -81,14 +103,21 @@ encoder via WebCodecs — entirely client-side — and optionally add
     Remove clears them; warning if the trim grows past what was transcribed.
   - Persisted per file in `localStorage` (`videocompressor:captions:v1`).
   - Burn-in only (drawn into pixels). Size S/M/L (4.5 / 6 / 8 % of the shorter
-    side), bottom or top.
+    side), bottom or top, and a look: outlined text (default — stroke ≈ 17 %
+    of the font size, round joins, soft shadow) or a dark box behind the
+    text. All four are persisted with the other settings.
 
 ## Testing
 
-- `captions.js` runs under Node: resample a WAV, `planChunks`, run
-  `@huggingface/transformers` on the pieces, `wordsToCues` (used to check
-  44.1 kHz → 16 kHz, English/French detection, subword gluing like
-  "aujourd'hui").
+- `captions.js` runs under Node, which is where its logic is actually tested:
+  synthetic audio with known speech spans over a noisy floor (VAD regions,
+  compaction ratio, exact time-map round trip, a word whose end falls in a
+  spliced-out gap), seam placement (lands after the *last* sentence ending in
+  the overlap; falls back to the longest pause; a missing window keeps what is
+  known; no duplicates or drops), and punctuation-preferred cue splitting.
+  With the real model: resample a WAV, run `@huggingface/transformers` on the
+  windows, and A/B old vs new (44.1 kHz → 16 kHz, English/French detection,
+  subword gluing like "aujourd'hui", audio-seconds sent).
 - In the browser (Chrome, WebGPU): load a spoken MP4 → Settings → Generate
   captions → Export → Compress; confirm captions over the preview, in the
   live encode view, and in the result's frames; no console errors.

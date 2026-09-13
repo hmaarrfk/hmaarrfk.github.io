@@ -87,8 +87,20 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     network the first time. The audio itself never leaves the page.
   - **Audio** — only the kept sections (trim minus cuts) are decoded,
     resampled to 16 kHz mono and joined back to back, i.e. exactly the
-    output's audio. Near-silent windows are skipped (Whisper hallucinates
-    "Thank you." in silence).
+    output's audio.
+  - **Only the speech is transcribed** — `detectSpeech()` finds the talking by
+    short-time energy against a noise floor measured from the clip itself
+    (with hysteresis, so it doesn't chatter mid-word), and `compactSpeech()`
+    splices those regions together, dropping the silences and returning a map
+    back to real time. This matters because Whisper always processes a padded
+    30 s per call: a clip that is half pauses would otherwise cost twice what
+    the speech in it is worth, and silence is exactly where the model invents
+    phrases like "Thank you." On a 35 s clip with two 12 s gaps this sends
+    **13 s instead of 40 s** of audio — one model call instead of two.
+    Word times come back through `mapCompactSpan()`, which resolves each
+    word's start *and* end against the same speech region: Whisper habitually
+    stretches a final word to the pause after it, and mapping the two ends
+    independently would let a word swallow a silence it never occupied.
   - **Overlapping windows** — Whisper hears at most 30 s, so the audio goes in
     as 29 s windows that **overlap by 5 s** (~21 % more compute). Nothing is
     then heard only at a window edge, where the model is weakest and would
@@ -103,12 +115,16 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     `<|startoftranscript|>` and takes the most likely language token), or
     chosen from a list.
   - **Cues** — words are grouped into short phrases (≈ 2 lines, ≤ 6 s, split at
-    pauses and sentence ends) and stored in *source* time, so trimming or
+    pauses and sentence ends; an over-long line breaks at the latest comma or
+    full stop inside it rather than mid-clause) and stored in *source* time, so trimming or
     cutting afterwards just hides the cues that fall in removed sections.
     Each cue is editable in a list; cues are saved per file (like the trim)
     and restored when the same file is loaded again.
-  - **Burn-in** — `drawCaption()` (white text on a translucent box, sized
-    relative to the picture's shorter side) paints the current cue onto the
+  - **Burn-in** — `drawCaption()` (sized relative to the picture's shorter
+    side, in one of two looks: **outlined text**, white with a thick
+    round-joined dark stroke and a soft shadow so the picture stays visible
+    behind it — the default — or a translucent **dark box** behind each line)
+    paints the current cue onto the
     `OffscreenCanvas` each frame is scaled on. The preview draws the same
     function onto a canvas over the `<video>`, so what you see is what gets
     encoded. Burning in forces every frame through the canvas even at 100 %
@@ -142,7 +158,8 @@ reached, so trims near the start of a long video finish quickly.
 | `index.html` | The page. No Jekyll front matter, so the JS is served verbatim. Loads MP4Box as a global `<script>`, then the module. |
 | `compressor.js` | ES module: streaming demux, preview/trim, transcode, mux, and all UI wiring. |
 | `audio-boost.js` | ES module: the voice-band loudness analysis, auto-gain, and soft-limiter math. Pure functions on `Float32Array`s — no DOM/WebCodecs — so it's usable standalone (e.g. under Node, fed raw PCM from `ffmpeg`) to sanity-check the algorithm outside the browser. |
-| `captions.js` | ES module: the pure caption helpers — 16 kHz resampler, chunk planning, words → cues, `cueAt`, and `drawCaption` (used by both the preview overlay and the encoder). No DOM/model, so it runs under Node too. |
+| `captions.js` | ES module: the pure caption logic — 16 kHz resampler, `detectSpeech`/`compactSpeech`/`mapCompactSpan`, window planning, `mergeChunkWords`, words → cues, `cueAt`, and `drawCaption` (used by both the preview overlay and the encoder). No DOM/model, so it runs under Node too. |
+| `captions-ui.js` | ES module: the interactive half — model presets and the WebGPU probe, the transcription job and its worker, the editable cue list, the preview overlay, and caption persistence. Gets the DOM, the state and a few timeline/audio helpers from `compressor.js` through one `ctx` object. |
 | `captions-worker.js` | Module Web Worker: loads Whisper through transformers.js, detects the language, transcribes chunk by chunk and posts words (with timestamps) back as it goes. Jobs are id-tagged and serialized so a cancelled one can't interleave with a new one. |
 | `REQUIREMENTS.md` | Living spec / design notes — update with every change. |
 | `vendor/mp4box/` | Vendored MP4Box.js UMD bundle + license. |
