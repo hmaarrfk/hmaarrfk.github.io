@@ -1,11 +1,28 @@
 // Auto-captions — the pure helpers behind the Video Compressor's burned-in
-// captions. No DOM, no WebCodecs, no model: resampling, chunk planning,
-// word -> cue grouping, and drawing a cue onto any 2D canvas context. That
-// keeps them usable standalone (e.g. under Node, fed PCM from ffmpeg) to
-// sanity-check the logic outside the browser, like audio-boost.js.
+// captions. No DOM, no WebCodecs, no model: voice-activity detection,
+// resampling, windowing, stitching, word -> cue grouping, and drawing a cue
+// onto any 2D canvas context. That keeps them usable standalone (e.g. under
+// Node, fed PCM from ffmpeg) to check the logic outside the browser, like
+// audio-boost.js.
 //
 // The speech model itself (Whisper, via transformers.js) runs in
 // captions-worker.js; compressor.js wires the two together.
+//
+// The path audio takes:
+//
+//   decoded audio ─► createResampler ─► 16 kHz mono
+//                 ─► detectSpeech    ─► where the talking is
+//                 ─► compactSpeech   ─► silences cut out, + a map back
+//                 ─► planChunks      ─► <=29 s windows, overlapping
+//                        (Whisper)
+//                 ─► mergeChunkWords ─► one transcript, seams at sentences
+//                 ─► mapCompactTime  ─► word times back on the real timeline
+//                 ─► wordsToCues     ─► short, readable caption lines
+//
+// Cutting the silence out matters because Whisper always processes a padded
+// 30 s per call: a clip that is half pauses otherwise costs twice what the
+// speech in it is worth, and silence is exactly where the model invents
+// phrases like "Thank you."
 
 export const ASR_SAMPLE_RATE = 16000;   // what Whisper expects: 16 kHz mono
 
@@ -52,21 +69,132 @@ export function createResampler(inRate, outRate = ASR_SAMPLE_RATE) {
 }
 
 // ---------------------------------------------------------------------------
-// Chunk planning. Whisper hears at most 30 s at a time, so long audio is cut
-// into *overlapping* windows: every window repeats the last `overlapS`
-// seconds of the one before it. Nothing is then heard only at a window edge,
-// where the model is at its worst and where it would start a fresh sentence
-// mid-phrase. The doubled-up seconds are thrown away again by
-// mergeChunkWords(). Near-silent windows are flagged so the caller can skip
-// them (Whisper famously "hears" phrases like "Thank you." in silence).
+// Voice activity. Short-time energy against a noise floor measured from the
+// clip itself, so it copes with hiss, room tone or a noisy camera preamp
+// rather than assuming digital silence. Hysteresis (a higher bar to start
+// speech than to continue it) stops it chattering on and off mid-word.
+// Returns speech regions as sample indices, in order, non-overlapping.
 // ---------------------------------------------------------------------------
-export function planChunks(audio, sampleRate = ASR_SAMPLE_RATE, { windowS = 29, overlapS = 5, silentDb = -50 } = {}) {
+export function detectSpeech(audio, sampleRate = ASR_SAMPLE_RATE, {
+  frameS = 0.02,        // energy frame
+  minSpeechS = 0.25,    // ignore blips shorter than this
+  minSilenceS = 0.5,    // a pause shorter than this stays inside the speech
+  padS = 0.3,           // keep this much either side, so nothing is clipped
+  marginDb = 12,        // how far above the noise floor speech must rise
+} = {}) {
+  const frame = Math.max(1, Math.round(frameS * sampleRate));
+  const nFrames = Math.floor(audio.length / frame);
+  if (!nFrames) return audio.length ? [{ start: 0, end: audio.length }] : [];
+
+  const db = new Float32Array(nFrames);
+  for (let f = 0; f < nFrames; f++) db[f] = rmsDb(audio, f * frame, f * frame + frame);
+
+  // Noise floor: the 20th percentile of frame levels (ignoring true silence,
+  // which would drag an otherwise noisy floor down to -Infinity).
+  const finite = Array.from(db).filter((v) => isFinite(v)).sort((a, b) => a - b);
+  const floor = finite.length ? finite[Math.floor(finite.length * 0.2)] : -90;
+  const enter = Math.max(floor + marginDb, -55);
+  const exit = Math.max(floor + marginDb * 0.5, -60);
+
+  const regions = [];
+  let start = -1;
+  for (let f = 0; f < nFrames; f++) {
+    if (start < 0) { if (db[f] > enter) start = f; }
+    else if (db[f] < exit) { regions.push({ start, end: f }); start = -1; }
+  }
+  if (start >= 0) regions.push({ start, end: nFrames });
+
+  // Merge across short pauses, drop blips, pad, clamp, and merge again in case
+  // padding made neighbours touch.
+  const minSilence = Math.round(minSilenceS / frameS);
+  const minSpeech = Math.round(minSpeechS / frameS);
+  const merged = [];
+  for (const r of regions) {
+    const last = merged[merged.length - 1];
+    if (last && r.start - last.end < minSilence) last.end = r.end;
+    else merged.push({ ...r });
+  }
+  const pad = Math.round(padS * sampleRate);
+  const out = [];
+  for (const r of merged) {
+    if (r.end - r.start < minSpeech) continue;
+    const s = Math.max(0, r.start * frame - pad);
+    const e = Math.min(audio.length, r.end * frame + pad);
+    const last = out[out.length - 1];
+    if (last && s <= last.end) last.end = Math.max(last.end, e);
+    else out.push({ start: s, end: e });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Splice the speech regions together, dropping the silences between them, and
+// return a map for putting word timings back on the real timeline. A short
+// silence is left between regions so the model still hears a phrase boundary
+// instead of two sentences rammed together.
+// ---------------------------------------------------------------------------
+export function compactSpeech(audio, regions, sampleRate = ASR_SAMPLE_RATE, { gapS = 0.3 } = {}) {
+  const gap = Math.round(gapS * sampleRate);
+  let total = 0;
+  regions.forEach((r, i) => { total += (r.end - r.start) + (i ? gap : 0); });
+  const out = new Float32Array(total);
+  const map = [];
+  let at = 0;
+  regions.forEach((r, i) => {
+    if (i) at += gap;                       // left as silence
+    out.set(audio.subarray(r.start, r.end), at);
+    map.push({ from: at, to: at + (r.end - r.start), src: r.start });
+    at += r.end - r.start;
+  });
+  return { audio: out, map };
+}
+
+// Compacted-timeline seconds -> real seconds. Times inside a spliced-out
+// silence land on the nearest edge, so nothing maps outside the speech.
+export function mapCompactTime(map, t, sampleRate = ASR_SAMPLE_RATE) {
+  if (!map || !map.length) return t;
+  const seg = segmentAt(map, t * sampleRate);
+  return mapWithin(seg, t * sampleRate, sampleRate);
+}
+
+// Map a word's [start, end] as one span. Whisper habitually stretches the
+// last word of a phrase to the pause after it; on the compacted timeline
+// that end can fall inside a spliced-out silence, and mapping it on its own
+// would fling the word forward to the next speech region — inventing seconds
+// of caption that cover a silence. Both ends are therefore resolved against
+// the segment the word *starts* in, and the end is clamped to it.
+export function mapCompactSpan(map, start, end, sampleRate = ASR_SAMPLE_RATE) {
+  if (!map || !map.length) return { start, end: Math.max(start, end) };
+  const seg = segmentAt(map, start * sampleRate);
+  const s = mapWithin(seg, start * sampleRate, sampleRate);
+  const e = mapWithin(seg, Math.min(end * sampleRate, seg.to), sampleRate);
+  return { start: s, end: Math.max(s, e) };
+}
+
+function segmentAt(map, x) {
+  for (const seg of map) if (x <= seg.to) return seg;
+  return map[map.length - 1];
+}
+
+function mapWithin(seg, x, sampleRate) {
+  const clamped = Math.min(Math.max(x, seg.from), seg.to);
+  return (seg.src + (clamped - seg.from)) / sampleRate;
+}
+
+// ---------------------------------------------------------------------------
+// Windowing. Whisper hears at most 30 s at a time. Speech runs longer than a
+// window get an overlap, so no word is heard only at a window edge — where
+// the model is weakest and would start a fresh sentence mid-phrase. The
+// doubled seconds are thrown away again by mergeChunkWords().
+// ---------------------------------------------------------------------------
+export function planChunks(audio, sampleRate = ASR_SAMPLE_RATE, { windowS = 29, overlapS = 5 } = {}) {
   const win = Math.round(windowS * sampleRate);
   const hop = Math.max(1, win - Math.round(overlapS * sampleRate));
   const chunks = [];
+  if (!audio.length) return chunks;
   for (let start = 0; ; start += hop) {
     const end = Math.min(audio.length, start + win);
-    chunks.push({ start, end, silent: rmsDb(audio, start, end) < silentDb });
+    chunks.push({ start, end });
     if (end >= audio.length) break;
   }
   return chunks;
@@ -87,9 +215,14 @@ export function mergeChunkWords(wordsByChunk, chunks, sampleRate = ASR_SAMPLE_RA
   for (let i = 0; i < chunks.length; i++) {
     const words = wordsByChunk[i] || [];
     const next = wordsByChunk[i + 1];
-    const to = (i + 1 < chunks.length && Array.isArray(next))
-      ? junctionTime(words, next, chunks[i + 1].start / sampleRate, chunks[i].end / sampleRate, minPauseS)
-      : Infinity;
+    let to = Infinity;
+    if (i + 1 < chunks.length && Array.isArray(next)) {
+      const overlapStart = chunks[i + 1].start / sampleRate;
+      const overlapEnd = chunks[i].end / sampleRate;
+      to = overlapStart >= overlapEnd
+        ? (overlapEnd + overlapStart) / 2          // windows don't overlap: nothing to choose
+        : junctionTime(words, next, overlapStart, overlapEnd, minPauseS);
+    }
     for (const w of words) {
       const mid = (w.start + w.end) / 2;
       if (mid >= from && mid < to) out.push(w);
@@ -106,7 +239,7 @@ function junctionTime(a, b, overlapStart, overlapEnd, minPauseS) {
   for (const list of [a, b]) {
     for (const w of list || []) {
       if (!inOverlap(w) || w.end >= overlapEnd) continue;
-      if (/[.?!…]["')\]]?$/.test((w.text || '').trim())) sentenceEnd = Math.max(sentenceEnd ?? -Infinity, w.end);
+      if (SENTENCE_END.test((w.text || '').trim())) sentenceEnd = Math.max(sentenceEnd ?? -Infinity, w.end);
     }
   }
   if (sentenceEnd != null) return sentenceEnd + 1e-3;
@@ -125,41 +258,59 @@ function junctionTime(a, b, overlapStart, overlapEnd, minPauseS) {
   return (overlapStart + overlapEnd) / 2;
 }
 
-function rmsDb(a, s, e) {
-  let sum = 0;
-  for (let i = s; i < e; i++) sum += a[i] * a[i];
-  const rms = Math.sqrt(sum / Math.max(1, e - s));
-  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
-}
-
 // ---------------------------------------------------------------------------
 // Words -> cues. Whisper gives per-word timestamps; captions want short
-// readable phrases. A cue closes when it would grow past `maxChars` (about
-// two lines), past `maxDur` seconds, at a pause, or at the end of a sentence
-// once it's long enough to stand on its own.
+// readable phrases. A cue closes at a pause, at the end of a sentence, or
+// when it has simply grown too long — and an over-long cue is broken at the
+// latest punctuation inside it rather than mid-clause.
 // ---------------------------------------------------------------------------
 //
 // Whisper marks where a new word begins with a leading space; a piece
 // without one ("'hui" after "aujourd", "-page" after "90", or any word in a
 // language written without spaces) attaches to the previous piece as-is.
-export function wordsToCues(words, { maxChars = 84, maxDur = 6, gapS = 0.7, minSentence = 24, minDur = 0.8, holdS = 0.4 } = {}) {
+const SENTENCE_END = /[.?!…]["')\]]?$/;
+const CLAUSE_END = /[,;:—–)]["')\]]?$/;
+
+export function wordsToCues(words, {
+  maxChars = 84, maxDur = 6, gapS = 0.7, minSentence = 24,
+  minDur = 0.8, holdS = 0.4, minSplitFrac = 0.4,
+} = {}) {
   const cues = [];
-  let cur = null;
-  const close = () => { if (cur && cur.text) cues.push(cur); cur = null; };
+  let buf = [];
+
+  const textOf = (ws) => ws.map((w, i) => (i === 0 ? '' : (/^\s/.test(w.text) ? ' ' : '')) + w.text.trim()).join('');
+  const emit = (ws) => {
+    if (!ws.length) return;
+    const text = textOf(ws).trim();
+    if (text) cues.push({ start: ws[0].start, end: ws[ws.length - 1].end, text });
+  };
+  // Break the pending words at `i`, keeping the rest for the next cue.
+  const cutAt = (i) => { emit(buf.slice(0, i)); buf = buf.slice(i); };
+  // The latest punctuation far enough in to be worth breaking at; sentence
+  // endings win over commas, and length wins over nothing.
+  const splitPoint = () => {
+    const least = Math.ceil(buf.length * minSplitFrac);
+    for (const test of [SENTENCE_END, CLAUSE_END]) {
+      for (let i = buf.length - 1; i >= least; i--) if (test.test(buf[i - 1].text.trim())) return i;
+    }
+    return buf.length;
+  };
+
   for (const w of words) {
     const raw = w.text || '';
-    const t = raw.trim();
-    if (!t) continue;
-    const glue = /^\s/.test(raw) ? ' ' : '';
-    if (cur && glue) {   // only break a cue between words, never inside one
-      const joined = `${cur.text} ${t}`;
-      if (joined.length > maxChars || w.end - cur.start > maxDur || w.start - cur.end > gapS ||
-          (/[.?!…]["')\]]?$/.test(cur.text) && cur.text.length >= minSentence)) close();
+    if (!raw.trim()) continue;
+    const startsWord = /^\s/.test(raw) || !buf.length;
+    if (buf.length && startsWord) {   // only ever break between words, never inside one
+      const prev = buf[buf.length - 1];
+      const text = textOf(buf);
+      if (w.start - prev.end > gapS) cutAt(buf.length);                                   // a pause
+      else if (SENTENCE_END.test(text) && text.length >= minSentence) cutAt(buf.length);  // a finished sentence
+      else if (text.length + 1 + raw.trim().length > maxChars || w.end - buf[0].start > maxDur) cutAt(splitPoint());
     }
-    if (!cur) cur = { start: w.start, end: w.end, text: t };
-    else { cur.text += glue + t; cur.end = Math.max(cur.end, w.end); }
+    buf.push(w);
   }
-  close();
+  emit(buf);
+
   // Give very short cues time to be read, and bridge small gaps so the
   // captions don't flicker off between phrases — never overlapping the next.
   for (let i = 0; i < cues.length; i++) {
@@ -225,6 +376,13 @@ export function drawCaption(ctx, text, x, y, w, h, { size = 'medium', position =
     ctx.fillText(ln, cx, cy);
   });
   ctx.restore();
+}
+
+function rmsDb(a, s, e) {
+  let sum = 0;
+  for (let i = s; i < e; i++) sum += a[i] * a[i];
+  const rms = Math.sqrt(sum / Math.max(1, e - s));
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
 }
 
 function clampInt(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
