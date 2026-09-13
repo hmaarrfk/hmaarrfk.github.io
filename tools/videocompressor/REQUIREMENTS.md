@@ -97,7 +97,9 @@ encoder via WebCodecs — entirely client-side — and optionally add
     Remove clears them; warning if the trim grows past what was transcribed.
   - Persisted per file in `localStorage` (`videocompressor:captions:v1`).
   - Burn-in only (drawn into pixels). Size S/M/L (4.5 / 6 / 8 % of the shorter
-    side), bottom or top.
+    side), bottom or top, and a look: outlined text (default — stroke ≈ 17 %
+    of the font size, round joins, soft shadow) or a dark box behind the
+    text. All four are persisted with the other settings.
 
 ## Testing
 

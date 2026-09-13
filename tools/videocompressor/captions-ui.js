@@ -88,7 +88,7 @@ export function createCaptions(ctx) {
   }
 
   // ---- small helpers -------------------------------------------------------
-  const style = () => ({ size: els.inCapSize.value, position: els.inCapPos.value });
+  const style = () => ({ size: els.inCapSize.value, position: els.inCapPos.value, look: els.inCapLook.value });
   const burnOn = () => {
     const state = getState();
     return !!(state && state.captions && state.captions.cues.length && els.inCapBurn.checked);
@@ -417,7 +417,8 @@ export function createCaptions(ctx) {
   function settings() {
     return {
       capModel: els.inCapModel.value, capLang: els.inCapLang.value,
-      capSize: els.inCapSize.value, capPos: els.inCapPos.value, capBurn: els.inCapBurn.checked,
+      capSize: els.inCapSize.value, capPos: els.inCapPos.value, capLook: els.inCapLook.value,
+      capBurn: els.inCapBurn.checked,
     };
   }
   function applySettings(g) {
@@ -428,6 +429,7 @@ export function createCaptions(ctx) {
     setSelect(els.inCapLang, g.capLang);
     setSelect(els.inCapSize, g.capSize);
     setSelect(els.inCapPos, g.capPos);
+    setSelect(els.inCapLook, g.capLook);
     if (g.capBurn != null) els.inCapBurn.checked = !!g.capBurn;
   }
 

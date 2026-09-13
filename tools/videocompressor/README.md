@@ -120,8 +120,11 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     cutting afterwards just hides the cues that fall in removed sections.
     Each cue is editable in a list; cues are saved per file (like the trim)
     and restored when the same file is loaded again.
-  - **Burn-in** — `drawCaption()` (white text on a translucent box, sized
-    relative to the picture's shorter side) paints the current cue onto the
+  - **Burn-in** — `drawCaption()` (sized relative to the picture's shorter
+    side, in one of two looks: **outlined text**, white with a thick
+    round-joined dark stroke and a soft shadow so the picture stays visible
+    behind it — the default — or a translucent **dark box** behind each line)
+    paints the current cue onto the
     `OffscreenCanvas` each frame is scaled on. The preview draws the same
     function onto a canvas over the `<video>`, so what you see is what gets
     encoded. Burning in forces every frame through the canvas even at 100 %

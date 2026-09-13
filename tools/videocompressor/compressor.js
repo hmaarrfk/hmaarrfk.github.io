@@ -64,7 +64,8 @@ const els = {
   audioLiveNote: $('audio-live-note'),
   // captions
   capOverlay: $('cap-overlay'),
-  inCapModel: $('in-cap-model'), inCapLang: $('in-cap-lang'), inCapSize: $('in-cap-size'), inCapPos: $('in-cap-pos'),
+  inCapModel: $('in-cap-model'), inCapLang: $('in-cap-lang'), inCapSize: $('in-cap-size'),
+  inCapPos: $('in-cap-pos'), inCapLook: $('in-cap-look'),
   inCapBurn: $('in-cap-burn'), hintCapModel: $('hint-cap-model'),
   btnCapGen: $('btn-cap-gen'), btnCapCancel: $('btn-cap-cancel'), btnCapClear: $('btn-cap-clear'),
   capProgress: $('cap-progress'), capStatus: $('cap-status'), capNote: $('cap-note'), capList: $('cap-list'),
@@ -1471,7 +1472,7 @@ function initUI() {
   }));
 
   [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain,
-    els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapBurn]
+    els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapLook, els.inCapBurn]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
   document.querySelectorAll('input[name="volume"]').forEach((r) => r.addEventListener('change', updateEstimate));
 

@@ -353,7 +353,13 @@ export function wrapLines(ctx, text, maxWidth) {
 }
 
 // Paint `text` as a caption into the picture rectangle (x, y, w, h).
-export function drawCaption(ctx, text, x, y, w, h, { size = 'medium', position = 'bottom' } = {}) {
+//
+// `look`: 'outline' draws white text with a dark stroke around the letters —
+// the picture stays visible behind them — while 'box' lays each line on a
+// translucent slab. Outlined text needs the stroke to be genuinely thick
+// (round-joined, drawn under the fill) or it turns to mush over busy footage;
+// a soft shadow underneath carries it over bright, low-contrast areas.
+export function drawCaption(ctx, text, x, y, w, h, { size = 'medium', position = 'bottom', look = 'outline' } = {}) {
   if (!text) return;
   const px = Math.max(10, Math.round(Math.min(w, h) * (CAPTION_SIZES[size] || CAPTION_SIZES.medium)));
   ctx.save();
@@ -369,11 +375,24 @@ export function drawCaption(ctx, text, x, y, w, h, { size = 'medium', position =
   const cx = x + w / 2;
   lines.forEach((ln, i) => {
     const cy = top + i * lineH + lineH / 2;
-    const tw = ctx.measureText(ln).width;
-    ctx.fillStyle = 'rgba(0,0,0,0.62)';
-    ctx.fillRect(Math.round(cx - tw / 2 - padX), Math.round(cy - lineH / 2), Math.round(tw + 2 * padX), lineH);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(ln, cx, cy);
+    if (look === 'box') {
+      const tw = ctx.measureText(ln).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.62)';
+      ctx.fillRect(Math.round(cx - tw / 2 - padX), Math.round(cy - lineH / 2), Math.round(tw + 2 * padX), lineH);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(ln, cx, cy);
+    } else {
+      ctx.shadowColor = 'rgba(0,0,0,0.55)';
+      ctx.shadowBlur = Math.round(px * 0.3);
+      ctx.lineWidth = Math.max(2, px * 0.17);
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+      ctx.strokeText(ln, cx, cy);
+      ctx.shadowBlur = 0;                 // the fill sits crisply on the stroke
+      ctx.fillStyle = '#fff';
+      ctx.fillText(ln, cx, cy);
+    }
   });
   ctx.restore();
 }
