@@ -83,6 +83,14 @@ encoder via WebCodecs — entirely client-side — and optionally add
     Default: turbo with WebGPU, base without.
   - Language: auto-detect (our own one-step language-token argmax — the
     library has no Whisper language detection yet) or a fixed choice.
+  - Transcribes the **boosted** audio: manual = the slider's dB through the
+    soft limiter, auto = the voice-band leveler with a gain measured from the
+    caption audio itself (the whole-track analysis may not have finished yet).
+    Leveler output is sample-exact in length, so timings don't drift. Quiet
+    recordings only detect as speech once boosted (measured: 2 % of a −60 dBFS
+    screen capture, 50 % boosted); with Volume unchanged, captions on such a
+    file are *expected* to find nothing and say so — deliberately not worked
+    around by loosening the detector.
   - Transcribes only the kept audio (trim minus cuts, joined). Voice activity
     detection (`detectSpeech`, energy vs. a measured noise floor, hysteresis)
     finds the talking; `compactSpeech` splices the speech together and drops
