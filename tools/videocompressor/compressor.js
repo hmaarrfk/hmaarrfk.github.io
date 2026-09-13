@@ -15,11 +15,16 @@
 // AAC audio is copied through untouched (remuxed, never re-encoded) — unless
 // a volume boost is on, in which case just the audio is decoded, gained
 // (audio-boost.js), and re-encoded to AAC; the video path is unaffected.
+//
+// Optional auto-captions (captions.js + captions-worker.js) transcribe the
+// kept audio with an open-weights Whisper model — on the GPU via WebGPU when
+// available — and draw the captions onto the frames before they're encoded.
 // Everything runs locally; no file ever leaves the machine.
 //
 // MP4Box is loaded as a global (window.MP4Box) by a <script> tag in index.html.
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
 import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from './audio-boost.js';
+import { ASR_SAMPLE_RATE, createResampler, planChunks, mergeChunkWords, wordsToCues, cueAt, drawCaption } from './captions.js';
 
 const MP4Box = window.MP4Box;
 const AAC_CODEC = 'mp4a.40.2';   // AAC-LC — what we re-encode audio to when a boost is on
@@ -55,6 +60,12 @@ const els = {
   hintFps: $('hint-fps'), hintCodec: $('hint-codec'), hintAudio: $('hint-audio'),
   fieldGain: $('field-gain'), inGain: $('in-gain'), hintGain: $('hint-gain'), hintVolume: $('hint-volume'),
   audioLiveNote: $('audio-live-note'),
+  // captions
+  capOverlay: $('cap-overlay'),
+  inCapModel: $('in-cap-model'), inCapLang: $('in-cap-lang'), inCapSize: $('in-cap-size'), inCapPos: $('in-cap-pos'),
+  inCapBurn: $('in-cap-burn'), hintCapModel: $('hint-cap-model'),
+  btnCapGen: $('btn-cap-gen'), btnCapCancel: $('btn-cap-cancel'), btnCapClear: $('btn-cap-clear'),
+  capProgress: $('cap-progress'), capStatus: $('cap-status'), capNote: $('cap-note'), capList: $('cap-list'),
   encodeWarnSettings: $('encode-warn-settings'), encodeWarnExport: $('encode-warn-export'),
   btnCompress: $('btn-compress'), btnCancel: $('btn-cancel'),
   est: $('est'), progress: $('progress'), status: $('status'),
@@ -200,7 +211,8 @@ function showStep(name) {
   // During an export, keep the preview out of the way (the encode view shows).
   if (name === 'export' && running) { els.encodeView.hidden = false; els.previewBlock.style.display = 'none'; }
   else { els.encodeView.hidden = true; els.previewBlock.style.display = ''; if (state) relocatePreview(name); }
-  if (state && name !== 'source') { renderTrim(); renderPlayhead(); }
+  if (state && name !== 'source') { renderTrim(); renderPlayhead(); renderCaptionOverlay(); }
+  if (state && name === 'settings') renderCaptionList();
   if (state && name === 'export') updateExportSummary();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -216,7 +228,7 @@ function updateExportSummary() {
     : '';
   els.exportSummary.textContent =
     `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
-    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}`;
+    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}${captionsBurnOn() ? ' · captions burned in' : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +270,8 @@ function saveSettings() {
       scale: els.inScale.value, fps: els.inFps.value, codec: els.inCodec.value,
       keepAudio: els.inAudio.checked,
       volume: currentVolumeMode(), gain: els.inGain.value,
+      capModel: els.inCapModel.value, capLang: els.inCapLang.value,
+      capSize: els.inCapSize.value, capPos: els.inCapPos.value, capBurn: els.inCapBurn.checked,
     },
     file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
     trim: { inS: state.inS, outS: state.outS, cuts: state.cuts },
@@ -276,6 +290,13 @@ function applyGeneral(g) {
   if (g.fps != null) els.inFps.value = g.fps;
   if (g.codec != null) els.inCodec.value = g.codec;
   if (g.gain != null) els.inGain.value = g.gain;
+  const setSelect = (sel, v) => { if (v != null && [...sel.options].some((o) => o.value === v)) sel.value = v; };
+  setSelect(els.inCapModel, g.capModel);
+  if (g.capModel && ASR_MODELS[g.capModel]) els.inCapModel.dataset.chosen = g.capModel;
+  setSelect(els.inCapLang, g.capLang);
+  setSelect(els.inCapSize, g.capSize);
+  setSelect(els.inCapPos, g.capPos);
+  if (g.capBurn != null) els.inCapBurn.checked = !!g.capBurn;
   const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
   if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
   if (g.volume) {
@@ -285,10 +306,10 @@ function applyGeneral(g) {
 }
 
 function setStatus(msg) { els.status.textContent = msg || ''; }
-function setProgress(frac) {
-  if (frac == null) { els.progress.style.display = 'none'; return; }
-  els.progress.style.display = 'block';
-  els.progress.firstElementChild.style.width = `${clamp(frac, 0, 1) * 100}%`;
+function setProgress(frac, bar = els.progress) {
+  if (frac == null) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  bar.firstElementChild.style.width = `${clamp(frac, 0, 1) * 100}%`;
 }
 
 // Read a byte range of the File as an ArrayBuffer (streams from disk; never the
@@ -350,19 +371,10 @@ async function aacDescription(file, mp4, trackId) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Load & parse a source file (metadata only — no mdat payload).
-// ---------------------------------------------------------------------------
-async function loadFile(file) {
-  resetResult();
-  els.panePreview.hidden = true;
-  els.paneSettings.hidden = true;
-  els.info.textContent = 'Analyzing…';
-
-  const atoms = await walkAtoms(file);
-  const mdat = atoms.find((a) => a.type === 'mdat');
-  if (!mdat) throw new Error('No media data (mdat) box found — is this a valid MP4/MOV?');
-
+// Parse a file's metadata into a fresh MP4Box instance. Cheap (moov only), so
+// background audio passes open their own rather than sharing — and fighting
+// over the sample callbacks of — the one compress() uses.
+async function openDemuxer(file, atoms) {
   const mp4 = MP4Box.createFile();
   const info = await new Promise((resolve, reject) => {
     mp4.onError = (e) => reject(new Error(typeof e === 'string' ? e : 'Could not parse this file.'));
@@ -380,6 +392,24 @@ async function loadFile(file) {
       } catch (e) { reject(e); }
     })();
   });
+  return { mp4, info };
+}
+
+// ---------------------------------------------------------------------------
+// Load & parse a source file (metadata only — no mdat payload).
+// ---------------------------------------------------------------------------
+async function loadFile(file) {
+  abortCaptions();
+  resetResult();
+  els.panePreview.hidden = true;
+  els.paneSettings.hidden = true;
+  els.info.textContent = 'Analyzing…';
+
+  const atoms = await walkAtoms(file);
+  const mdat = atoms.find((a) => a.type === 'mdat');
+  if (!mdat) throw new Error('No media data (mdat) box found — is this a valid MP4/MOV?');
+
+  const { mp4, info } = await openDemuxer(file, atoms);
 
   const video = info.videoTracks && info.videoTracks[0];
   if (!video) throw new Error('No video track found in this file.');
@@ -395,6 +425,7 @@ async function loadFile(file) {
     file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
     inS: 0, outS: durationS, cuts: [], pendingCutStart: null,
     audioAnalysis: null, audioEncoderSupported: false,
+    isAac: false, captions: restoreCaptions(file),
   };
 
   // Info line
@@ -410,6 +441,7 @@ async function loadFile(file) {
 
   // Audio availability
   const isAac = audio && /mp4a/.test(audio.codec);
+  state.isAac = !!isAac;
   els.inAudio.disabled = !isAac;
   els.inAudio.checked = !!isAac;
   els.hintAudio.textContent = !audio ? 'This file has no audio track.'
@@ -473,6 +505,8 @@ async function loadFile(file) {
 
   els.steps.hidden = false;      // reveal step nav now that a video is loaded
   updateAudioUI();
+  setCapStatus(state.captions ? `Restored ${state.captions.cues.length} captions from last time.` : '');
+  updateCaptionUI();
   updateEstimate();
   showStep('trim');              // advance past the upload step
 }
@@ -525,9 +559,8 @@ function toOutputTime(t) {
   }
   return o;
 }
-function fromOutputTime(o) {
+function fromOutputTime(o, segs = keptSegments()) {
   let acc = 0;
-  const segs = keptSegments();
   for (const s of segs) {
     const d = s.end - s.start;
     if (o <= acc + d) return s.start + (o - acc);
@@ -658,12 +691,15 @@ function setupPreview() {
       }
     }
     renderPlayhead();
+    renderCaptionOverlay();
   };
   v.onseeked = () => {
     renderPlayhead();
+    renderCaptionOverlay();
     if (pendingSeek != null) { const t = pendingSeek; pendingSeek = null; v.currentTime = t; }
   };
-  v.onloadedmetadata = () => { renderTrim(); renderPlayhead(); };
+  v.onloadedmetadata = () => { renderTrim(); renderPlayhead(); renderCaptionOverlay(); };
+  v.onplay = captionOverlayLoop;
 
   els.btnSetIn.onclick = () => { state.inS = clamp(v.currentTime || 0, 0, state.outS - frameStep()); renderTrim(); };
   els.btnSetOut.onclick = () => { state.outS = clamp(v.currentTime || 0, state.inS + frameStep(), state.durationS); renderTrim(); };
@@ -814,6 +850,7 @@ function updateEstimate() {
   }
   els.est.textContent = '';
   updateAudioUI();
+  updateCaptionUI();
   if (currentStep === 'export') updateExportSummary();
   queueSave();
   queueValidate();
@@ -825,37 +862,61 @@ function updateEstimate() {
 // file, in the background; its result just feeds the "Auto" hint and gain.
 // ---------------------------------------------------------------------------
 async function analyzeAudio(st) {
-  const { file, mp4, mdat, audio } = st;
+  const chunks = [];   // mono-mixed Float32Array pieces, concatenated at the end
+  const ok = await decodeAudioTrack(st, (frame) => chunks.push(mixToMono(frame)));
+  if (!ok) return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0 };
+  const mono = concatFloat32(chunks);
+  if (!mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0 };
+  return analyzeVoiceLevel(mono, st.audio.audio.sample_rate);
+}
+
+function mixToMono(frame) {
+  const n = frame.numberOfFrames, ch = frame.numberOfChannels;
+  const mono = new Float32Array(n);
+  const plane = new Float32Array(n);
+  for (let c = 0; c < ch; c++) {
+    frame.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+    for (let i = 0; i < n; i++) mono[i] += plane[i] / ch;
+  }
+  return mono;
+}
+
+function concatFloat32(parts) {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Float32Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+// Decode-only pass over the (AAC) audio track, handing every AudioData to
+// onFrame (closed afterwards). Streams mdat like compress() does, on its own
+// demuxer; stops early once samples pass `untilS` seconds. Returns false if
+// the browser can't decode this audio.
+async function decodeAudioTrack(st, onFrame, { untilS = Infinity, onProgress = null } = {}) {
+  const { file, atoms, mdat, audio } = st;
+  const { mp4 } = await openDemuxer(file, atoms);
   const description = await aacDescription(file, mp4, audio.id).catch(() => null);
   const decCfg = { codec: audio.codec, sampleRate: audio.audio.sample_rate, numberOfChannels: audio.audio.channel_count, description };
-  if (!(await AudioDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported) {
-    return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0 };
-  }
+  if (!(await AudioDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported) return false;
 
-  const channels = audio.audio.channel_count;
-  const sampleRate = audio.audio.sample_rate;
-  const chunks = [];   // mono-mixed Float32Array pieces, concatenated at the end
   let decodeErr = null;
   const decoder = new AudioDecoder({
     output: (frame) => {
-      try {
-        const n = frame.numberOfFrames;
-        const mono = new Float32Array(n);
-        const plane = new Float32Array(n);
-        for (let c = 0; c < frame.numberOfChannels; c++) {
-          frame.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
-          for (let i = 0; i < n; i++) mono[i] += plane[i] / frame.numberOfChannels;
-        }
-        chunks.push(mono);
-      } catch (e) { decodeErr = e; } finally { frame.close(); }
+      try { if (!decodeErr) onFrame(frame); } catch (e) { decodeErr = e; } finally { frame.close(); }
     },
     error: (e) => { decodeErr = e; },
   });
   decoder.configure(decCfg);
 
   const aq = [];
+  let pastEnd = false;
   mp4.onSamples = (id, user, smps) => {
-    for (const smp of smps) aq.push({ data: smp.data.slice(0), cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync });
+    for (const smp of smps) {
+      if (smp.cts / smp.timescale > untilS) { pastEnd = true; break; }
+      aq.push({ data: smp.data.slice(0), cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync });
+    }
     mp4.releaseUsedSamples(id, smps[smps.length - 1].number);
   };
   mp4.setExtractionOptions(audio.id, 'audio', { nbSamples: 200 });
@@ -876,31 +937,391 @@ async function analyzeAudio(st) {
   };
 
   const CHUNK = 8 * 1024 * 1024;
-  let off = mdat.start + mdat.hdr;
+  const startByte = mdat.start + mdat.hdr;
   const endByte = mdat.start + mdat.size;
-  while (off < endByte) {
-    const e = Math.min(off + CHUNK, endByte);
-    const ab = await readRange(file, off, e);
-    ab.fileStart = off;
-    off = e;
-    mp4.appendBuffer(ab);
+  let off = startByte;
+  try {
+    while (off < endByte && !pastEnd) {
+      const e = Math.min(off + CHUNK, endByte);
+      const ab = await readRange(file, off, e);
+      ab.fileStart = off;
+      off = e;
+      mp4.appendBuffer(ab);
+      await feed();
+      if (onProgress) onProgress((off - startByte) / Math.max(1, endByte - startByte));
+    }
+    mp4.flush();
     await feed();
+    await decoder.flush();
+  } finally {
+    try { if (decoder.state !== 'closed') decoder.close(); } catch (_) {}
+    try { mp4.onSamples = null; mp4.stop(); } catch (_) {}
   }
-  mp4.flush();
-  await feed();
-  await decoder.flush();
-  decoder.close();
-  try { mp4.onSamples = null; mp4.stop(); } catch (_) {}
   if (decodeErr) throw decodeErr;
+  return true;
+}
 
-  let total = 0;
-  for (const c of chunks) total += c.length;
-  const mono = new Float32Array(total);
-  let off2 = 0;
-  for (const c of chunks) { mono.set(c, off2); off2 += c.length; }
-  if (channels === 0 || !mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0 };
+// ---------------------------------------------------------------------------
+// Auto-captions — transcribe the kept audio with Whisper (captions-worker.js,
+// on the GPU via WebGPU when there is one) and burn the cues into the frames.
+// Cues are stored in *source* time, so trimming or cutting after generating
+// them simply hides the ones that land in removed sections.
+// ---------------------------------------------------------------------------
 
-  return analyzeVoiceLevel(mono, sampleRate);
+// The `_timestamped` exports carry the cross-attention outputs word-level
+// timestamps need. Sizes (MB) are what the chosen dtypes download.
+const ASR_MODELS = {
+  turbo: {
+    label: 'Whisper large-v3-turbo — most accurate', id: 'onnx-community/whisper-large-v3-turbo_timestamped',
+    webgpu: { dtype: { encoder_model: 'fp16', decoder_model_merged: 'q4' }, mb: 1610 },
+    webgpuNoF16: { dtype: { encoder_model: 'q4', decoder_model_merged: 'q4' }, mb: 760 },
+    wasm: { dtype: 'q8', mb: 1090 },
+  },
+  small: {
+    label: 'Whisper small — balanced', id: 'onnx-community/whisper-small_timestamped',
+    webgpu: { dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' }, mb: 590 },
+    wasm: { dtype: 'q8', mb: 250 },
+  },
+  base: {
+    label: 'Whisper base — fastest', id: 'onnx-community/whisper-base_timestamped',
+    webgpu: { dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' }, mb: 210 },
+    wasm: { dtype: 'q8', mb: 80 },
+  },
+};
+const LS_CAP_KEY = 'videocompressor:captions:v1';
+let asrEnv = { device: 'wasm', f16: false };
+let capWorker = null;
+let capJob = null;      // the generation in flight, if any
+let capJobSeq = 0;
+let capSaveTimer = null;
+let capRaf = 0;
+
+async function detectAsrDevice() {
+  try {
+    const adapter = navigator.gpu && await navigator.gpu.requestAdapter();
+    if (adapter) asrEnv = { device: 'webgpu', f16: adapter.features.has('shader-f16') };
+  } catch (_) { /* no WebGPU: the CPU (WASM) it is */ }
+}
+
+function asrPreset(key) {
+  const m = ASR_MODELS[key] || ASR_MODELS.base;
+  const cfg = asrEnv.device === 'webgpu' ? ((!asrEnv.f16 && m.webgpuNoF16) || m.webgpu) : m.wasm;
+  return { key: ASR_MODELS[key] ? key : 'base', model: m.id, label: m.label, device: asrEnv.device, dtype: cfg.dtype, mb: cfg.mb };
+}
+
+const fmtMB = (mb) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`);
+function langName(code) {
+  try { return new Intl.DisplayNames(['en'], { type: 'language' }).of(code) || code; } catch (_) { return code; }
+}
+
+// Built once at boot and again when the GPU probe answers (the labels carry
+// per-device download sizes). A model the user picked — or one restored from
+// the last session — survives the rebuild; otherwise the default follows the
+// device, since turbo is only practical on a GPU.
+function populateCaptionModels() {
+  const sel = els.inCapModel;
+  const chosen = sel.dataset.chosen;
+  sel.innerHTML = '';
+  for (const key of Object.keys(ASR_MODELS)) {
+    const p = asrPreset(key);
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = `${p.label} (${fmtMB(p.mb)})`;
+    sel.appendChild(o);
+  }
+  sel.value = chosen && ASR_MODELS[chosen] ? chosen : (asrEnv.device === 'webgpu' ? 'turbo' : 'base');
+  if (state) updateCaptionUI();
+}
+
+function captionStyle() { return { size: els.inCapSize.value, position: els.inCapPos.value }; }
+function captionsBurnOn() { return !!(state && state.captions && state.captions.cues.length && els.inCapBurn.checked); }
+function setCapStatus(msg) { els.capStatus.textContent = msg || ''; }
+
+function updateCaptionUI() {
+  if (!state) return;
+  const p = asrPreset(els.inCapModel.value);
+  els.hintCapModel.textContent = p.device === 'webgpu'
+    ? `${fmtMB(p.mb)} download the first time (cached after) · runs on your GPU via WebGPU.`
+    : `${fmtMB(p.mb)} download the first time · no WebGPU in this browser, so it runs on the CPU — much slower (Whisper base recommended).`;
+  const has = !!(state.captions && state.captions.cues.length);
+  const busy = !!capJob;
+  els.btnCapGen.hidden = busy;
+  els.btnCapGen.disabled = !state.isAac;
+  els.btnCapGen.textContent = has ? 'Regenerate captions' : 'Generate captions';
+  els.btnCapCancel.hidden = !busy;
+  els.btnCapClear.hidden = !has || busy;
+  els.inCapModel.disabled = busy;
+  els.inCapLang.disabled = busy;
+  els.inCapBurn.disabled = !has;
+  if (!state.isAac && !busy) {
+    setCapStatus(state.audio ? `Captions need AAC audio; this file's audio is ${state.audio.codec}.` : 'This video has no audio track to transcribe.');
+  }
+  // Captions only cover what was kept when they were generated.
+  let note = '';
+  if (has && !busy && state.captions.segs) {
+    const covered = keptSegments().every((k) => state.captions.segs.some((c) => k.start >= c.start - 0.05 && k.end <= c.end + 0.05));
+    if (!covered) note = 'Your trim now includes parts that weren’t transcribed — generate again to caption them.';
+  }
+  els.capNote.textContent = note;
+  els.capNote.hidden = !note;
+  renderCaptionOverlay();
+}
+
+// Decode the audio and assemble just the kept sections, back to back, at
+// 16 kHz mono — i.e. the audio of the *output* video, which is what gets
+// transcribed. Gaps in the track are filled with silence so time stays true.
+async function decodeSpeechAudio(st, segs, onProgress) {
+  const from = segs[0].start, to = segs[segs.length - 1].end;
+  const pieces = [];
+  let rs = null, t0 = 0, nextUS = 0;
+  const push = (x) => { const y = rs.push(x); if (y.length) pieces.push(y); };
+  const ok = await decodeAudioTrack(st, (frame) => {
+    const rate = frame.sampleRate, ts = frame.timestamp;
+    const durUS = (frame.numberOfFrames / rate) * 1e6;
+    if (ts + durUS < (from - 0.5) * 1e6 || ts > (to + 0.5) * 1e6) return;
+    if (!rs) { rs = createResampler(rate); t0 = ts / 1e6; nextUS = ts; }
+    const gap = Math.round(((ts - nextUS) / 1e6) * rate);
+    if (gap > 0) push(new Float32Array(gap));
+    push(mixToMono(frame));
+    nextUS = Math.max(nextUS, ts) + durUS;
+  }, { untilS: to + 1, onProgress });
+  if (!ok) throw new Error('This browser can’t decode the video’s audio.');
+
+  const full = concatFloat32(pieces);
+  const R = ASR_SAMPLE_RATE;
+  const lens = segs.map((s) => Math.max(0, Math.round((s.end - s.start) * R)));
+  const kept = new Float32Array(lens.reduce((n, l) => n + l, 0));   // silence where there's no audio
+  let o = 0;
+  segs.forEach((s, i) => {
+    const a = Math.round((s.start - t0) * R);
+    const lo = Math.max(0, a), hi = Math.min(full.length, a + lens[i]);
+    if (hi > lo) kept.set(full.subarray(lo, hi), o + (lo - a));
+    o += lens[i];
+  });
+  return kept;
+}
+
+function captionWorker() {
+  if (capWorker) return capWorker;
+  capWorker = new Worker(new URL('./captions-worker.js', import.meta.url), { type: 'module' });
+  capWorker.onmessage = (e) => { if (capJob && e.data.id === capJob.id) onCaptionMessage(capJob, e.data); };
+  capWorker.onerror = (e) => {
+    if (capJob && capJob.reject) capJob.reject(new Error(e.message || 'The captions worker failed to start.'));
+    capWorker = null;
+  };
+  return capWorker;
+}
+
+function onCaptionMessage(job, m) {
+  switch (m.type) {
+    case 'status': setCapStatus(m.text); break;
+    case 'load': {
+      const prev = job.files[m.file] || { loaded: 0, total: 0 };
+      const total = m.total || prev.total;
+      job.files[m.file] = { total, loaded: m.status === 'done' ? total : (m.loaded || prev.loaded) };
+      let loaded = 0, sum = 0;
+      for (const f of Object.values(job.files)) { loaded += f.loaded; sum += f.total; }
+      if (sum > 0) {
+        setProgress(loaded / sum, els.capProgress);
+        setCapStatus(`Loading the speech model — ${fmtBytes(loaded)} of ${fmtBytes(sum)} (downloaded once, then cached)…`);
+      }
+      break;
+    }
+    case 'language': job.language = m.language; break;
+    case 'chunk':
+      // The windows overlap, so the transcript is re-stitched from scratch
+      // each time one lands — a seam can only be placed once both sides exist.
+      job.chunkWords[m.index] = m.words;
+      job.words = mergeChunkWords(job.chunkWords, job.chunks);
+      applyCaptionWords(job);
+      setProgress((m.index + 1) / m.total, els.capProgress);
+      setCapStatus(`Transcribing${job.language ? ` (${langName(job.language)})` : ''}… part ${m.index + 1} of ${m.total}`);
+      break;
+    case 'done': job.resolve('done'); break;
+    case 'cancelled': job.resolve('cancelled'); break;
+    case 'error': job.reject(new Error(m.message)); break;
+  }
+}
+
+// Words arrive in output time (the transcribed audio is the kept sections
+// back to back); group them into cues there, then store them in source time.
+function applyCaptionWords(job) {
+  if (state !== job.st) return;
+  const toSource = (o) => fromOutputTime(o, job.segs);
+  state.captions = {
+    cues: wordsToCues(job.words).map((c) => ({ start: toSource(c.start), end: toSource(c.end), text: c.text })),
+    language: job.language, model: job.preset.key, segs: job.segs,
+  };
+  renderCaptionOverlay();
+}
+
+async function generateCaptions() {
+  if (!state || !state.isAac || capJob) return;
+  const st = state;
+  const preset = asrPreset(els.inCapModel.value);
+  const job = capJob = { id: ++capJobSeq, st, preset, segs: keptSegments(), chunks: [], chunkWords: [], words: [], files: {}, language: null, stop: false };
+  const prev = st.captions;
+  els.inCapBurn.checked = true;
+  updateCaptionUI();
+  setProgress(0, els.capProgress);
+  let outcome = 'error', errMsg = '';
+  try {
+    setCapStatus('Reading the audio…');
+    const audio = await decodeSpeechAudio(st, job.segs, (f) => setProgress(f, els.capProgress));
+    if (job.stop) { outcome = 'cancelled'; return; }
+    const chunks = planChunks(audio);
+    if (!chunks.length || chunks.every((c) => c.silent)) throw new Error('the kept audio is silent — nothing to transcribe.');
+    job.chunks = chunks;
+    setProgress(0, els.capProgress);
+    const finished = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+    captionWorker().postMessage({
+      type: 'transcribe', id: job.id, model: preset.model, dtype: preset.dtype, device: preset.device,
+      audio, chunks, language: els.inCapLang.value,
+    }, [audio.buffer]);
+    outcome = await finished;
+  } catch (err) {
+    console.error(err);
+    outcome = 'error';
+    errMsg = err.message || String(err);
+  } finally {
+    if (capJob === job) capJob = null;
+    setProgress(null, els.capProgress);
+    if (state === st) {
+      if (!job.words.length) st.captions = outcome === 'done' ? null : prev;
+      const n = st.captions ? st.captions.cues.length : 0;
+      setCapStatus(
+        outcome === 'done' ? (n
+          ? `${n} captions · ${langName(job.language)} · ${preset.label.split(' — ')[0]}. Fix any line below; they’re burned in when you compress.`
+          : 'No speech found in the kept audio.')
+        : outcome === 'cancelled' ? (job.words.length ? `Stopped — kept the ${n} captions transcribed so far.` : 'Stopped.')
+        : `Captions failed: ${errMsg}${preset.key !== 'base' ? ' A smaller model may work better on this device.' : ''}`);
+      saveCaptions();
+      renderCaptionList();
+      updateCaptionUI();
+      if (currentStep === 'export') updateExportSummary();
+    }
+  }
+}
+
+function stopCaptions() {
+  if (!capJob) return;
+  capJob.stop = true;
+  if (capWorker) capWorker.postMessage({ type: 'cancel' });
+  setCapStatus('Stopping…');
+}
+
+// A new file replaces the one being captioned: drop the job outright.
+function abortCaptions() {
+  if (!capJob) return;
+  capJob.stop = true;
+  if (capWorker) capWorker.postMessage({ type: 'cancel' });
+  if (capJob.resolve) capJob.resolve('cancelled');
+}
+
+function clearCaptions() {
+  if (!state || capJob) return;
+  state.captions = null;
+  saveCaptions();
+  renderCaptionList();
+  setCapStatus('');
+  updateCaptionUI();
+  if (currentStep === 'export') updateExportSummary();
+}
+
+// Editable list of cues (output timecodes; cues in removed sections dimmed).
+function renderCaptionList() {
+  const list = els.capList;
+  list.innerHTML = '';
+  const caps = state && state.captions;
+  if (!caps || !caps.cues.length || capJob) { list.hidden = true; return; }
+  const frag = document.createDocumentFragment();
+  for (const c of caps.cues) {
+    const os = toOutputTime(c.start), oe = toOutputTime(c.end);
+    const kept = oe - os > 0.05;
+    const row = document.createElement('div');
+    row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${kept ? '' : 'opacity:.4'}`;
+    const time = document.createElement('button');
+    time.type = 'button';
+    time.textContent = kept ? fmtTime(os) : 'cut';
+    time.title = 'Jump to this caption';
+    time.style.cssText = 'background:none;border:0;color:inherit;cursor:pointer;font:inherit;font-variant-numeric:tabular-nums;min-width:5.2em;text-align:left;padding:0';
+    time.onclick = () => { els.preview.pause(); seek(c.start + 0.01); };
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = c.text;
+    input.style.cssText = 'flex:1;min-width:0';
+    input.oninput = () => { c.text = input.value; renderCaptionOverlay(); queueSaveCaptions(); };
+    row.append(time, input);
+    frag.appendChild(row);
+  }
+  list.appendChild(frag);
+  list.hidden = false;
+}
+
+// Paint the current cue over the preview <video>, into the rectangle the
+// picture actually occupies (object-fit: contain) — same drawCaption() and
+// same proportions as the burned-in frames.
+function renderCaptionOverlay() {
+  const cv = els.capOverlay, v = els.preview;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cw = cv.clientWidth, ch = cv.clientHeight;
+  const W = Math.round(cw * dpr), H = Math.round(ch * dpr);
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const g = cv.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, W, H);
+  if (!captionsBurnOn() || !v.videoWidth || !cw || !ch) return;
+  const cue = cueAt(state.captions.cues, v.currentTime || 0);
+  if (!cue) return;
+  const k = Math.min(cw / v.videoWidth, ch / v.videoHeight);
+  const w = v.videoWidth * k, h = v.videoHeight * k;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawCaption(g, cue.text, (cw - w) / 2, (ch - h) / 2, w, h, captionStyle());
+}
+
+function captionOverlayLoop() {
+  cancelAnimationFrame(capRaf);
+  const tick = () => { renderCaptionOverlay(); if (!els.preview.paused) capRaf = requestAnimationFrame(tick); };
+  tick();
+}
+
+// Cues for the encode, in output time — [] unless burn-in is on.
+function exportCaptionCues() {
+  if (!captionsBurnOn()) return [];
+  const out = [];
+  for (const c of state.captions.cues) {
+    const start = toOutputTime(c.start), end = toOutputTime(c.end);
+    const text = c.text.trim();
+    if (end - start > 0.05 && text) out.push({ start, end, text });
+  }
+  return out;
+}
+
+// Captions are expensive to make, so they're kept (per file, like the trim)
+// and restored when the same file is loaded again.
+function saveCaptions() {
+  if (!state) return;
+  try {
+    if (state.captions && state.captions.cues.length) {
+      const f = state.file;
+      localStorage.setItem(LS_CAP_KEY, JSON.stringify({ v: 1, file: { name: f.name, size: f.size, lastModified: f.lastModified }, ...state.captions }));
+    } else {
+      localStorage.removeItem(LS_CAP_KEY);
+    }
+  } catch (_) {}
+}
+function queueSaveCaptions() {
+  if (capSaveTimer) clearTimeout(capSaveTimer);
+  capSaveTimer = setTimeout(saveCaptions, 400);
+}
+function restoreCaptions(file) {
+  try {
+    const d = JSON.parse(localStorage.getItem(LS_CAP_KEY) || 'null');
+    if (!d || !d.file || d.file.name !== file.name || d.file.size !== file.size || d.file.lastModified !== file.lastModified) return null;
+    const cues = (d.cues || []).filter((c) => c && isFinite(c.start) && isFinite(c.end) && typeof c.text === 'string');
+    return cues.length ? { cues, language: d.language || null, model: d.model || null, segs: Array.isArray(d.segs) ? d.segs : null } : null;
+  } catch (_) { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1552,11 @@ async function compress() {
     // ---- Decode → (trim window) → scale → encode ----
     const gop = Math.max(1, Math.round(s.outFps * 2));
     const needScale = s.outW !== video.track_width || s.outH !== video.track_height;
+    // Burned-in captions are drawn onto the canvas, so they route every frame
+    // through it even at the original size.
+    const capCues = exportCaptionCues();
+    const capStyle = captionStyle();
+    const needCanvas = needScale || capCues.length > 0;
     const canvas = new OffscreenCanvas(s.outW, s.outH);
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
 
@@ -1163,15 +1589,17 @@ async function compress() {
 
         const outTs = toOutputUS(t);                                // compact past trim + cuts
         let out;
-        if (needScale) {
+        if (needCanvas) {
           ctx.drawImage(frame, 0, 0, s.outW, s.outH);
+          const cue = capCues.length ? cueAt(capCues, outTs / 1e6) : null;
+          if (cue) drawCaption(ctx, cue.text, 0, 0, s.outW, s.outH, capStyle);
           out = new VideoFrame(canvas, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
         } else {
           out = new VideoFrame(frame, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
         }
         encoder.encode(out, { keyFrame: emitted % gop === 0 });
         // Draw the frame we just encoded so the user watches it play out.
-        try { ecx.drawImage(needScale ? canvas : out, 0, 0, ecW, ecH); } catch (_) {}
+        try { ecx.drawImage(needCanvas ? canvas : out, 0, 0, ecW, ecH); } catch (_) {}
         out.close();
         emitted++;
         if (emitted % 5 === 0) {
@@ -1321,7 +1749,7 @@ async function compress() {
     setStatus('Finalizing…');
     muxer.finalize();
     const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
-    showResult(blob, s, audioNote);
+    showResult(blob, s, audioNote + (capCues.length ? ' · captions burned in' : ''));
     setProgress(1);
     setStatus('');
   } catch (err) {
@@ -1396,11 +1824,17 @@ function initUI() {
     updateEstimate();
   }));
 
-  [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain]
+  [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain,
+    els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapBurn]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
   document.querySelectorAll('input[name="volume"]').forEach((r) => r.addEventListener('change', updateEstimate));
 
-  window.addEventListener('resize', () => { if (state && currentStep === 'trim') renderTrim(); });
+  window.addEventListener('resize', () => { if (state && currentStep === 'trim') renderTrim(); renderCaptionOverlay(); });
+
+  els.inCapModel.addEventListener('change', () => { els.inCapModel.dataset.chosen = els.inCapModel.value; });
+  els.btnCapGen.addEventListener('click', generateCaptions);
+  els.btnCapCancel.addEventListener('click', stopCaptions);
+  els.btnCapClear.addEventListener('click', clearCaptions);
 
   // Step navigation
   document.querySelectorAll('.stepbtn').forEach((b) => b.addEventListener('click', () => {
@@ -1438,7 +1872,12 @@ async function handleFile(f) {
     els.paneSource.hidden = true;
     return;
   }
+  // Wire everything up straight away — a video dropped in the first moments
+  // must not be missed — then refresh the caption models (their default and
+  // download sizes depend on the GPU) once the WebGPU probe answers.
+  populateCaptionModels();
   initUI();
+  detectAsrDevice().then(populateCaptionModels);
   showStep('source');
   const saved = readSettings();
   if (saved && saved.file && saved.file.name) {

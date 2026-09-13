@@ -99,8 +99,13 @@
       <div id="host-trim">
       <div id="preview-block">
       <p class="small muted" id="preview-caption" style="margin:0 0 8px" hidden></p>
-      <video id="preview" playsinline preload="auto"
-             style="display:block;width:100%;height:auto;max-height:52vh;object-fit:contain;background:#000;border-radius:var(--radius)"></video>
+      <div style="position:relative">
+        <video id="preview" playsinline preload="auto"
+               style="display:block;width:100%;height:auto;max-height:52vh;object-fit:contain;background:#000;border-radius:var(--radius)"></video>
+        <!-- Live captions, drawn exactly as they'll be burned in -->
+        <canvas id="cap-overlay" aria-hidden="true"
+                style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+      </div>
 
       <div class="transport">
         <button class="tbtn" data-act="toIn" title="Jump to start of selection (Home)" aria-label="Jump to selection start">
@@ -266,6 +271,84 @@
         <p class="small muted" id="hint-volume" style="margin:8px 0 0"></p>
       </div>
 
+      <div class="field-group" id="captions-group" style="margin-top:14px">
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Captions</label>
+        <p class="small muted" style="margin:6px 0 0">
+          Transcribe the speech with an open-weights
+          <a href="https://github.com/openai/whisper" target="_blank" rel="noopener">Whisper</a>
+          model running on your own device, and burn the captions into the video.
+          The model downloads once from Hugging Face, then stays cached; your
+          audio never leaves this page.
+        </p>
+        <div class="controls" style="margin-top:10px">
+          <div class="field">
+            <label for="in-cap-model">Speech model</label>
+            <select id="in-cap-model"></select>
+            <span class="hint" id="hint-cap-model"></span>
+          </div>
+          <div class="field">
+            <label for="in-cap-lang">Language</label>
+            <select id="in-cap-lang">
+              <option value="auto" selected>Detect automatically</option>
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="pt">Portuguese</option>
+              <option value="nl">Dutch</option>
+              <option value="sv">Swedish</option>
+              <option value="da">Danish</option>
+              <option value="no">Norwegian</option>
+              <option value="fi">Finnish</option>
+              <option value="pl">Polish</option>
+              <option value="cs">Czech</option>
+              <option value="el">Greek</option>
+              <option value="ru">Russian</option>
+              <option value="uk">Ukrainian</option>
+              <option value="tr">Turkish</option>
+              <option value="ar">Arabic</option>
+              <option value="he">Hebrew</option>
+              <option value="hi">Hindi</option>
+              <option value="zh">Chinese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="vi">Vietnamese</option>
+              <option value="id">Indonesian</option>
+              <option value="th">Thai</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="in-cap-size">Caption size</label>
+            <select id="in-cap-size">
+              <option value="small">Small</option>
+              <option value="medium" selected>Medium</option>
+              <option value="large">Large</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="in-cap-pos">Position</label>
+            <select id="in-cap-pos">
+              <option value="bottom" selected>Bottom</option>
+              <option value="top">Top</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px;align-items:center">
+          <button class="btn" id="btn-cap-gen" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Generate captions</button>
+          <button class="btn" id="btn-cap-cancel" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--danger)">Stop</button>
+          <button class="btn" id="btn-cap-clear" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Remove captions</button>
+          <label class="checkbox" style="margin-left:auto">
+            <input type="checkbox" id="in-cap-burn" disabled> Burn captions into the video
+          </label>
+        </div>
+        <div class="progress" id="cap-progress"><div></div></div>
+        <p class="small muted" id="cap-status" style="margin:8px 0 0"></p>
+        <p class="small" id="cap-note" hidden style="margin:6px 0 0;color:var(--danger)"></p>
+        <div id="cap-list" hidden
+             style="max-height:260px;overflow:auto;margin-top:10px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)"></div>
+      </div>
+
       <div class="row" style="margin-top:16px">
         <span class="status" id="est" style="margin-top:0"></span>
       </div>
@@ -349,6 +432,19 @@
         no automatic backing-off, through a limiter so it can't clip. The
         Trim/Settings/Export preview plays the same boost live so you can
         listen before exporting.
+      </p>
+      <p>
+        <strong>Captions</strong> are made on your device by OpenAI's
+        open-weights <a href="https://github.com/openai/whisper" target="_blank" rel="noopener">Whisper</a>
+        speech model (MIT), run with
+        <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">transformers.js</a>
+        (Apache-2.0) on your GPU through WebGPU, or on the CPU without it. The
+        model's weights (and the ONNX Runtime engine) are downloaded from
+        Hugging Face and jsDelivr the first time you generate captions and
+        cached by your browser after that &mdash; only the model comes
+        <em>in</em>; your audio is transcribed locally and never sent anywhere.
+        The captions are drawn onto the video frames (&ldquo;burned in&rdquo;),
+        so they show in every player and on every site.
       </p>
     </details>
 

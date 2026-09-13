@@ -67,6 +67,55 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   available, boost is disabled and audio still passes through unchanged.
   The Trim/Settings/Export preview applies the same gain live (Web Audio
   `GainNode` + `DynamicsCompressorNode`) so you can listen before exporting.
+- **Auto-captions** (optional) — transcribes the speech with OpenAI's
+  open-weights **Whisper** model, run by
+  [transformers.js](https://github.com/huggingface/transformers.js) in a Web
+  Worker (`captions-worker.js`) on the GPU via **WebGPU** (CPU/WASM fallback),
+  and **burns** the captions into the frames before they're encoded:
+
+  ```
+  AudioDecoder ─► 16 kHz mono (kept sections only) ─► ≤30 s chunks ─► Whisper (word timestamps) ─► cues ─► drawn on the encode canvas
+  ```
+
+  - **Models** (all `onnx-community/*_timestamped` exports, which carry the
+    cross-attention outputs word timestamps need):
+    large-v3-turbo (default with WebGPU; fp16 encoder + q4 decoder ≈ 1.6 GB),
+    small (≈ 590 MB), base (≈ 210 MB; default without WebGPU). Weights
+    download from the Hugging Face Hub the first time and are cached by the
+    browser (Cache Storage). ONNX Runtime's WASM comes from jsDelivr (pinned
+    by transformers.js) — so captions, unlike the rest of the tool, need the
+    network the first time. The audio itself never leaves the page.
+  - **Audio** — only the kept sections (trim minus cuts) are decoded,
+    resampled to 16 kHz mono and joined back to back, i.e. exactly the
+    output's audio. Near-silent windows are skipped (Whisper hallucinates
+    "Thank you." in silence).
+  - **Overlapping windows** — Whisper hears at most 30 s, so the audio goes in
+    as 29 s windows that **overlap by 5 s** (~21 % more compute). Nothing is
+    then heard only at a window edge, where the model is weakest and would
+    start a fresh sentence mid-phrase. `mergeChunkWords()` throws the doubled
+    seconds away again: each seam gets one junction time — just after the last
+    **sentence ending** in the overlap, else the middle of the longest pause,
+    else the middle — and every word lands on exactly one side of it (by its
+    own midpoint), so nothing is duplicated or dropped, not even a word
+    straddling the seam.
+  - **Language** — detected automatically (transformers.js doesn't do this for
+    Whisper yet, so the worker runs one decoder step after
+    `<|startoftranscript|>` and takes the most likely language token), or
+    chosen from a list.
+  - **Cues** — words are grouped into short phrases (≈ 2 lines, ≤ 6 s, split at
+    pauses and sentence ends) and stored in *source* time, so trimming or
+    cutting afterwards just hides the cues that fall in removed sections.
+    Each cue is editable in a list; cues are saved per file (like the trim)
+    and restored when the same file is loaded again.
+  - **Burn-in** — `drawCaption()` (white text on a translucent box, sized
+    relative to the picture's shorter side) paints the current cue onto the
+    `OffscreenCanvas` each frame is scaled on. The preview draws the same
+    function onto a canvas over the `<video>`, so what you see is what gets
+    encoded. Burning in forces every frame through the canvas even at 100 %
+    scale.
+  - Captions need an AAC audio track (the same decode path as the volume
+    boost). A soft, switchable subtitle track isn't offered: mp4-muxer can't
+    write text tracks.
 
 ## Large files (multi-GB)
 
@@ -93,25 +142,43 @@ reached, so trims near the start of a long video finish quickly.
 | `index.html` | The page. No Jekyll front matter, so the JS is served verbatim. Loads MP4Box as a global `<script>`, then the module. |
 | `compressor.js` | ES module: streaming demux, preview/trim, transcode, mux, and all UI wiring. |
 | `audio-boost.js` | ES module: the voice-band loudness analysis, auto-gain, and soft-limiter math. Pure functions on `Float32Array`s — no DOM/WebCodecs — so it's usable standalone (e.g. under Node, fed raw PCM from `ffmpeg`) to sanity-check the algorithm outside the browser. |
+| `captions.js` | ES module: the pure caption helpers — 16 kHz resampler, chunk planning, words → cues, `cueAt`, and `drawCaption` (used by both the preview overlay and the encoder). No DOM/model, so it runs under Node too. |
+| `captions-worker.js` | Module Web Worker: loads Whisper through transformers.js, detects the language, transcribes chunk by chunk and posts words (with timestamps) back as it goes. Jobs are id-tagged and serialized so a cancelled one can't interleave with a new one. |
+| `REQUIREMENTS.md` | Living spec / design notes — update with every change. |
 | `vendor/mp4box/` | Vendored MP4Box.js UMD bundle + license. |
 | `vendor/mp4-muxer/` | Vendored mp4-muxer ESM bundle (`.mjs` renamed to `.js` so GitHub Pages serves it with a JS MIME type) + license. |
-| `vendor/update-vendor.sh` | Re-vendors both deps from npm (see below). |
+| `vendor/transformers/` | Vendored transformers.js self-contained ESM bundle (`transformers.min.js`, ONNX Runtime's JS inside; no bare imports) + license. |
+| `vendor/update-vendor.sh` | Re-vendors all three deps from npm (see below). |
 
 ## Vendoring
 
 Dependencies are **vendored**, not fetched at runtime, so the tool works
-offline and never depends on a CDN. Pinned versions:
+offline and never depends on a CDN. (The one exception is auto-captions: the
+Whisper weights and ONNX Runtime's ~25 MB WASM are far too big to vendor, so
+they're fetched — and then browser-cached — only when someone asks for
+captions.) Pinned versions:
 
 - `mp4box` **0.5.2**
 - `mp4-muxer` **5.1.5**
+- `@huggingface/transformers` **4.2.0**
 
 To update:
 
 ```bash
 cd tools/videocompressor/vendor
-./update-vendor.sh                 # pinned versions
-./update-vendor.sh 0.5.2 5.1.5     # or specify mp4box + mp4-muxer versions
+./update-vendor.sh                       # pinned versions
+./update-vendor.sh 0.5.2 5.1.5 4.2.0     # or specify mp4box + mp4-muxer + transformers versions
 ```
+
+**One patch is applied to the transformers bundle.** GitHub's secret-scanning
+push protection rejects any push containing a standalone 32-character hex
+token — the shape of a Mistral API key — and the bundle has one in an error
+message pointing at a gist (`gist.github.com/hollance/<32 hex>`, about
+Whisper's `alignment_heads`). It's a false positive, but it blocks the push,
+so `update-vendor.sh` splits every such token across a string concatenation
+(`"…42e32852f24243b7"+"48ae6bc1f985b13a…"`): byte-different from upstream,
+identical at runtime. The script then re-parses the bundle and fails if the
+patch landed anywhere but inside a string.
 
 Then bump the versions above, re-test, and commit the changed `vendor/` files.
 
@@ -122,6 +189,12 @@ WebCodecs is required. As of writing that means a recent **Chrome/Edge** or
 depends on the OS/GPU — the tool probes `VideoEncoder.isConfigSupported()` and
 falls back or reports a clear error if a codec isn't available. If WebCodecs is
 missing entirely, the page shows a compatibility notice instead of the tool.
+
+Auto-captions use **WebGPU** when the browser exposes it (Chrome/Edge, recent
+Safari); the large-v3-turbo preset's fp16 encoder also needs the
+`shader-f16` feature, and falls back to a q4 encoder without it. With no
+WebGPU at all, Whisper runs on the CPU (WASM) — it works, but slowly, so the
+base model is the default there.
 
 ## Notes / limitations
 
