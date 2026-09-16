@@ -26,6 +26,7 @@
 import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
 import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from './audio-boost.js';
 import { cueAt, drawCaption } from './captions.js';
+import { createTimeStretcher } from './speed.js';
 import { createCaptions } from './captions-ui.js';
 
 const MP4Box = window.MP4Box;
@@ -53,6 +54,7 @@ const els = {
   btnSetIn: $('btn-set-in'), btnSetOut: $('btn-set-out'), btnResetTrim: $('btn-reset-trim'),
   trimInfo: $('trim-info'),
   btnCutStart: $('btn-cut-start'), btnCutEnd: $('btn-cut-end'), btnClearCuts: $('btn-clear-cuts'),
+  btnSpeedVoice: $('btn-speed-voice'), btnSpeedSilent: $('btn-speed-silent'), inSpeedRate: $('in-speed-rate'),
   cutInfo: $('cut-info'),
   // settings
   fieldSize: $('field-size'), fieldBitrate: $('field-bitrate'),
@@ -142,7 +144,11 @@ function updatePreviewGain() {
     const auto = currentVolumeMode() === 'auto';
     els.audioLiveNote.textContent = db > 0.05 ? `🔊 live preview: ${auto ? 'up to ' : ''}+${db.toFixed(1)} dB` : '';
   }
-  if (previewGainNode) previewGainNode.gain.value = dbToLinear(db);
+  if (previewGainNode) {
+    const s = state ? spanAt(els.preview.currentTime || 0) : null;
+    const silent = !!s && s.rate !== 1 && s.audio !== 'keep';
+    previewGainNode.gain.value = silent ? 0 : dbToLinear(db);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +205,7 @@ function relocatePreview(name) {
   els.previewCaption.hidden = editing;
   if (!editing && state) {
     els.previewCaption.textContent =
-      `Final preview — trimmed${activeCuts().length ? `, ${activeCuts().length} cut${activeCuts().length > 1 ? 's' : ''} removed` : ''} · ${fmtTime(keptDuration())}`;
+      `Final preview — trimmed${editNote()} · ${fmtTime(keptDuration())}`;
     // Snap playback into the kept range.
     if ((els.preview.currentTime || 0) < state.inS || els.preview.currentTime >= state.outS || inCut(els.preview.currentTime)) {
       seek(state.inS);
@@ -215,7 +221,7 @@ function showStep(name) {
   if (name === 'export' && running) { els.encodeView.hidden = false; els.previewBlock.style.display = 'none'; }
   else { els.encodeView.hidden = true; els.previewBlock.style.display = ''; if (state) relocatePreview(name); }
   if (state && name !== 'source') { renderTrim(); renderPlayhead(); captions.renderOverlay(); }
-  if (state && name === 'settings') captions.renderList();
+  if (state && name === 'trim') captions.renderList();
   if (state && name === 'export') updateExportSummary();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -259,7 +265,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const captions = createCaptions({
   els,
   getState: () => state,
-  timeline: { keptSegments, toOutputTime, fromOutputTime, seek },
+  timeline: { keptSegments, fullSegments, toOutputTime, fromOutputTime, seek },
+  // The transcript is an editing surface: each line can be cut or sped up.
+  edits: {
+    apply: (start, end, rate, audio) => applyEdit(start, end, rate, audio),
+    at: (t) => activeEdits().find((e) => t >= e.start - 1e-3 && t < e.end - 1e-3) || null,
+    rate: () => currentSpeedRate(),
+    label: (e) => editLabel(e),
+  },
   audio: {
     decodeAudioTrack, mixToMono, concatFloat32,
     // Captions transcribe the boosted signal, so they need what Volume is set to.
@@ -294,7 +307,7 @@ function saveSettings() {
       ...captions.settings(),
     },
     file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
-    trim: { inS: state.inS, outS: state.outS, cuts: state.cuts },
+    trim: { inS: state.inS, outS: state.outS, edits: state.edits },
   };
   try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (_) {}
 }
@@ -477,7 +490,7 @@ async function loadFile(file) {
 
   state = {
     file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
-    inS: 0, outS: durationS, cuts: [], pendingCutStart: null,
+    inS: 0, outS: durationS, edits: [], pendingMarkStart: null,
     audioAnalysis: null, audioEncoderSupported: false,
     isAac: false, captions: captions.restore(file),
   };
@@ -544,10 +557,14 @@ async function loadFile(file) {
     if (sameFile && saved.trim) {
       state.inS = clamp(saved.trim.inS ?? 0, 0, durationS);
       state.outS = clamp(saved.trim.outS ?? durationS, state.inS + 0.01, durationS);
-      state.cuts = Array.isArray(saved.trim.cuts)
-        ? saved.trim.cuts.filter((c) => c && isFinite(c.start) && isFinite(c.end))
+      // `cuts` is what older versions saved: plain removed ranges, i.e. rate 0.
+      const savedEdits = Array.isArray(saved.trim.edits) ? saved.trim.edits
+        : Array.isArray(saved.trim.cuts) ? saved.trim.cuts.map((c) => ({ ...c, rate: 0 }))
         : [];
-      restoredNote = '  ·  restored your last trim, cuts & settings';
+      state.edits = savedEdits
+        .filter((e) => e && isFinite(e.start) && isFinite(e.end) && isFinite(e.rate))
+        .map((e) => ({ start: e.start, end: e.end, rate: e.rate, audio: e.audio === 'keep' ? 'keep' : 'mute' }));
+      restoredNote = '  ·  restored your last trim, edits & settings';
     } else if (saved.general) {
       restoredNote = '  ·  applied your last settings';
     }
@@ -572,92 +589,208 @@ function trackWidth() { return els.tlTrack.clientWidth || 1; }
 function timeToX(t) { return (t / state.durationS) * trackWidth(); }
 function xToTime(x) { return clamp((x / trackWidth()) * state.durationS, 0, state.durationS); }
 
-// Cuts that fall inside the current [inS, outS] window, clipped to it, sorted.
-function activeCuts() {
+// ---------------------------------------------------------------------------
+// The edit model
+//
+// One list describes everything done to the source timeline: `state.edits` is a
+// sorted, non-overlapping set of { start, end, rate, audio } spans.
+//
+//   rate 0   — removed. The clip stitches back together across it.
+//   rate > 1 — played faster. `audio` decides whether the section keeps its
+//              narration (time-stretched, pitch preserved) or runs silent.
+//
+// Anything not covered plays at rate 1 with its own audio. A cut is just the
+// limit case of speeding a section up, which is what lets one set of transcript
+// buttons drive both.
+// ---------------------------------------------------------------------------
+
+// Edits clipped to the current [inS, outS] window, sorted.
+function activeEdits() {
   const out = [];
-  for (const c of state.cuts) {
-    const a = clamp(c.start, state.inS, state.outS);
-    const b = clamp(c.end, state.inS, state.outS);
-    if (b - a > 1e-3) out.push({ start: a, end: b });
+  for (const e of state.edits) {
+    const a = clamp(e.start, state.inS, state.outS);
+    const b = clamp(e.end, state.inS, state.outS);
+    if (b - a > 1e-3) out.push({ start: a, end: b, rate: e.rate, audio: e.audio || 'mute' });
   }
   return out.sort((x, y) => x.start - y.start);
 }
 
-// Total kept seconds = selection minus the cut sections inside it.
-function keptDuration() {
-  let cut = 0;
-  for (const c of activeCuts()) cut += c.end - c.start;
-  return Math.max(0.05, (state.outS - state.inS) - cut);
+// The kept timeline as spans, in order, each carrying where it lands in the
+// output. Removed sections never appear here: they're gone.
+function editSpans() {
+  const spans = [];
+  let cur = state.inS, o = 0;
+  const push = (start, end, rate, audio) => {
+    if (!(rate > 0) || end - start <= 1e-3) return;
+    const dur = (end - start) / rate;
+    spans.push({ start, end, rate, audio, outStart: o, outEnd: o + dur });
+    o += dur;
+  };
+  for (const e of activeEdits()) {
+    if (e.start > cur) push(cur, e.start, 1, 'keep');
+    push(Math.max(cur, e.start), e.end, e.rate, e.audio);
+    cur = Math.max(cur, e.end);
+  }
+  if (cur < state.outS) push(cur, state.outS, 1, 'keep');
+  return spans;
 }
 
-// The kept ranges: [inS, outS] with every cut removed, in order.
+// The span a source time falls in — null in a removed section or outside the
+// selection. Playback rate, muting and the export all hang off this.
+function spanAt(t, spans = editSpans()) {
+  for (const s of spans) if (t >= s.start && t < s.end) return s;
+  return null;
+}
+
+// Total output seconds: every span's duration divided by its rate.
+function keptDuration() {
+  const spans = editSpans();
+  return Math.max(0.05, spans.length ? spans[spans.length - 1].outEnd : 0);
+}
+
+// The kept *source* ranges, speed ignored and touching spans merged — i.e. what
+// survives to the output, which is what captions transcribe.
 function keptSegments() {
   const segs = [];
-  let cur = state.inS;
-  for (const c of activeCuts()) {
-    if (c.start > cur) segs.push({ start: cur, end: c.start });
-    cur = Math.max(cur, c.end);
+  for (const s of editSpans()) {
+    const last = segs[segs.length - 1];
+    if (last && s.start - last.end < 1e-3) last.end = s.end;
+    else segs.push({ start: s.start, end: s.end });
   }
-  if (cur < state.outS) segs.push({ start: cur, end: state.outS });
   return segs;
 }
 
-// Source time -> compressed (output) time, and back. These power the compressed
-// timeline shown in Settings/Export, where trim + cuts are already removed.
+// The whole file as one segment: what the transcript is generated over, so the
+// trim can be decided *after* reading it.
+function fullSegments() {
+  return [{ start: 0, end: state.durationS }];
+}
+
+// Source time -> output time and back, honouring each span's rate. These power
+// the compressed timeline in Settings/Export and every caption timestamp.
 function toOutputTime(t) {
+  const spans = editSpans();
   let o = 0;
-  for (const s of keptSegments()) {
-    if (t >= s.end) o += s.end - s.start;
-    else if (t > s.start) return o + (t - s.start);
-    else return o;
+  for (const s of spans) {
+    if (t >= s.end) o = s.outEnd;
+    else if (t > s.start) return s.outStart + (t - s.start) / s.rate;
+    else return s.outStart;
   }
   return o;
 }
-function fromOutputTime(o, segs = keptSegments()) {
+// `spans` may be plain { start, end } ranges (a caption job's segments), which
+// are read as rate 1.
+function fromOutputTime(o, spans = editSpans()) {
   let acc = 0;
-  for (const s of segs) {
-    const d = s.end - s.start;
-    if (o <= acc + d) return s.start + (o - acc);
+  for (const s of spans) {
+    const rate = s.rate || 1;
+    const d = (s.end - s.start) / rate;
+    if (o <= acc + d) return s.start + (o - acc) * rate;
     acc += d;
   }
-  return segs.length ? segs[segs.length - 1].end : state.inS;
+  return spans.length ? spans[spans.length - 1].end : state.inS;
 }
 
-// Whether a source time (seconds) lands inside a removed section.
+// Whether a source time lands inside a removed section.
 function inCut(t) {
-  for (const c of activeCuts()) if (t >= c.start && t < c.end) return true;
+  for (const e of activeEdits()) if (!(e.rate > 0) && t >= e.start && t < e.end) return true;
   return false;
 }
 
-function removeCut(i) { state.cuts.splice(i, 1); renderTrim(); }
-
-// Merge overlapping / touching cut sections so they stay a clean, sorted set.
-function mergeCuts() {
-  state.cuts.sort((a, b) => a.start - b.start);
-  const merged = [];
-  for (const c of state.cuts) {
-    const last = merged[merged.length - 1];
-    if (last && c.start <= last.end + 1e-3) last.end = Math.max(last.end, c.end);
-    else merged.push({ ...c });
+// Lay an edit over a source range, replacing whatever was there. `rate === 1`
+// clears the range back to normal speed, which is how "restore" works.
+function applyEdit(start, end, rate, audio = 'mute') {
+  if (!state || end - start <= 1e-3) return;
+  const kept = [];
+  for (const e of state.edits) {
+    if (e.end <= start + 1e-3 || e.start >= end - 1e-3) { kept.push(e); continue; }
+    if (e.start < start) kept.push({ ...e, end: start });
+    if (e.end > end) kept.push({ ...e, start: end });
   }
-  state.cuts = merged;
+  if (rate !== 1) kept.push({ start, end, rate, audio });
+  state.edits = kept.sort((a, b) => a.start - b.start);
+  mergeEdits();
+  renderTrim();
+  captions.renderList();
+  captions.renderOverlay();
+  queueSave();
 }
 
-function renderCuts() {
+// Merge touching edits that say the same thing, so the set stays clean.
+function mergeEdits() {
+  state.edits.sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const e of state.edits) {
+    const last = merged[merged.length - 1];
+    if (last && e.start <= last.end + 1e-3 && last.rate === e.rate && last.audio === e.audio) {
+      last.end = Math.max(last.end, e.end);
+    } else {
+      merged.push({ ...e });
+    }
+  }
+  state.edits = merged.filter((e) => e.end - e.start > 1e-3);
+}
+
+// The speed the two "speed up" buttons apply.
+function currentSpeedRate() {
+  const r = parseFloat(els.inSpeedRate && els.inSpeedRate.value);
+  return isFinite(r) && r > 1 ? r : 4;
+}
+
+// "…, 2 cuts removed, 1 sped up" for the final-preview caption.
+function editNote() {
+  const edits = activeEdits();
+  const cuts = edits.filter((e) => !(e.rate > 0)).length;
+  const fast = edits.length - cuts;
+  let note = '';
+  if (cuts) note += `, ${cuts} cut${cuts > 1 ? 's' : ''} removed`;
+  if (fast) note += `, ${fast} section${fast > 1 ? 's' : ''} sped up`;
+  return note;
+}
+
+// Follow the span under the playhead: faster sections play faster, and a silent
+// one is muted. Pitch is preserved, matching what the export's time-stretch
+// does, so the preview sounds like the file you'll get.
+function applySpanPlayback() {
+  const v = els.preview;
+  if (!state || !v) return;
+  const s = spanAt(v.currentTime || 0);
+  const rate = s ? s.rate : 1;
+  if (Math.abs(v.playbackRate - rate) > 1e-3) v.playbackRate = rate;
+  if (v.preservesPitch === false) v.preservesPitch = true;
+  const silent = !!s && s.rate !== 1 && s.audio !== 'keep';
+  if (v.muted !== silent) v.muted = silent;
+  if (previewGainNode) previewGainNode.gain.value = silent ? 0 : dbToLinear(currentAudioGainDb());
+}
+
+// How an edit reads in the UI, everywhere.
+function editLabel(e) {
+  if (!(e.rate > 0)) return 'cut';
+  return `${e.rate}×${e.audio === 'keep' ? '' : ' silent'}`;
+}
+
+function renderEdits() {
   els.cutsLayer.innerHTML = '';
-  activeCuts().forEach((c, i) => {
+  activeEdits().forEach((e) => {
+    const cut = !(e.rate > 0);
     const el = document.createElement('div');
+    const left = timeToX(e.start), width = Math.max(2, timeToX(e.end) - timeToX(e.start));
     el.style.cssText =
-      `position:absolute;top:0;bottom:0;left:${timeToX(c.start)}px;width:${timeToX(c.end) - timeToX(c.start)}px;` +
-      'background:rgba(231,76,60,.55);border-left:1px solid #e74c3c;border-right:1px solid #e74c3c;cursor:pointer';
-    el.title = 'Click to undo this cut';
-    el.onclick = (e) => { e.stopPropagation(); removeCut(i); };
+      `position:absolute;top:0;bottom:0;left:${left}px;width:${width}px;cursor:pointer;` +
+      `display:flex;align-items:center;justify-content:center;overflow:hidden;` +
+      `font-size:.7rem;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6);` +
+      (cut
+        ? 'background:rgba(231,76,60,.55);border-left:1px solid #e74c3c;border-right:1px solid #e74c3c'
+        : 'background:rgba(52,120,246,.45);border-left:1px solid #3478f6;border-right:1px solid #3478f6');
+    if (width > 26) el.textContent = editLabel(e);
+    el.title = `${cut ? 'Removed section' : `Sped up ${editLabel(e)}`} — click to restore`;
+    el.onclick = (ev) => { ev.stopPropagation(); applyEdit(e.start, e.end, 1); };
     els.cutsLayer.appendChild(el);
   });
 }
 
 function renderPending() {
-  const p = state.pendingCutStart;
+  const p = state.pendingMarkStart;
   if (p == null) { els.tlPending.style.display = 'none'; return; }
   const t = els.preview.currentTime || 0;
   const a = Math.min(p, t), b = Math.max(p, t);
@@ -688,23 +821,30 @@ function renderTrim() {
   els.keepRegion.style.width = `${Math.max(0, outX - inX)}px`;
   els.dimHead.style.width = `${inX}px`;
   els.dimTail.style.width = `${trackWidth() - outX}px`;
-  renderCuts();
+  renderEdits();
   renderPending();
 
   const kept = keptDuration();
-  const cuts = activeCuts();
-  els.trimInfo.textContent = `Keep ${fmtTime(state.inS)} → ${fmtTime(state.outS)}  (${fmtTime(kept)} kept)`;
-  els.cutInfo.textContent = state.pendingCutStart != null
-    ? 'Cut start marked — scrub, then “Remove section”'
-    : cuts.length ? `${cuts.length} cut${cuts.length > 1 ? 's' : ''} removed`
-    : 'No cuts';
-  els.btnCutEnd.style.outline = state.pendingCutStart != null ? '2px solid var(--good)' : 'none';
+  const edits = activeEdits();
+  const cuts = edits.filter((e) => !(e.rate > 0)).length;
+  const fast = edits.length - cuts;
+  els.trimInfo.textContent = `Keep ${fmtTime(state.inS)} → ${fmtTime(state.outS)}  (${fmtTime(kept)} out)`;
+  const parts = [];
+  if (cuts) parts.push(`${cuts} cut${cuts > 1 ? 's' : ''}`);
+  if (fast) parts.push(`${fast} sped up`);
+  els.cutInfo.textContent = state.pendingMarkStart != null
+    ? 'Start marked — scrub to the end, then pick an action'
+    : parts.length ? parts.join(' · ') : 'No cuts or speed-ups';
+  const marked = state.pendingMarkStart != null;
+  for (const b of [els.btnCutEnd, els.btnSpeedVoice, els.btnSpeedSilent]) {
+    if (b) b.style.outline = marked ? '2px solid var(--good)' : 'none';
+  }
   updateEstimate();
 }
 
 function renderPlayhead() {
   paintPlayhead(els.preview.currentTime || 0);
-  if (state.pendingCutStart != null) renderPending();
+  if (state.pendingMarkStart != null) renderPending();
 }
 
 function renderPlayButton() {
@@ -751,10 +891,11 @@ function setupPreview() {
         else if (v.currentTime >= state.outS - 1e-3) seek(state.inS);
       }
       // Skip over removed sections.
-      for (const c of activeCuts()) {
-        if (v.currentTime >= c.start && v.currentTime < c.end - 1e-3) { seek(c.end); break; }
+      for (const e of activeEdits()) {
+        if (!(e.rate > 0) && v.currentTime >= e.start && v.currentTime < e.end - 1e-3) { seek(e.end); break; }
       }
     }
+    applySpanPlayback();
     renderPlayhead();
     captions.renderOverlay();
   };
@@ -776,18 +917,21 @@ function setupPreview() {
   els.btnSetOut.onclick = () => { state.outS = clamp(v.currentTime || 0, state.inS + frameStep(), state.durationS); renderTrim(); };
   els.btnResetTrim.onclick = () => { state.inS = 0; state.outS = state.durationS; renderTrim(); };
 
-  // Cuts
-  els.btnCutStart.onclick = () => { state.pendingCutStart = v.currentTime || 0; renderTrim(); };
-  els.btnCutEnd.onclick = () => {
-    if (state.pendingCutStart == null) { setStatus('Mark a cut start first.'); return; }
-    const a = Math.min(state.pendingCutStart, v.currentTime || 0);
-    const b = Math.max(state.pendingCutStart, v.currentTime || 0);
-    if (b - a > 1e-3) { state.cuts.push({ start: a, end: b }); mergeCuts(); }
-    state.pendingCutStart = null;
+  // Cuts and speed-ups: mark a start, scrub to the end, then pick an action.
+  els.btnCutStart.onclick = () => { state.pendingMarkStart = v.currentTime || 0; renderTrim(); };
+  const markedRange = () => {
+    if (state.pendingMarkStart == null) { setStatus('Mark a start first.'); return null; }
+    const t = v.currentTime || 0;
+    const a = Math.min(state.pendingMarkStart, t), b = Math.max(state.pendingMarkStart, t);
+    state.pendingMarkStart = null;
     setStatus('');
-    renderTrim();
+    if (b - a <= 1e-3) { renderTrim(); return null; }
+    return { a, b };
   };
-  els.btnClearCuts.onclick = () => { state.cuts = []; state.pendingCutStart = null; renderTrim(); };
+  els.btnCutEnd.onclick = () => { const r = markedRange(); if (r) applyEdit(r.a, r.b, 0); };
+  els.btnSpeedVoice.onclick = () => { const r = markedRange(); if (r) applyEdit(r.a, r.b, currentSpeedRate(), 'keep'); };
+  els.btnSpeedSilent.onclick = () => { const r = markedRange(); if (r) applyEdit(r.a, r.b, currentSpeedRate(), 'mute'); };
+  els.btnClearCuts.onclick = () => { state.edits = []; state.pendingMarkStart = null; applyEdit(0, 0, 1); renderTrim(); };
 
   // Press-and-drag anywhere on the track to scrub through frames.
   els.tlTrack.onpointerdown = (e) => {
@@ -841,7 +985,7 @@ function setupPreview() {
     else if (e.key === 'ArrowRight') { e.preventDefault(); v.pause(); seek((v.currentTime || 0) + frameStep()); }
     else if (e.key === 'Home') { seek(state.inS); }
     else if (e.key === 'End') { seek(state.outS); }
-    else if ((e.key === 'c' || e.key === 'C') && previewMode === 'edit') { e.preventDefault(); (state.pendingCutStart == null ? els.btnCutStart : els.btnCutEnd).click(); }
+    else if ((e.key === 'c' || e.key === 'C') && previewMode === 'edit') { e.preventDefault(); (state.pendingMarkStart == null ? els.btnCutStart : els.btnCutEnd).click(); }
   };
 
   renderTrim();
@@ -1126,18 +1270,18 @@ async function compress() {
     const vBitrate = targetVideoBitrate(s);
     const inMicros = Math.round(state.inS * 1e6);
     const outMicros = Math.round(state.outS * 1e6);
-    // Cut sections in microseconds; output time compacts by removing them.
-    const cutsUS = activeCuts().map((c) => ({ start: Math.round(c.start * 1e6), end: Math.round(c.end * 1e6) }));
-    const inCutUS = (t) => cutsUS.some((c) => t >= c.start && t < c.end);
-    // Source time -> output time: subtract the trim start and every cut before t.
-    const toOutputUS = (t) => {
-      let shift = inMicros;
-      for (const c of cutsUS) {
-        if (t >= c.end) shift += c.end - c.start;
-        else if (t > c.start) shift += t - c.start;   // (frames inside a cut are skipped before this runs)
-      }
-      return t - shift;
-    };
+    // The kept sections, in microseconds, each knowing where it lands in the
+    // output. Removed sections simply aren't here; sped-up ones carry the rate
+    // their frames and samples get divided by.
+    const spansUS = editSpans().map((sp) => ({
+      ...sp,
+      startUS: Math.round(sp.start * 1e6),
+      endUS: Math.round(sp.end * 1e6),
+      outStartUS: Math.round(sp.outStart * 1e6),
+    }));
+    const spanAtUS = (t) => { for (const sp of spansUS) if (t >= sp.startUS && t < sp.endUS) return sp; return null; };
+    // Source time -> output time, within the section it belongs to.
+    const toOutputUS = (t, sp) => sp.outStartUS + (t - sp.startUS) / sp.rate;
 
     // ---- Verify source is decodable (checked early at load; re-read desc here) ----
     const description = state.description !== undefined ? state.description : await videoDescription(file, mp4, video.id);
@@ -1159,6 +1303,17 @@ async function compress() {
         : "Your browser can't encode H.264 at these settings.");
     }
 
+    // ---- Audio ----
+    // Any speed change forces a re-encode: a copied AAC stream can't be
+    // time-stretched or silenced. A volume boost forces one too. With neither,
+    // the original samples are copied through untouched — much the fastest path.
+    const hasSpeed = spansUS.some((sp) => sp.rate !== 1);
+    const wantsBoost = s.audioGainDb > 0.05;
+    const canReencode = state.audioEncoderSupported;
+    const needAudioWork = s.keepAudio && !!audio && (hasSpeed || wantsBoost) && canReencode;
+    // A speed-up we can't re-encode would silently desync the audio, so drop it.
+    const dropAudio = s.keepAudio && !!audio && hasSpeed && !canReencode;
+
     // ---- Muxer ----
     const muxerOpts = {
       target: new ArrayBufferTarget(),
@@ -1166,7 +1321,7 @@ async function compress() {
       firstTimestampBehavior: 'offset',
       video: { codec: s.codec, width: s.outW, height: s.outH },
     };
-    if (s.keepAudio && audio) {
+    if (s.keepAudio && audio && !dropAudio) {
       muxerOpts.audio = {
         codec: 'aac',
         numberOfChannels: audio.audio.channel_count,
@@ -1183,68 +1338,162 @@ async function compress() {
     });
     encoder.configure(encCfg);
 
-    // ---- Audio: boost needs a decode → gain → re-encode round trip;
-    // everything else about the audio track (unchanged, or dropped) doesn't. ----
-    const needAudioBoost = s.keepAudio && !!audio && s.audioGainDb > 0.05 && state.audioEncoderSupported;
+    // ---- Audio ----
     const asc = (s.keepAudio && audio) ? await aacDescription(file, mp4, audio.id).catch(() => null) : null;
     let audioEmitted = 0;
+
+    const SR = audio ? audio.audio.sample_rate : 48000;
+    const CH = audio ? audio.audio.channel_count : 2;
+
     // "Auto" runs a lookahead leveler (audio-boost.js) that rides the gain up
-    // during quiet voice and automatically ducks on anything loud (a jingle,
-    // a shout) — it introduces a few ms of internal audio delay, so its
-    // output length doesn't line up 1:1 with each input frame;
-    // audioOutFrames/audioOutStartUS track a running output timeline instead
-    // of using each frame's own timestamp. "Manual" is a flat, user-chosen
-    // gain with no ducking — output matches input 1:1. Declared out here (not
-    // inside the `if` below) so the post-loop flush can still reach them.
-    let leveler = null, audioOutFrames = 0, audioOutStartUS = null;
-    const emitAudio = (data, numberOfFrames, ch, sampleRate, timestamp) => {
+    // during quiet voice and ducks anything loud — it holds a few ms internally,
+    // so its output doesn't line up 1:1 with each input frame. Every section is
+    // trimmed or padded to its exact frame count on the way out, which keeps
+    // that (and the time-stretcher's whole-window output) locked to the video.
+    let leveler = null;
+    let audioFramesOut = 0;           // frames already handed to the encoder
+    let pendingParts = [], pendingFrames = 0;
+    const EMIT_BLOCK = 1024;
+
+    const emitAudio = (data, numberOfFrames, timestamp) => {
       if (numberOfFrames <= 0) return;
-      const out = new AudioData({ format: 'f32', sampleRate, numberOfFrames, numberOfChannels: ch, timestamp, data });
+      const out = new AudioData({ format: 'f32', sampleRate: SR, numberOfFrames, numberOfChannels: CH, timestamp, data });
       audioEncoder.encode(out);
       out.close();
     };
 
-    if (needAudioBoost) {
+    // Hand the encoder whole blocks on one continuous output timeline. Audio
+    // and video both start at output time 0, so they stay in step.
+    const flushPending = (all) => {
+      while (pendingFrames >= (all ? 1 : EMIT_BLOCK) && pendingFrames > 0) {
+        const take = all ? pendingFrames : Math.min(pendingFrames, EMIT_BLOCK);
+        const block = new Float32Array(take * CH);
+        let filled = 0;
+        while (filled < take) {
+          const head = pendingParts[0];
+          const headFrames = head.length / CH;
+          const use = Math.min(headFrames, take - filled);
+          block.set(head.subarray(0, use * CH), filled * CH);
+          if (use === headFrames) pendingParts.shift();
+          else pendingParts[0] = head.subarray(use * CH);
+          filled += use;
+        }
+        pendingFrames -= take;
+        emitAudio(block, take, Math.round((audioFramesOut / SR) * 1e6));
+        audioFramesOut += take;
+      }
+    };
+    const pushSamples = (interleaved) => {
+      if (!interleaved || !interleaved.length) return;
+      pendingParts.push(interleaved);
+      pendingFrames += interleaved.length / CH;
+      flushPending(false);
+    };
+
+    // One section at a time: a normal one passes through the gain stage, a
+    // sped-up one that keeps its narration goes through WSOLA, and a silent one
+    // emits exactly its own length of silence.
+    let curSpan = null, curProc = null, curEmitted = 0, curTarget = 0;
+    const spanTargetFrames = (sp) => Math.round(((sp.end - sp.start) / sp.rate) * SR);
+
+    const spanOut = (interleaved) => {
+      if (!interleaved || !interleaved.length || !curSpan) return;
+      let frames = interleaved.length / CH;
+      if (curEmitted + frames > curTarget) {
+        frames = Math.max(0, curTarget - curEmitted);
+        interleaved = interleaved.subarray(0, frames * CH);
+      }
+      if (frames <= 0) return;
+      pushSamples(interleaved);
+      curEmitted += frames;
+    };
+
+    const openSpan = (sp) => {
+      curSpan = sp;
+      curEmitted = 0;
+      curTarget = spanTargetFrames(sp);
+      curProc = (sp.rate !== 1 && sp.audio === 'keep')
+        ? createTimeStretcher({ sampleRate: SR, channels: CH, speed: sp.rate })
+        : null;
+    };
+
+    const closeSpan = () => {
+      if (!curSpan) return;
+      if (curProc) spanOut(curProc.flush());
+      // Silence fills a muted section, and any shortfall elsewhere, so the
+      // section lands at exactly the length the video expects.
+      if (curEmitted < curTarget) spanOut(new Float32Array((curTarget - curEmitted) * CH));
+      curSpan = null;
+      curProc = null;
+    };
+
+    // Boost first, so a sped-up section is boosted like everything else, then
+    // speed. Returns interleaved samples ready for the section's processor.
+    const gainStage = (slice, frames) => {
+      if (!wantsBoost) return slice;
+      if (leveler) {
+        const mono = new Float32Array(frames);
+        for (let i = 0; i < frames; i++) {
+          let sum = 0;
+          for (let c = 0; c < CH; c++) sum += slice[i * CH + c];
+          mono[i] = sum / CH;
+        }
+        return leveler.process(slice, CH, mono);
+      }
+      const g = new Float32Array(slice);
+      applyGainInPlace(g, dbToLinear(s.audioGainDb));
+      return g;
+    };
+
+    const feedSpan = (slice, frames) => {
+      if (!curSpan) return;
+      if (curSpan.rate !== 1 && curSpan.audio !== 'keep') return;   // silent: nothing to carry over
+      const processed = gainStage(slice, frames);
+      if (curProc) spanOut(curProc.process(processed));
+      else spanOut(processed);
+    };
+
+    if (needAudioWork) {
       audioEncoder = new AudioEncoder({
         output: (chunk, meta) => { muxer.addAudioChunk(chunk, meta); audioEmitted++; },
         error: (e) => { encodeErr = encodeErr || e; },
       });
       audioEncoder.configure({
-        codec: AAC_CODEC, sampleRate: audio.audio.sample_rate,
-        numberOfChannels: audio.audio.channel_count, bitrate: audio.bitrate || 160_000,
+        codec: AAC_CODEC, sampleRate: SR, numberOfChannels: CH, bitrate: audio.bitrate || 160_000,
       });
-
-      leveler = s.volumeMode === 'auto' ? createLeveler(audio.audio.sample_rate, { maxGainDb: s.audioGainDb }) : null;
-      const gainLinear = leveler ? null : dbToLinear(s.audioGainDb);
+      leveler = (wantsBoost && s.volumeMode === 'auto') ? createLeveler(SR, { maxGainDb: s.audioGainDb }) : null;
 
       const onAudioDecoded = (frame) => {
         try {
           if (cancelRequested) return;
-          const t = frame.timestamp;
-          if (t + 1 < inMicros || t >= outMicros || inCutUS(t)) return;   // outside the kept range
           const n = frame.numberOfFrames, ch = frame.numberOfChannels;
+          const rate = frame.sampleRate;
           const interleaved = new Float32Array(n * ch);
           const plane = new Float32Array(n);
           for (let c = 0; c < ch; c++) {
             frame.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
-            if (!leveler) applyGainInPlace(plane, gainLinear);
             for (let i = 0; i < n; i++) interleaved[i * ch + c] = plane[i];
           }
 
-          if (leveler) {
-            if (audioOutStartUS === null) audioOutStartUS = toOutputUS(t);
-            const mono = new Float32Array(n);
-            for (let i = 0; i < n; i++) {
-              let sum = 0;
-              for (let c = 0; c < ch; c++) sum += interleaved[i * ch + c];
-              mono[i] = sum / ch;
+          // A decoded frame can straddle section boundaries, so walk it in
+          // pieces: each piece belongs to exactly one section.
+          let i = 0;
+          while (i < n) {
+            const tUS = frame.timestamp + (i / rate) * 1e6;
+            const sp = spanAtUS(tUS);
+            if (!sp) {
+              // Trimmed away or inside a removed section: jump to the next
+              // section that starts after this point, if there is one.
+              const next = spansUS.find((x) => x.startUS > tUS);
+              if (!next) break;
+              i += Math.max(1, Math.ceil(((next.startUS - tUS) / 1e6) * rate));
+              continue;
             }
-            const leveled = leveler.process(interleaved, ch, mono);
-            const framesOut = leveled.length / ch;
-            emitAudio(leveled, framesOut, ch, frame.sampleRate, audioOutStartUS + Math.round((audioOutFrames / frame.sampleRate) * 1e6));
-            audioOutFrames += framesOut;
-          } else {
-            emitAudio(interleaved, n, ch, frame.sampleRate, toOutputUS(t));
+            if (sp !== curSpan) { closeSpan(); openSpan(sp); }
+            const room = Math.max(1, Math.ceil(((sp.endUS - tUS) / 1e6) * rate));
+            const end = Math.min(n, i + room);
+            feedSpan(interleaved.subarray(i * ch, end * ch), end - i);
+            i = end;
           }
         } finally {
           frame.close();
@@ -1252,8 +1501,7 @@ async function compress() {
       };
       audioDecoder = new AudioDecoder({ output: onAudioDecoded, error: (e) => { encodeErr = encodeErr || e; } });
       audioDecoder.configure({
-        codec: audio.codec, sampleRate: audio.audio.sample_rate,
-        numberOfChannels: audio.audio.channel_count, description: asc,
+        codec: audio.codec, sampleRate: SR, numberOfChannels: CH, description: asc,
       });
     }
 
@@ -1280,10 +1528,11 @@ async function compress() {
     const ecx = els.encodeCanvas.getContext('2d', { alpha: false });
 
     const frameInterval = 1e6 / s.outFps;
-    const decimating = s.outFps < state.fps - 0.01;
     const estFrames = Math.max(1, Math.round(s.outFps * s.trimDur));
 
-    let nextEmit = inMicros, emitted = 0, reachedOut = false;
+    // Frames are spaced out in *output* time, so a 4× section naturally keeps
+    // only every fourth frame instead of arriving at four times the frame rate.
+    let nextEmit = 0, emitted = 0, reachedOut = false;
 
     const onDecoded = (frame) => {
       try {
@@ -1291,19 +1540,20 @@ async function compress() {
         const t = frame.timestamp;
         if (t >= outMicros) { reachedOut = true; return; }          // past selection
         if (t + 1 < inMicros) return;                               // before selection (decoded for refs)
-        if (inCutUS(t)) return;                                     // inside a removed section
-        if (decimating && t + 1 < nextEmit) return;                 // frame-rate reduction
-        nextEmit = t + frameInterval;
-
-        const outTs = toOutputUS(t);                                // compact past trim + cuts
+        const sp = spanAtUS(t);
+        if (!sp) return;                                            // inside a removed section
+        const outTs = Math.round(toOutputUS(t, sp));                // compact past trim, cuts and speed
+        if (outTs + 1 < nextEmit) return;                           // frame-rate reduction
+        nextEmit = outTs + frameInterval;
+        const frameDur = Math.max(1, Math.round((frame.duration || frameInterval) / sp.rate));
         let out;
         if (needCanvas) {
           ctx.drawImage(frame, 0, 0, s.outW, s.outH);
           const cue = capCues.length ? cueAt(capCues, outTs / 1e6) : null;
           if (cue) drawCaption(ctx, cue.text, 0, 0, s.outW, s.outH, capStyle);
-          out = new VideoFrame(canvas, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
+          out = new VideoFrame(canvas, { timestamp: outTs, duration: frameDur });
         } else {
-          out = new VideoFrame(frame, { timestamp: outTs, duration: frame.duration || Math.round(frameInterval) });
+          out = new VideoFrame(frame, { timestamp: outTs, duration: frameDur });
         }
         encoder.encode(out, { keyFrame: emitted % gop === 0 });
         // Draw the frame we just encoded so the user watches it play out.
@@ -1337,7 +1587,7 @@ async function compress() {
           cts: smp.cts, duration: smp.duration, timescale: smp.timescale, is_sync: smp.is_sync,
         });
       } else if (user === 'audio') {
-        if (needAudioBoost) {
+        if (needAudioWork) {
           // Decode every sample (like video does) — the boost/limiter and
           // range filtering happen once it comes back out of the decoder.
           for (const smp of smps) aq.push({
@@ -1347,10 +1597,11 @@ async function compress() {
         } else {
           for (const smp of smps) {
             const cts = (smp.cts / smp.timescale) * 1e6;
-            if (cts + 1 >= inMicros && cts < outMicros && !inCutUS(cts)) {
+            const sp = spanAtUS(cts);                                 // null = trimmed or cut away
+            if (!dropAudio && sp) {
               audioOut.push({
                 data: smp.data.slice(0),                              // copy before release
-                ts: Math.round(toOutputUS(cts)),                      // compact past trim + cuts
+                ts: Math.round(toOutputUS(cts, sp)),                  // compact past trim + cuts
                 dur: Math.round((smp.duration / smp.timescale) * 1e6),
               });
             }
@@ -1374,7 +1625,7 @@ async function compress() {
             data: smp.data,
           }));
         }
-        if (!cancelRequested && needAudioBoost && aq.length) {
+        if (!cancelRequested && needAudioWork && aq.length) {
           const smp = aq.shift();
           audioDecoder.decode(new EncodedAudioChunk({
             type: smp.is_sync ? 'key' : 'delta',
@@ -1386,7 +1637,7 @@ async function compress() {
         if (cancelRequested) break;
         while ((
           encoder.encodeQueueSize > 8 || decoder.decodeQueueSize > 8 ||
-          (needAudioBoost && (audioEncoder.encodeQueueSize > 8 || audioDecoder.decodeQueueSize > 8))
+          (needAudioWork && (audioEncoder.encodeQueueSize > 8 || audioDecoder.decodeQueueSize > 8))
         ) && !cancelRequested) {
           await sleep(4);
         }
@@ -1413,19 +1664,20 @@ async function compress() {
 
     await decoder.flush();
     await encoder.flush();
-    if (needAudioBoost) {
+    if (needAudioWork) {
       await audioDecoder.flush();
-      if (leveler) {
-        // Drain the few ms of audio still sitting in the leveler's lookahead
-        // buffer — otherwise the very tail of the track goes missing.
+      // Drain the few ms still sitting in the leveler's lookahead buffer,
+      // through the section it belongs to, then close that section so it lands
+      // at exactly its own length.
+      if (leveler && curSpan) {
         const tail = leveler.flush();
-        const ch = audio.audio.channel_count;
-        const framesOut = tail.length / ch;
-        if (framesOut > 0 && audioOutStartUS !== null) {
-          emitAudio(tail, framesOut, ch, audio.audio.sample_rate, audioOutStartUS + Math.round((audioOutFrames / audio.audio.sample_rate) * 1e6));
-          audioOutFrames += framesOut;
+        if (tail.length) {
+          if (curProc) spanOut(curProc.process(tail));
+          else spanOut(tail);
         }
       }
+      closeSpan();
+      flushPending(true);
       await audioEncoder.flush();
     }
     if (encodeErr) throw encodeErr;
@@ -1435,9 +1687,14 @@ async function compress() {
     // through the encoder above) ----
     let audioNote = '';
     if (s.keepAudio && audio) {
-      if (needAudioBoost) {
+      const speedNote = hasSpeed ? ' · sped-up sections re-timed' : '';
+      if (dropAudio) {
+        audioNote = " (audio dropped — this browser can't re-encode AAC, which a speed change needs)";
+      } else if (needAudioWork) {
         audioNote = audioEmitted > 0
-          ? (leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`)
+          ? (wantsBoost
+              ? `${leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`}${speedNote}`
+              : speedNote)
           : ' (no audio in the selected range)';
       } else if (audioOut.length) {
         let first = true;

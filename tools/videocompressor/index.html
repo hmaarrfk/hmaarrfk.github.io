@@ -61,7 +61,7 @@
     <!-- Step navigation -->
     <nav class="steps" id="steps" hidden>
       <button class="stepbtn active" data-step="source" type="button"><b>1</b> Source</button>
-      <button class="stepbtn" data-step="trim" type="button"><b>2</b> Trim &amp; cut</button>
+      <button class="stepbtn" data-step="trim" type="button"><b>2</b> Transcript &amp; edit</button>
       <button class="stepbtn" data-step="settings" type="button"><b>3</b> Settings</button>
       <button class="stepbtn" data-step="export" type="button"><b>4</b> Export</button>
     </nav>
@@ -156,18 +156,89 @@
         <span class="status" id="trim-info" style="margin-top:0;margin-left:auto"></span>
       </div>
 
-      <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:8px">
-        <button class="btn" id="btn-cut-start"  type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Mark cut start</button>
+      <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:8px;align-items:center">
+        <button class="btn" id="btn-cut-start"  type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Mark start</button>
         <button class="btn" id="btn-cut-end"    type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Remove section</button>
-        <button class="btn" id="btn-clear-cuts" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Clear cuts</button>
+        <select id="in-speed-rate" title="How much faster a sped-up section runs" style="padding:8px 10px;font-size:.9rem">
+          <option value="2">2×</option>
+          <option value="4" selected>4×</option>
+          <option value="8">8×</option>
+          <option value="16">16×</option>
+        </select>
+        <button class="btn" id="btn-speed-voice"  type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Speed up, keep voice</button>
+        <button class="btn" id="btn-speed-silent" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Speed up, silent</button>
+        <button class="btn" id="btn-clear-cuts" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Clear edits</button>
         <span class="status" id="cut-info" style="margin-top:0;margin-left:auto"></span>
       </div>
       <p class="small muted" style="margin-top:2px">
-        Drop interior sections: scrub to where a section starts, <b>Mark cut
-        start</b>, scrub to its end, then <b>Remove section</b> (or press
-        <b>C</b> to mark, <b>C</b> again to cut). Click a red band to undo it.
-        Removed sections are cut out and the clip is stitched back together.
+        Scrub to where a section starts, <b>Mark start</b>, scrub to its end,
+        then choose what happens to it: remove it, or run it faster with the
+        narration <b>time-stretched</b> (pitch kept) or <b>silent</b> for a
+        time-lapse. <b>C</b> marks, <b>C</b> again removes. Red bands are cuts,
+        blue ones are sped up — click either to restore it. Usually easier:
+        use the transcript below.
       </p>
+
+      <div class="field-group" id="captions-group" style="margin-top:16px">
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Transcript</label>
+        <p class="small muted" style="margin:6px 0 0">
+          Transcribe the whole video with an open-weights
+          <a href="https://github.com/openai/whisper" target="_blank" rel="noopener">Whisper</a>
+          model running on your own device, then edit by reading it: every line
+          can be cut or sped up, and the gaps between lines are where the
+          silence is. The model downloads once from Hugging Face, then stays
+          cached; your audio never leaves this page.
+        </p>
+        <div class="controls" style="margin-top:10px">
+          <div class="field">
+            <label for="in-cap-model">Speech model</label>
+            <select id="in-cap-model"></select>
+            <span class="hint" id="hint-cap-model"></span>
+          </div>
+          <div class="field">
+            <label for="in-cap-lang">Language</label>
+            <select id="in-cap-lang">
+              <option value="auto" selected>Detect automatically</option>
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="pt">Portuguese</option>
+              <option value="nl">Dutch</option>
+              <option value="sv">Swedish</option>
+              <option value="da">Danish</option>
+              <option value="no">Norwegian</option>
+              <option value="fi">Finnish</option>
+              <option value="pl">Polish</option>
+              <option value="cs">Czech</option>
+              <option value="el">Greek</option>
+              <option value="ru">Russian</option>
+              <option value="uk">Ukrainian</option>
+              <option value="tr">Turkish</option>
+              <option value="ar">Arabic</option>
+              <option value="he">Hebrew</option>
+              <option value="hi">Hindi</option>
+              <option value="zh">Chinese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="vi">Vietnamese</option>
+              <option value="id">Indonesian</option>
+              <option value="th">Thai</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px;align-items:center">
+          <button class="btn" id="btn-cap-gen" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Generate captions</button>
+          <button class="btn" id="btn-cap-cancel" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--danger)">Stop</button>
+          <button class="btn" id="btn-cap-clear" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Remove captions</button>
+        </div>
+        <div class="progress" id="cap-progress"><div></div></div>
+        <p class="small muted" id="cap-status" style="margin:8px 0 0"></p>
+        <p class="small" id="cap-note" hidden style="margin:6px 0 0;color:var(--danger)"></p>
+        <div id="cap-list" hidden
+             style="max-height:380px;overflow:auto;margin-top:10px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)"></div>
+      </div>
 
       <div class="row" style="justify-content:flex-end;margin-top:14px">
         <button class="btn" id="next-settings" type="button">Next: Settings &rarr;</button>
@@ -272,53 +343,12 @@
         <p class="small muted" id="hint-volume" style="margin:8px 0 0"></p>
       </div>
 
-      <div class="field-group" id="captions-group" style="margin-top:14px">
-        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Captions</label>
+      <div class="field-group" id="captions-look-group" style="margin-top:14px">
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Caption appearance</label>
         <p class="small muted" style="margin:6px 0 0">
-          Transcribe the speech with an open-weights
-          <a href="https://github.com/openai/whisper" target="_blank" rel="noopener">Whisper</a>
-          model running on your own device, and burn the captions into the video.
-          The model downloads once from Hugging Face, then stays cached; your
-          audio never leaves this page.
+          How the captions from step 2 are drawn onto the video.
         </p>
         <div class="controls" style="margin-top:10px">
-          <div class="field">
-            <label for="in-cap-model">Speech model</label>
-            <select id="in-cap-model"></select>
-            <span class="hint" id="hint-cap-model"></span>
-          </div>
-          <div class="field">
-            <label for="in-cap-lang">Language</label>
-            <select id="in-cap-lang">
-              <option value="auto" selected>Detect automatically</option>
-              <option value="en">English</option>
-              <option value="es">Spanish</option>
-              <option value="fr">French</option>
-              <option value="de">German</option>
-              <option value="it">Italian</option>
-              <option value="pt">Portuguese</option>
-              <option value="nl">Dutch</option>
-              <option value="sv">Swedish</option>
-              <option value="da">Danish</option>
-              <option value="no">Norwegian</option>
-              <option value="fi">Finnish</option>
-              <option value="pl">Polish</option>
-              <option value="cs">Czech</option>
-              <option value="el">Greek</option>
-              <option value="ru">Russian</option>
-              <option value="uk">Ukrainian</option>
-              <option value="tr">Turkish</option>
-              <option value="ar">Arabic</option>
-              <option value="he">Hebrew</option>
-              <option value="hi">Hindi</option>
-              <option value="zh">Chinese</option>
-              <option value="ja">Japanese</option>
-              <option value="ko">Korean</option>
-              <option value="vi">Vietnamese</option>
-              <option value="id">Indonesian</option>
-              <option value="th">Thai</option>
-            </select>
-          </div>
           <div class="field">
             <label for="in-cap-size">Caption size</label>
             <select id="in-cap-size">
@@ -343,18 +373,10 @@
           </div>
         </div>
         <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px;align-items:center">
-          <button class="btn" id="btn-cap-gen" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Generate captions</button>
-          <button class="btn" id="btn-cap-cancel" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--danger)">Stop</button>
-          <button class="btn" id="btn-cap-clear" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Remove captions</button>
-          <label class="checkbox" style="margin-left:auto">
+          <label class="checkbox">
             <input type="checkbox" id="in-cap-burn" disabled> Burn captions into the video
           </label>
         </div>
-        <div class="progress" id="cap-progress"><div></div></div>
-        <p class="small muted" id="cap-status" style="margin:8px 0 0"></p>
-        <p class="small" id="cap-note" hidden style="margin:6px 0 0;color:var(--danger)"></p>
-        <div id="cap-list" hidden
-             style="max-height:260px;overflow:auto;margin-top:10px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)"></div>
       </div>
 
       <div class="row" style="margin-top:16px">

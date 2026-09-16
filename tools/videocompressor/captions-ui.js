@@ -178,7 +178,7 @@ export function createCaptions(ctx) {
     let note = '';
     if (has && !busy && state.captions.segs) {
       const covered = timeline.keptSegments().every((k) => state.captions.segs.some((c) => k.start >= c.start - 0.05 && k.end <= c.end + 0.05));
-      if (!covered) note = 'Your trim now includes parts that weren’t transcribed — generate again to caption them.';
+      if (!covered) note = 'Parts of your selection weren’t transcribed — generate again to cover them.';
     }
     els.capNote.textContent = note;
     els.capNote.hidden = !note;
@@ -327,7 +327,7 @@ export function createCaptions(ctx) {
     const st = state;
     const p = preset(els.inCapModel.value);
     const j = job = {
-      id: ++jobSeq, st, preset: p, segs: timeline.keptSegments(),
+      id: ++jobSeq, st, preset: p, segs: timeline.fullSegments(),
       chunks: [], chunkWords: [], words: [], map: null, files: {}, language: null, stop: false,
     };
     const prev = st.captions;
@@ -428,6 +428,52 @@ export function createCaptions(ctx) {
 
   // ---- the cue list --------------------------------------------------------
   // Editable list of cues (output timecodes; cues in removed sections dimmed).
+  // The transcript is the edit surface. Every line can be cut or sped up, and
+  // the silences *between* lines get rows of their own — reading down the
+  // column is how you decide what the screencast keeps, which is much easier
+  // than guessing from a waveform.
+  const GAP_MIN = 1.5;            // shorter than this is a breath, not a section
+
+  function actionButton(label, title, onClick, tone) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.title = title;
+    b.style.cssText =
+      'padding:2px 7px;font-size:.72rem;font-weight:600;border-radius:5px;cursor:pointer;' +
+      'border:1px solid var(--border);background:var(--panel-2);color:var(--text);white-space:nowrap;' +
+      (tone === 'danger' ? 'border-color:#e74c3c;color:#e74c3c;' : '') +
+      (tone === 'active' ? 'border-color:#3478f6;background:#3478f6;color:#fff;' : '');
+    b.onclick = onClick;
+    return b;
+  }
+
+  // The buttons every row carries: cut it, speed it up with the voice kept,
+  // speed it up silently, or put it back.
+  function rowActions(start, end) {
+    const wrap = document.createElement('span');
+    wrap.style.cssText = 'display:flex;gap:4px;flex:0 0 auto';
+    const edit = ctx.edits.at(start + 0.01);
+    const covers = edit && edit.start <= start + 0.05 && edit.end >= end - 0.05;
+    if (covers) {
+      const tag = document.createElement('span');
+      tag.textContent = ctx.edits.label(edit);
+      tag.style.cssText = 'font-size:.72rem;font-weight:700;color:var(--muted);align-self:center;min-width:4.2em;text-align:right';
+      wrap.append(tag, actionButton('restore', 'Play this at normal speed again',
+        () => ctx.edits.apply(edit.start, edit.end, 1), 'active'));
+      return wrap;
+    }
+    const r = ctx.edits.rate();
+    wrap.append(
+      actionButton('cut', 'Remove this from the video', () => ctx.edits.apply(start, end, 0), 'danger'),
+      actionButton(`${r}× voice`, `Play ${r}× faster, narration time-stretched (pitch kept)`,
+        () => ctx.edits.apply(start, end, r, 'keep')),
+      actionButton(`${r}× silent`, `Play ${r}× faster with no sound — a time-lapse`,
+        () => ctx.edits.apply(start, end, r, 'mute')),
+    );
+    return wrap;
+  }
+
   function renderList() {
     const state = getState();
     const list = els.capList;
@@ -435,15 +481,61 @@ export function createCaptions(ctx) {
     const caps = state && state.captions;
     if (!caps || !caps.cues.length || job) { list.hidden = true; return; }
     const frag = document.createDocumentFragment();
+
+    // One-tap tidy-up: every long silence becomes a time-lapse.
+    const gaps = [];
+    let prevEnd = 0;
     for (const c of caps.cues) {
-      const os = timeline.toOutputTime(c.start), oe = timeline.toOutputTime(c.end);
-      const kept = oe - os > 0.05;
+      if (c.start - prevEnd > GAP_MIN) gaps.push({ start: prevEnd, end: c.start });
+      prevEnd = Math.max(prevEnd, c.end);
+    }
+    if (state.durationS - prevEnd > GAP_MIN) gaps.push({ start: prevEnd, end: state.durationS });
+
+    if (gaps.length) {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'display:flex;gap:6px;align-items:center;padding:4px 0 8px;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap';
+      const label = document.createElement('span');
+      const total = gaps.reduce((n, g) => n + (g.end - g.start), 0);
+      label.className = 'small muted';
+      label.textContent = `${gaps.length} silence${gaps.length > 1 ? 's' : ''} over ${GAP_MIN}s · ${fmt.fmtTime(total)} total`;
+      label.style.marginRight = 'auto';
+      const r = ctx.edits.rate();
+      bar.append(label,
+        actionButton(`all ${r}× silent`, 'Speed every one of those silences up, with no sound',
+          () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, r, 'mute'); }),
+        actionButton('cut all', 'Remove every one of those silences',
+          () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, 0); }, 'danger'));
+      frag.appendChild(bar);
+    }
+
+    const gapRow = (start, end) => {
       const row = document.createElement('div');
-      row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${kept ? '' : 'opacity:.4'}`;
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:3px 0;opacity:.75';
+      const time = document.createElement('span');
+      time.textContent = fmt.fmtTime(timeline.toOutputTime(start));
+      time.style.cssText = 'font-variant-numeric:tabular-nums;min-width:5.2em;font-size:.85rem;color:var(--muted)';
+      const what = document.createElement('span');
+      what.textContent = `— ${(end - start).toFixed(1)} s of silence —`;
+      what.className = 'small muted';
+      what.style.cssText = 'flex:1;min-width:0;font-style:italic';
+      row.append(time, what, rowActions(start, end));
+      return row;
+    };
+
+    let last = 0;
+    for (const c of caps.cues) {
+      if (c.start - last > GAP_MIN) frag.appendChild(gapRow(last, c.start));
+      last = Math.max(last, c.end);
+
+      const os = timeline.toOutputTime(c.start), oe = timeline.toOutputTime(c.end);
+      const edit = ctx.edits.at(c.start + 0.01);
+      const cut = !!edit && !(edit.rate > 0);
+      const row = document.createElement('div');
+      row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${cut || oe - os <= 0.02 ? 'opacity:.45' : ''}`;
       const time = document.createElement('button');
       time.type = 'button';
-      time.textContent = kept ? fmt.fmtTime(os) : 'cut';
-      time.title = 'Jump to this caption';
+      time.textContent = cut ? 'cut' : fmt.fmtTime(os);
+      time.title = 'Jump to this line';
       time.style.cssText = 'background:none;border:0;color:inherit;cursor:pointer;font:inherit;font-variant-numeric:tabular-nums;min-width:5.2em;text-align:left;padding:0';
       time.onclick = () => { els.preview.pause(); timeline.seek(c.start + 0.01); };
       const input = document.createElement('input');
@@ -451,9 +543,11 @@ export function createCaptions(ctx) {
       input.value = c.text;
       input.style.cssText = 'flex:1;min-width:0';
       input.oninput = () => { c.text = input.value; renderOverlay(); queueSave(); };
-      row.append(time, input);
+      row.append(time, input, rowActions(c.start, c.end));
       frag.appendChild(row);
     }
+    if (state.durationS - last > GAP_MIN) frag.appendChild(gapRow(last, state.durationS));
+
     list.appendChild(frag);
     list.hidden = false;
   }
@@ -494,6 +588,10 @@ export function createCaptions(ctx) {
     const state = getState();
     const out = [];
     for (const c of state.captions.cues) {
+      // A silent time-lapse has nothing to say: flashing its transcript past at
+      // 8× would be unreadable noise over footage nobody can hear.
+      const edit = ctx.edits.at(c.start + 0.01);
+      if (edit && edit.rate !== 1 && edit.audio !== 'keep') continue;
       const start = timeline.toOutputTime(c.start), end = timeline.toOutputTime(c.end);
       const text = c.text.trim();
       if (end - start > 0.05 && text) out.push({ start, end, text });

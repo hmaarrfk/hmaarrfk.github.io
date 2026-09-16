@@ -4,7 +4,16 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-15 (**The play button becomes a pause button.** It was
+_Last updated: 2026-09-15 (**Transcript-first editing, and speed-ups.**
+The order was backwards for screencasts: you had to trim before you could see
+what you'd said. Step 2 is now **Transcript & edit** — the whole video is
+transcribed first, then every line and every silence between lines can be cut
+or sped up by reading down the column. `state.cuts` became `state.edits`:
+`{ start, end, rate, audio }`, where `rate: 0` is a cut and `rate > 1` runs the
+section faster, either time-stretched (pitch kept, `speed.js`) or silent for a
+time-lapse. Caption *appearance* stayed in Settings.)_
+
+_Earlier: 2026-09-15 (**The play button becomes a pause button.** It was
 a fixed triangle, so nothing in the preview transport said whether the clip was
 running. The button now carries both icons and the page toggles `.playing` from
 the video's own `play`/`pause`/`ended` events, with the title and `aria-label`
@@ -86,12 +95,33 @@ encoder via WebCodecs — entirely client-side — and optionally add
 | `captions.js` | Pure caption logic: resampler, voice activity + compaction + time mapping, window planning, seam merging, words → cues, `cueAt`, `drawCaption` |
 | `captions-ui.js` | Caption UI + job orchestration: model presets, worker, cue list, overlay, persistence (given a `ctx` by `compressor.js`) |
 | `captions-worker.js` | Module worker running Whisper (transformers.js) |
+| `speed.js` | Pure WSOLA time compression (pitch-preserving) for sped-up sections |
+| `speed.test.mjs` | Node test for `speed.js` — `node speed.test.mjs` |
 | `vendor/` | Vendored deps + `update-vendor.sh` |
 
 ## Features
 
 - Target size or bitrate; resolution 100/75/50/25 %; fps cap; H.264 / H.265
   with early `isConfigSupported` validation.
+- **One edit model.** `state.edits` is a sorted, non-overlapping set of
+  `{ start, end, rate, audio }` spans over the source timeline: `rate: 0` is a
+  cut, `rate > 1` is a speed-up, `audio` is `'keep'` (time-stretched narration)
+  or `'mute'` (silent time-lapse). Everything else derives from `editSpans()`,
+  which maps each kept span to where it lands in the output — the timeline,
+  the preview's `playbackRate`, caption times and the encoder all read it.
+  Older saved `cuts` migrate to `rate: 0`.
+- **Transcript-first.** Step 2 transcribes the *whole* file, then cutting and
+  speeding are done by reading: each line and each silence longer than 1.5 s
+  gets a row with `cut` / `N× voice` / `N× silent`, plus a toolbar that applies
+  one choice to every silence at once. The timeline still takes manual
+  mark-start → action edits; red bands are cuts, blue are speed-ups.
+- **Speed, in the export.** Frames are spaced in *output* time, so a 4× section
+  keeps every fourth frame instead of arriving 4× too fast. Any speed change
+  forces an audio re-encode (a copied AAC stream can't be stretched): audible
+  sections run through WSOLA, silent ones become exactly their own length of
+  silence, and every section is trimmed/padded to an exact frame count so audio
+  stays locked to video. Without a re-encoder available, audio is dropped
+  rather than silently desynced.
 - Trim handles + interior cuts, stitched output; final-clip preview.
 - The transport's play button swaps to a pause icon while the preview runs,
   driven by the `<video>`'s own events so it stays right whether playback was
@@ -167,6 +197,14 @@ encoder via WebCodecs — entirely client-side — and optionally add
   live encode view, and in the result's frames; no console errors.
 - Regression: compress without captions (canvas only used when scaling),
   with volume boost, with trim + cuts.
+- Speed: `node speed.test.mjs` covers the stretcher (length, pitch, level,
+  chunk independence). End to end, checked 2026-09-15 on a 12 s clip beeping
+  once a second, with 2–6 s at 4× silent and 6–10 s at 2× voice: the export was
+  exactly 7.00 s / 210 frames, the sped-silent second measured −91 dB, and the
+  2× section kept all four beeps at half duration and 0.5 s spacing.
+- Transcript flow: a 20 s clip with three spoken sentences transcribed whole,
+  two silence rows detected (5.9 s and 6.5 s), "all 4× silent" took 20.18 s →
+  10.93 s, and cutting one line took it to 9.25 s.
 - Play/pause: the button must show pause bars while the preview runs and a
   triangle when it doesn't — after the button, after Space, and at the end of
   the clip. Checked 2026-09-15 in Chrome (icon, class, and `aria-label`).
