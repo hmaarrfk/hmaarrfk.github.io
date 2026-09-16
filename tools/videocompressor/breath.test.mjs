@@ -75,6 +75,12 @@ function addTail(buf, fromSec, toSec, fromDb, toDb) {
 }
 addTail(buf, 4.6, 4.9, -26, -58);   // straight after the 3.0–4.6 s phrase
 
+// A short breath. On a real recording a seventh of them are this brief, and
+// they measure exactly like the long ones — so the length floor has to stay low
+// enough to keep them.
+const shortBreath = [5.5, 5.62];   // in the clear: speech resumes at 6.0
+addBreath(buf, shortBreath[0], shortBreath[1], -34);
+
 const { breaths: found, speechDb, floorDb } = detectBreaths(buf, SR);
 console.log(`speech ${speechDb.toFixed(1)} dB · floor ${floorDb.toFixed(1)} dB · found ${found.length}`);
 for (const f of found) console.log(`   ${f.start.toFixed(2)}–${f.end.toFixed(2)}s`);
@@ -92,6 +98,9 @@ for (const [a, b] of [...speech, [8.0, 8.8]]) {
   check(`speech at ${a}s untouched`, !bad, bad ? `overlapped by ${bad.start.toFixed(2)}–${bad.end.toFixed(2)}` : '');
 }
 check('no spurious detections', found.length <= breaths.length + 1, `${found.length} found for ${breaths.length} planted`);
+check('a short (0.12s) breath is still found',
+  found.some((f) => overlaps(f.start, f.end, shortBreath[0], shortBreath[1])),
+  found.some((f) => overlaps(f.start, f.end, shortBreath[0], shortBreath[1])) ? '' : 'missed');
 check('a word\'s trailing sibilance is not a breath',
   !found.some((f) => overlaps(f.start, f.end, 4.6, 4.88)),
   found.filter((f) => overlaps(f.start, f.end, 4.6, 4.88)).map((f) => `${f.start.toFixed(2)}-${f.end.toFixed(2)}`).join(',') || 'correctly ignored');

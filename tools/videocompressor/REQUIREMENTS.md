@@ -143,6 +143,11 @@ encoder via WebCodecs — entirely client-side — and optionally add
   zero-crossing — and (d) *rising out of the floor*, not decaying out of a word.
   That last test is what separates a breath from a dying word tail: both sit at
   the same level, so nothing measured inside the region can tell them apart.
+  The length floor is 0.10 s, set from a real 10-minute screencast where a
+  seventh of the breaths were 0.10–0.14 s and measured identically to the long
+  ones (same HF tilt, zero-crossing rate, crest factor ~4–6); a higher floor
+  drops real breaths rather than junk. Clicks are ruled out by shape — they peak
+  instantly and their crest factor is far higher — not by length.
   Settings offers off / turn down (−10…−60 dB) / turn down and shorten; the
   shorten mode expresses itself as ordinary `src: 'breath'` speed edits, so it
   shows on the timeline and can be clicked away. Ducking happens *before* the
@@ -233,7 +238,9 @@ encoder via WebCodecs — entirely client-side — and optionally add
   while genuinely quiet speech still is). End to end, checked 2026-09-15 on 20 s
   of speech with four planted breaths 21 dB under the voice: all four found with
   the right boundaries and none spurious; at −24 dB they came out 22–24 dB down
-  while speech moved ≤0.6 dB and the room tone not at all. Shorten turned them
+  while speech moved ≤0.6 dB and the room tone not at all. On a real 10:44
+  screencast: 87 breaths, 22.3 s, 3.5% of the recording, median 0.24 s and 24 dB
+  under the voice. Shorten turned them
   into four silent speed edits, 20.18 s → 18.50 s, reverting cleanly.
 - Speed: `node speed.test.mjs` covers the stretcher (length, pitch, level,
   chunk independence). End to end, checked 2026-09-15 on a 12 s clip beeping

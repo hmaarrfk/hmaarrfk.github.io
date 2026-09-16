@@ -9,8 +9,13 @@
 //     well below the voice;
 //   * it's broadband and unvoiced, so its energy tilts high and it crosses zero
 //     far more often than a voiced vowel does;
-//   * it lasts a sixth of a second to a second or so — longer than a click,
-//     shorter than a passage of speech.
+//   * it lasts a tenth of a second to a second or so — longer than a click,
+//     shorter than a passage of speech. The floor is deliberately low: on a
+//     real 10-minute screencast a seventh of the breaths were 0.10–0.14 s, and
+//     measured identically to the longer ones (the same high-frequency tilt,
+//     zero-crossing rate and crest factor), so a higher floor drops real
+//     breaths rather than junk. A click is excluded by its shape, not by
+//     length — it peaks instantly and has a far higher crest factor.
 //
 // It also has to stand clear of the speech around it. A word's trailing
 // sibilance ("...results") is unvoiced, noise-like and quiet — a breath by
@@ -56,7 +61,7 @@ const toDb = (x) => 20 * Math.log10(Math.max(1e-9, x));
  * @param {object} [opts]
  *   speechBelowDb  how far under the speech level a breath must sit (default 14)
  *   floorAboveDb   how far over the room floor it must sit (default 8)
- *   minSec/maxSec  plausible breath length (default 0.15 / 2.0)
+ *   minSec/maxSec  plausible breath length (default 0.1 / 2.0)
  *   hfRatioMin     minimum share of energy above ~2 kHz (default 0.25)
  *   zcrMin         minimum zero-crossing rate, per second (default 1500)
  * @returns {{ breaths: {start:number,end:number}[], speechDb:number, floorDb:number }}
@@ -65,7 +70,7 @@ export function detectBreaths(mono, sampleRate, opts = {}) {
   const {
     speechBelowDb = 14,
     floorAboveDb = 8,
-    minSec = 0.15,
+    minSec = 0.1,
     maxSec = 2.0,
     hfRatioMin = 0.25,
     zcrMin = 1500,
