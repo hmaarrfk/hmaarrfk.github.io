@@ -707,6 +707,17 @@ function renderPlayhead() {
   if (state.pendingCutStart != null) renderPending();
 }
 
+function renderPlayButton() {
+  // The preview block (transport included) is relocated between steps, so
+  // look inside the block itself rather than wherever it happens to be hosted.
+  const btn = els.previewBlock.querySelector('.transport [data-act="play"]');
+  if (!btn) return;
+  const playing = !els.preview.paused && !els.preview.ended;
+  btn.classList.toggle('playing', playing);
+  btn.title = playing ? 'Pause (Space)' : 'Play (Space)';
+  btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+
 function frameStep() { return 1 / Math.max(1, state.fps); }
 function seek(t) { els.preview.currentTime = clamp(t, 0, Math.max(0, state.durationS - 1e-3)); }
 
@@ -717,7 +728,7 @@ function setupPreview() {
   seek(0);
 
   // Transport buttons
-  els.panePreview.querySelectorAll('.transport [data-act]').forEach((btn) => {
+  els.previewBlock.querySelectorAll('.transport [data-act]').forEach((btn) => {
     btn.onclick = () => {
       switch (btn.dataset.act) {
         case 'play':
@@ -753,7 +764,13 @@ function setupPreview() {
     if (pendingSeek != null) { const t = pendingSeek; pendingSeek = null; v.currentTime = t; }
   };
   v.onloadedmetadata = () => { renderTrim(); renderPlayhead(); captions.renderOverlay(); };
-  v.onplay = captions.overlayLoop;
+  // Drive the play/pause icon off the video itself, so it stays honest however
+  // playback started or stopped — the button, the Space bar, or the clip
+  // reaching its end.
+  v.onplay = () => { renderPlayButton(); captions.overlayLoop(); };
+  v.onpause = renderPlayButton;
+  v.onended = renderPlayButton;
+  renderPlayButton();
 
   els.btnSetIn.onclick = () => { state.inS = clamp(v.currentTime || 0, 0, state.outS - frameStep()); renderTrim(); };
   els.btnSetOut.onclick = () => { state.outS = clamp(v.currentTime || 0, state.inS + frameStep(), state.durationS); renderTrim(); };

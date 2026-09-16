@@ -4,7 +4,14 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-15 (**Stop re-downloading Whisper.** The weights were
+_Last updated: 2026-09-15 (**The play button becomes a pause button.** It was
+a fixed triangle, so nothing in the preview transport said whether the clip was
+running. The button now carries both icons and the page toggles `.playing` from
+the video's own `play`/`pause`/`ended` events, with the title and `aria-label`
+following; the transport is also queried through `#preview-block`, which is the
+element that actually moves between steps.)_
+
+_Earlier: 2026-09-15 (**Stop re-downloading Whisper.** The weights were
 being cached all along, but nothing said so and nothing protected the cache:
 the model list now reads `transformers-cache` and labels a model `downloaded`
 instead of quoting a size, and the page asks for durable storage before the
@@ -86,6 +93,9 @@ encoder via WebCodecs — entirely client-side — and optionally add
 - Target size or bitrate; resolution 100/75/50/25 %; fps cap; H.264 / H.265
   with early `isConfigSupported` validation.
 - Trim handles + interior cuts, stitched output; final-clip preview.
+- The transport's play button swaps to a pause icon while the preview runs,
+  driven by the `<video>`'s own events so it stays right whether playback was
+  started by the button, the Space bar, or stopped by reaching the end.
 - The timeline is laid out in pixels, so it repaints on **any** change of the
   track's width — a `ResizeObserver` on the track (and the preview block, for
   the caption overlay), not just a window `resize` on the Trim step. Before
@@ -157,6 +167,9 @@ encoder via WebCodecs — entirely client-side — and optionally add
   live encode view, and in the result's frames; no console errors.
 - Regression: compress without captions (canvas only used when scaling),
   with volume boost, with trim + cuts.
+- Play/pause: the button must show pause bars while the preview runs and a
+  triangle when it doesn't — after the button, after Space, and at the end of
+  the clip. Checked 2026-09-15 in Chrome (icon, class, and `aria-label`).
 - Model cache: with weights already downloaded, the model list must say
   `downloaded` for exactly those presets. Checked 2026-09-15 against the real
   Cache Storage (turbo + base cached, small not) and Chrome granted durable

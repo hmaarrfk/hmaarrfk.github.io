@@ -404,6 +404,11 @@ input[type="range"] { width: 100%; }
 .tbtn svg { width: 20px; height: 20px; fill: currentColor; display: block; }
 .tbtn:hover { background: var(--accent); color: #fff; }
 .tbtn.play { background: var(--accent); color: #fff; width: 56px; }
+/* The play button shows one icon at a time: the page adds .playing while the
+   preview is running, and the button becomes a pause button. */
+.tbtn.play .i-pause,
+.tbtn.play.playing .i-play { display: none; }
+.tbtn.play.playing .i-pause { display: block; }
 .timecode { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-size: .9rem; }
 
 .timeline { padding: 6px 0; }
