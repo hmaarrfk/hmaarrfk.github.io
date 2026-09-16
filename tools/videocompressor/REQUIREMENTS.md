@@ -4,7 +4,18 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-15 (**Breath control.** Two things made breathing
+_Last updated: 2026-09-15 (**Breath control, part two.** The volume boost no
+longer follows you from the last recording — it starts **off** every time, since
+it re-encodes the audio and lifts whatever sits in the gaps. Whisper's *word*
+timings are now kept alongside the cues (a cue spans a whole phrase including
+its pauses, so cues mark ~95% of a recording as "speech" and are useless as a
+mask; words mark 84%). They power a new **turn down everything between phrases**
+mode, which is provably safe — zero overlap with any word — where level-based
+detection alone could not be. They are deliberately *not* used to mask ordinary
+breath detection: Whisper's word spans are padded and run together, so masking
+by them dropped 91 detected breaths to 34 on a real screencast.)_
+
+_Earlier: 2026-09-15 (**Breath control.** Two things made breathing
 loud. The leveller had a bug: gain is `target / voiceEnv`, so in a gap — where
 the voice envelope collapses — it rode *up* toward the ceiling, and the gaps are
 exactly where breaths live. It now holds gain where nobody is talking, and comes

@@ -315,6 +315,12 @@ export function createCaptions(ctx) {
     const toSource = (o) => timeline.fromOutputTime(o, j.segs);
     state.captions = {
       cues: wordsToCues(onOutput).map((c) => ({ start: toSource(c.start), end: toSource(c.end), text: c.text })),
+      // The word timings are kept, not just the cues they get merged into. A
+      // cue spans a whole phrase *including its pauses* — consecutive cues are
+      // usually butted right up against each other — so it says almost nothing
+      // about where speech actually stops. Word spans do, and that's what the
+      // breath detector needs to know where the gaps are.
+      words: onOutput.map((w) => ({ start: toSource(w.start), end: toSource(w.end) })),
       language: j.language, model: j.preset.key, segs: j.segs,
     };
     renderOverlay();
@@ -623,7 +629,8 @@ export function createCaptions(ctx) {
       const d = JSON.parse(localStorage.getItem(LS_CAP_KEY) || 'null');
       if (!d || !d.file || d.file.name !== file.name || d.file.size !== file.size || d.file.lastModified !== file.lastModified) return null;
       const cues = (d.cues || []).filter((c) => c && isFinite(c.start) && isFinite(c.end) && typeof c.text === 'string');
-      return cues.length ? { cues, language: d.language || null, model: d.model || null, segs: Array.isArray(d.segs) ? d.segs : null } : null;
+      const words = (d.words || []).filter((w) => w && isFinite(w.start) && isFinite(w.end));
+      return cues.length ? { cues, words, language: d.language || null, model: d.model || null, segs: Array.isArray(d.segs) ? d.segs : null } : null;
     } catch (_) { return null; }
   }
 

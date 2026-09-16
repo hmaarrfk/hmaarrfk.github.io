@@ -64,6 +64,14 @@ const toDb = (x) => 20 * Math.log10(Math.max(1e-9, x));
  *   minSec/maxSec  plausible breath length (default 0.1 / 2.0)
  *   hfRatioMin     minimum share of energy above ~2 kHz (default 0.25)
  *   zcrMin         minimum zero-crossing rate, per second (default 1500)
+ *   speechRegions  where speech actually is, in seconds — from the transcript's
+ *                  word timings. Given these, the level test is no longer
+ *                  guessing at the boundaries, so the guard can be tight and a
+ *                  breath that starts the instant a sentence ends is still
+ *                  caught.
+ *   everything     true: take *all* audible non-speech, not just what looks
+ *                  like a breath. Only safe with `speechRegions`, because
+ *                  without them a quiet word would be swept up too.
  * @returns {{ breaths: {start:number,end:number}[], speechDb:number, floorDb:number }}
  */
 export function detectBreaths(mono, sampleRate, opts = {}) {
@@ -76,7 +84,12 @@ export function detectBreaths(mono, sampleRate, opts = {}) {
     zcrMin = 1500,
     joinSec = 0.06,
     guardSec = 0.1,
+    speechRegions = null,
+    everything = false,
   } = opts;
+  // Word timings pin the edges of speech exactly, so the guard only has to
+  // cover the transcript's own slop rather than a level threshold's guesswork.
+  const guard = speechRegions ? (opts.guardSec ?? 0.03) : guardSec;
 
   const frameLen = Math.max(32, Math.round(FRAME_SEC * sampleRate));
   const count = Math.floor(mono.length / frameLen);
@@ -112,20 +125,35 @@ export function detectBreaths(mono, sampleRate, opts = {}) {
   // Anything near the voice's own level is speech, and gets a small guard band
   // either side so a word's quiet onset is never handed to the ducker.
   const speechCut = speechDb - speechBelowDb;
-  const guard = Math.max(1, Math.round(guardSec / FRAME_SEC));
+  const guardFrames = Math.max(1, Math.round(guard / FRAME_SEC));
   const isSpeech = new Uint8Array(count);
-  for (let f = 0; f < count; f++) if (db[f] > speechCut) isSpeech[f] = 1;
+  if (speechRegions) {
+    for (const r of speechRegions) {
+      for (let f = Math.max(0, Math.floor(r.start / FRAME_SEC)); f < Math.min(count, Math.ceil(r.end / FRAME_SEC)); f++) {
+        isSpeech[f] = 1;
+      }
+    }
+    // Anything at full voice level is speech whatever the transcript says — it
+    // may simply have missed a word.
+    for (let f = 0; f < count; f++) if (db[f] > speechCut) isSpeech[f] = 1;
+  } else {
+    for (let f = 0; f < count; f++) if (db[f] > speechCut) isSpeech[f] = 1;
+  }
   const speechGuarded = new Uint8Array(count);
   for (let f = 0; f < count; f++) {
     if (!isSpeech[f]) continue;
-    for (let g = Math.max(0, f - guard); g <= Math.min(count - 1, f + guard); g++) speechGuarded[g] = 1;
+    for (let g = Math.max(0, f - guardFrames); g <= Math.min(count - 1, f + guardFrames); g++) speechGuarded[g] = 1;
   }
 
   const candidate = new Uint8Array(count);
   for (let f = 0; f < count; f++) {
     if (speechGuarded[f]) continue;
     if (db[f] <= floorDb + floorAboveDb) continue;     // that's just the room
-    if (hfRatio[f] < hfRatioMin && zcr[f] < zcrMin) continue;   // too tonal to be a breath
+    // `everything` takes the whole audible gap — breaths, mouth noises, a
+    // chair, a keyboard. The character and rise-from-the-floor tests exist to
+    // tell a breath from a word when the boundaries are a guess; with the
+    // transcript holding the boundaries they only serve to let things through.
+    if (!everything && hfRatio[f] < hfRatioMin && zcr[f] < zcrMin) continue;   // too tonal to be a breath
     candidate[f] = 1;
   }
 
@@ -167,8 +195,8 @@ export function detectBreaths(mono, sampleRate, opts = {}) {
     const start = (r.from * frameLen) / sampleRate;
     const end = (r.to * frameLen) / sampleRate;
     const dur = end - start;
-    if (dur < minSec || dur > maxSec) continue;
-    if (!cameFromFloor(r.from)) continue;      // a tail, not a breath
+    if (dur < minSec || (!everything && dur > maxSec)) continue;
+    if (!everything && !cameFromFloor(r.from)) continue;      // a tail, not a breath
     breaths.push({ start, end });
   }
   return { breaths, speechDb, floorDb };

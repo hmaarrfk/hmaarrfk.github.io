@@ -285,7 +285,12 @@ const captions = createCaptions({
   },
   fmt: { fmtTime, fmtBytes },
   setProgress,
-  onChanged: () => { if (currentStep === 'export') updateExportSummary(); },
+  onChanged: () => {
+    if (currentStep === 'export') updateExportSummary();
+    // A fresh transcript pins the edges of speech, which is better information
+    // than the level threshold breath detection started with.
+    if (els.inBreathMode.value !== 'off') refreshBreaths();
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -334,10 +339,13 @@ function applyGeneral(g) {
   captions.applySettings(g);
   const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
   if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
-  if (g.volume) {
-    const volRadio = document.querySelector(`input[name="volume"][value="${g.volume}"]`);
-    if (volRadio && !volRadio.disabled) volRadio.checked = true;
-  }
+  // The volume boost is deliberately *not* restored: it starts off for every
+  // recording. It re-encodes the audio and lifts whatever sits in the gaps —
+  // breaths included — so it should be a choice made while listening to this
+  // file, not a setting that follows you from the last one. The slider value is
+  // remembered for when it is switched on.
+  const noneRadio = document.querySelector('input[name="volume"][value="none"]');
+  if (noneRadio) noneRadio.checked = true;
 }
 
 function setStatus(msg) { els.status.textContent = msg || ''; }
@@ -550,6 +558,7 @@ async function loadFile(file) {
       if (state !== loadedFor) return;   // a different file was loaded meanwhile
       state.audioAnalysis = result;
       state.breaths = result.breaths || [];
+      state.breathKey = 'false|0';
       syncBreathEdits();
       updateAudioUI();
     }).catch((e) => console.error('Audio analysis failed:', e));
@@ -1098,6 +1107,63 @@ function updateAudioUI() {
   updatePreviewGain();
 }
 
+// Speech, as the transcript knows it: exact edges, so a breath taken the
+// instant a sentence ends is still inside the gap rather than inside a guess.
+function transcriptSpeech() {
+  const caps = state && state.captions;
+  if (!caps) return null;
+  // Words, not cues: a cue covers a whole phrase including the pauses inside
+  // it, and consecutive cues usually touch, so cues would mark almost the
+  // entire recording as speech and leave no gaps to work with.
+  const source = (caps.words && caps.words.length) ? caps.words : null;
+  if (!source) return null;
+  const regions = [];
+  for (const c of source) {
+    const last = regions[regions.length - 1];
+    if (last && c.start - last.end < 0.05) last.end = Math.max(last.end, c.end);
+    else regions.push({ start: c.start, end: c.end });
+  }
+  return regions;
+}
+
+// Re-run detection over the whole track. The decoded audio isn't kept around —
+// on a long recording it's hundreds of MB — so this streams it again, which is
+// why it only runs when the answer would actually change.
+let breathRun = 0;
+async function refreshBreaths() {
+  if (!state || !state.isAac) return;
+  const st = state;
+  const run = ++breathRun;
+  const everything = els.inBreathMode.value === 'gaps';
+  // The transcript is used only to make the *aggressive* mode safe. As a mask
+  // for ordinary breath detection it does more harm than good: Whisper's word
+  // spans are padded and run together, so they cover 84% of a recording and
+  // swallow the breaths that sit against a word — on a real 10:44 screencast,
+  // masking by them dropped 91 breaths to 34. Level-based detection finds them;
+  // the word timings only earn their keep when the rule is "everything that
+  // isn't a word", where being wrong would mean ducking speech.
+  const speechRegions = everything ? transcriptSpeech() : null;
+  const key = `${everything}|${speechRegions ? speechRegions.length : 0}`;
+  if (st.breathKey === key) return;
+  els.hintBreath.textContent = 'Listening for breaths…';
+  try {
+    const chunks = [];
+    const ok = await decodeAudioTrack(st, (frame) => chunks.push(mixToMono(frame)));
+    if (!ok || run !== breathRun || state !== st) return;
+    const mono = concatFloat32(chunks);
+    const { breaths } = detectBreaths(mono, st.audio.audio.sample_rate, { speechRegions, everything });
+    if (run !== breathRun || state !== st) return;
+    st.breaths = breaths;
+    st.breathKey = key;
+    syncBreathEdits();
+    updateBreathUI();
+    updateEstimate();
+  } catch (e) {
+    console.error('Breath detection failed:', e);
+    updateBreathUI();
+  }
+}
+
 function updateBreathUI() {
   if (!els.inBreathMode) return;
   const mode = els.inBreathMode.value;
@@ -1114,7 +1180,13 @@ function updateBreathUI() {
     const what = mode === 'off' ? 'found'
       : mode === 'shorten' ? `turned down ${breathGainDb()} dB, long ones shortened`
       : `turned down ${breathGainDb()} dB`;
-    els.hintBreath.textContent = `${found.length} breath${found.length > 1 ? 's' : ''} · ${fmtTime(total)} of the recording · ${what}.`;
+    const noun = mode === 'gaps'
+      ? `quiet stretch${found.length > 1 ? 'es' : ''}`
+      : `breath${found.length > 1 ? 's' : ''}`;
+    els.hintBreath.textContent = `${found.length} ${noun} · ${fmtTime(total)} of the recording · ${what}.`;
+    if (mode === 'gaps' && !transcriptSpeech()) {
+      els.hintBreath.textContent += ' Generate a transcript in step 2 first — without it, the gaps between phrases aren’t known and quiet words would be turned down too.';
+    }
   }
   if (!state || !state.audioEncoderSupported) {
     const note = state && state.audio && state.isAac
@@ -1941,6 +2013,7 @@ function initUI() {
     updateBreathUI();
     updatePreviewGain();
     updateEstimate();
+    refreshBreaths();
   }));
   document.querySelectorAll('input[name="volume"]').forEach((r) => r.addEventListener('change', updateEstimate));
 
