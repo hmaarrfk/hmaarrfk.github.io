@@ -854,6 +854,13 @@ function renderPlayButton() {
   if (!btn) return;
   const playing = !els.preview.paused && !els.preview.ended;
   btn.classList.toggle('playing', playing);
+  // Swap the icons with inline styles rather than a stylesheet rule: this page
+  // and the shared tools.css are cached separately, so a visitor can easily
+  // hold a stale stylesheet against fresh markup — and would then see both
+  // icons at once. An inline style beats whatever the cached CSS says.
+  const play = btn.querySelector('.i-play'), pause = btn.querySelector('.i-pause');
+  if (play) play.style.display = playing ? 'none' : 'block';
+  if (pause) pause.style.display = playing ? 'block' : 'none';
   btn.title = playing ? 'Pause (Space)' : 'Play (Space)';
   btn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
 }
