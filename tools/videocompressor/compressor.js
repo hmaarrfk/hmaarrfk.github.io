@@ -735,7 +735,7 @@ function mergeEdits() {
 // The speed the two "speed up" buttons apply.
 function currentSpeedRate() {
   const r = parseFloat(els.inSpeedRate && els.inSpeedRate.value);
-  return isFinite(r) && r > 1 ? r : 2;
+  return isFinite(r) && r > 1 ? r : 1.5;
 }
 
 // Rates come from the menu in tenths, so print them without float dust.
