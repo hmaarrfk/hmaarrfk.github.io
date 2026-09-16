@@ -4,7 +4,16 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-15 (**Transcript-first editing, and speed-ups.**
+_Last updated: 2026-09-15 (**Breath control.** Two things made breathing
+loud. The leveller had a bug: gain is `target / voiceEnv`, so in a gap — where
+the voice envelope collapses — it rode *up* toward the ceiling, and the gaps are
+exactly where breaths live. It now holds gain where nobody is talking, and comes
+back to what the recent speech needed, so a breath stays as far under the voice
+as it was recorded. On top of that, `breath.js` finds breaths by character
+(noise-like, unvoiced, rising out of the room floor rather than decaying out of
+a word) and Settings can turn them down, optionally shortening long ones.)_
+
+_Earlier: 2026-09-15 (**Transcript-first editing, and speed-ups.**
 The order was backwards for screencasts: you had to trim before you could see
 what you'd said. Step 2 is now **Transcript & edit** — the whole video is
 transcribed first, then every line and every silence between lines can be cut
@@ -96,6 +105,9 @@ encoder via WebCodecs — entirely client-side — and optionally add
 | `captions-ui.js` | Caption UI + job orchestration: model presets, worker, cue list, overlay, persistence (given a `ctx` by `compressor.js`) |
 | `captions-worker.js` | Module worker running Whisper (transformers.js) |
 | `speed.js` | Pure WSOLA time compression (pitch-preserving) for sped-up sections |
+| `breath.js` | Pure breath detection + region ducking |
+| `breath.test.mjs` | Node test for `breath.js` — `node breath.test.mjs` |
+| `audio-boost.test.mjs` | Node test for the leveller's non-speech hold |
 | `speed.test.mjs` | Node test for `speed.js` — `node speed.test.mjs` |
 | `vendor/` | Vendored deps + `update-vendor.sh` |
 
@@ -125,6 +137,21 @@ encoder via WebCodecs — entirely client-side — and optionally add
   silence, and every section is trimmed/padded to an exact frame count so audio
   stays locked to video. Without a re-encoder available, audio is dropped
   rather than silently desynced.
+- **Breaths.** `breath.js` marks a region as a breath only when it is (a) in a
+  gap, with a guard band so a word's trailing sibilance is excluded, (b) above
+  the room floor but well under the voice, (c) noise-like — HF-tilted or high
+  zero-crossing — and (d) *rising out of the floor*, not decaying out of a word.
+  That last test is what separates a breath from a dying word tail: both sit at
+  the same level, so nothing measured inside the region can tell them apart.
+  Settings offers off / turn down (−10…−60 dB) / turn down and shorten; the
+  shorten mode expresses itself as ordinary `src: 'breath'` speed edits, so it
+  shows on the timeline and can be clicked away. Ducking happens *before* the
+  leveller, whose hold then keeps it down.
+- **The leveller holds its gain where nobody is talking** (`holdRangeDb`, 18 dB
+  under the loudest recent voice) and returns to the gain that speech needed.
+  Without it a gap was boosted ~12 dB harder than the speech around it. The
+  reference is measured from the leveller's own envelope, not passed in: a level
+  measured any other way is on a different scale and silently does nothing.
 - Trim handles + interior cuts, stitched output; final-clip preview.
 - The transport's play button swaps to a pause icon while the preview runs,
   driven by the `<video>`'s own events so it stays right whether playback was
@@ -200,6 +227,14 @@ encoder via WebCodecs — entirely client-side — and optionally add
   live encode view, and in the result's frames; no console errors.
 - Regression: compress without captions (canvas only used when scaling),
   with volume boost, with trim + cuts.
+- Breath: `node breath.test.mjs` (planted breaths found, quiet speech and word
+  tails left alone, room tone ignored, ducking ramps) and
+  `node audio-boost.test.mjs` (a gap is never boosted past the speech gain,
+  while genuinely quiet speech still is). End to end, checked 2026-09-15 on 20 s
+  of speech with four planted breaths 21 dB under the voice: all four found with
+  the right boundaries and none spurious; at −24 dB they came out 22–24 dB down
+  while speech moved ≤0.6 dB and the room tone not at all. Shorten turned them
+  into four silent speed edits, 20.18 s → 18.50 s, reverting cleanly.
 - Speed: `node speed.test.mjs` covers the stretcher (length, pitch, level,
   chunk independence). End to end, checked 2026-09-15 on a 12 s clip beeping
   once a second, with 2–6 s at 4× silent and 6–10 s at 2× voice: the export was

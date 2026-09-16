@@ -27,6 +27,7 @@ import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer/mp4-muxer.js';
 import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from './audio-boost.js';
 import { cueAt, drawCaption } from './captions.js';
 import { createTimeStretcher } from './speed.js';
+import { detectBreaths, duckRegions } from './breath.js';
 import { createCaptions } from './captions-ui.js';
 
 const MP4Box = window.MP4Box;
@@ -55,6 +56,8 @@ const els = {
   trimInfo: $('trim-info'),
   btnCutStart: $('btn-cut-start'), btnCutEnd: $('btn-cut-end'), btnClearCuts: $('btn-clear-cuts'),
   btnSpeedVoice: $('btn-speed-voice'), btnSpeedSilent: $('btn-speed-silent'), inSpeedRate: $('in-speed-rate'),
+  inBreathMode: $('in-breath-mode'), inBreathDb: $('in-breath-db'),
+  fieldBreathDb: $('field-breath-db'), hintBreath: $('hint-breath'),
   cutInfo: $('cut-info'),
   // settings
   fieldSize: $('field-size'), fieldBitrate: $('field-bitrate'),
@@ -147,7 +150,8 @@ function updatePreviewGain() {
   if (previewGainNode) {
     const s = state ? spanAt(els.preview.currentTime || 0) : null;
     const silent = !!s && s.rate !== 1 && s.audio !== 'keep';
-    previewGainNode.gain.value = silent ? 0 : dbToLinear(db);
+    const duck = state && inBreath(els.preview.currentTime || 0) ? breathGainDb() : 0;
+    previewGainNode.gain.value = silent ? 0 : dbToLinear(db + duck);
   }
 }
 
@@ -305,6 +309,7 @@ function saveSettings() {
       scale: els.inScale.value, fps: els.inFps.value, codec: els.inCodec.value,
       keepAudio: els.inAudio.checked,
       volume: currentVolumeMode(), gain: els.inGain.value,
+      breathMode: els.inBreathMode.value, breathDb: els.inBreathDb.value,
       ...captions.settings(),
     },
     file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
@@ -324,6 +329,8 @@ function applyGeneral(g) {
   if (g.fps != null) els.inFps.value = g.fps;
   if (g.codec != null) els.inCodec.value = g.codec;
   if (g.gain != null) els.inGain.value = g.gain;
+  if (g.breathMode != null) els.inBreathMode.value = g.breathMode;
+  if (g.breathDb != null) els.inBreathDb.value = g.breathDb;
   captions.applySettings(g);
   const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
   if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
@@ -492,7 +499,7 @@ async function loadFile(file) {
   state = {
     file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
     inS: 0, outS: durationS, edits: [], pendingMarkStart: null,
-    audioAnalysis: null, audioEncoderSupported: false,
+    audioAnalysis: null, audioEncoderSupported: false, breaths: [],
     isAac: false, captions: captions.restore(file),
   };
 
@@ -542,6 +549,8 @@ async function loadFile(file) {
     analyzeAudio(loadedFor).then((result) => {
       if (state !== loadedFor) return;   // a different file was loaded meanwhile
       state.audioAnalysis = result;
+      state.breaths = result.breaths || [];
+      syncBreathEdits();
       updateAudioUI();
     }).catch((e) => console.error('Audio analysis failed:', e));
   }
@@ -723,7 +732,7 @@ function mergeEdits() {
   const merged = [];
   for (const e of state.edits) {
     const last = merged[merged.length - 1];
-    if (last && e.start <= last.end + 1e-3 && last.rate === e.rate && last.audio === e.audio) {
+    if (last && e.start <= last.end + 1e-3 && last.rate === e.rate && last.audio === e.audio && last.src === e.src) {
       last.end = Math.max(last.end, e.end);
     } else {
       merged.push({ ...e });
@@ -731,6 +740,14 @@ function mergeEdits() {
   }
   state.edits = merged.filter((e) => e.end - e.start > 1e-3);
 }
+
+// The breaths to act on: detected at load, minus anything the user has
+// already dealt with by hand (a cut or a sped-up section covers its own audio).
+function activeBreaths() {
+  if (!state || !state.breaths || els.inBreathMode.value === 'off') return [];
+  return state.breaths;
+}
+const breathGainDb = () => parseFloat(els.inBreathDb.value) || -15;
 
 // The speed the two "speed up" buttons apply.
 function currentSpeedRate() {
@@ -764,7 +781,41 @@ function applySpanPlayback() {
   if (v.preservesPitch === false) v.preservesPitch = true;
   const silent = !!s && s.rate !== 1 && s.audio !== 'keep';
   if (v.muted !== silent) v.muted = silent;
-  if (previewGainNode) previewGainNode.gain.value = silent ? 0 : dbToLinear(currentAudioGainDb());
+  if (previewGainNode) {
+    const duck = inBreath(v.currentTime || 0) ? breathGainDb() : 0;
+    previewGainNode.gain.value = silent ? 0 : dbToLinear(currentAudioGainDb() + duck);
+  }
+}
+
+// Whether a source time lands in a breath that's being turned down. Binary
+// search: a long recording can hold hundreds of these and this runs every frame.
+function inBreath(t) {
+  const list = activeBreaths();
+  if (!list.length) return false;
+  let lo = 0, hi = list.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (t < list[mid].start) hi = mid - 1;
+    else if (t >= list[mid].end) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
+// The preview follows the edit under the playhead, and `timeupdate` only fires
+// about four times a second — too coarse for a breath. Track it per frame while
+// something is actually playing.
+let previewRaf = 0;
+function previewLoop() {
+  applySpanPlayback();
+  previewRaf = requestAnimationFrame(previewLoop);
+}
+function startPreviewLoop() {
+  if (!previewRaf) previewRaf = requestAnimationFrame(previewLoop);
+}
+function stopPreviewLoop() {
+  if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = 0; }
+  applySpanPlayback();
 }
 
 // How an edit reads in the UI, everywhere.
@@ -919,9 +970,9 @@ function setupPreview() {
   // Drive the play/pause icon off the video itself, so it stays honest however
   // playback started or stopped — the button, the Space bar, or the clip
   // reaching its end.
-  v.onplay = () => { renderPlayButton(); captions.overlayLoop(); };
-  v.onpause = renderPlayButton;
-  v.onended = renderPlayButton;
+  v.onplay = () => { renderPlayButton(); captions.overlayLoop(); startPreviewLoop(); };
+  v.onpause = () => { renderPlayButton(); stopPreviewLoop(); };
+  v.onended = () => { renderPlayButton(); stopPreviewLoop(); };
   renderPlayButton();
 
   els.btnSetIn.onclick = () => { state.inS = clamp(v.currentTime || 0, 0, state.outS - frameStep()); renderTrim(); };
@@ -1017,7 +1068,9 @@ function currentSettings() {
   const trimDur = keptDuration();   // selection length minus removed sections
   const volumeMode = currentVolumeMode();
   const audioGainDb = currentAudioGainDb();
-  return { mode, scale, outW, outH, outFps, codec, keepAudio, trimDur, volumeMode, audioGainDb };
+  const breathMode = els.inBreathMode ? els.inBreathMode.value : 'off';
+  const breathDb = parseFloat(els.inBreathDb && els.inBreathDb.value) || -15;
+  return { mode, scale, outW, outH, outFps, codec, keepAudio, trimDur, volumeMode, audioGainDb, breathMode, breathDb };
 }
 
 // Keep the Volume controls, hint text, and live preview gain in sync with
@@ -1041,7 +1094,65 @@ function updateAudioUI() {
   } else {
     els.hintVolume.textContent = '';
   }
+  updateBreathUI();
   updatePreviewGain();
+}
+
+function updateBreathUI() {
+  if (!els.inBreathMode) return;
+  const mode = els.inBreathMode.value;
+  els.fieldBreathDb.hidden = mode === 'off';
+  const found = (state && state.breaths) || [];
+  if (!state || !state.isAac) {
+    els.hintBreath.textContent = '';
+  } else if (!state.audioAnalysis) {
+    els.hintBreath.textContent = 'Listening for breaths…';
+  } else if (!found.length) {
+    els.hintBreath.textContent = 'No breaths found in this recording.';
+  } else {
+    const total = found.reduce((n, b) => n + (b.end - b.start), 0);
+    const what = mode === 'off' ? 'found'
+      : mode === 'shorten' ? `turned down ${breathGainDb()} dB, long ones shortened`
+      : `turned down ${breathGainDb()} dB`;
+    els.hintBreath.textContent = `${found.length} breath${found.length > 1 ? 's' : ''} · ${fmtTime(total)} of the recording · ${what}.`;
+  }
+  if (!state || !state.audioEncoderSupported) {
+    const note = state && state.audio && state.isAac
+      ? " This browser can't re-encode AAC, so breaths can't be changed here."
+      : '';
+    if (note) els.hintBreath.textContent = note.trim();
+  }
+}
+
+// "Turn down and shorten" tightens a long breath by running it fast and silent.
+// That is exactly what a speed-up edit already does, so it's expressed as one:
+// it shows on the timeline, it can be clicked away, and it needs no separate
+// path through the export. Tagged `breath` so regenerating them can't disturb
+// anything the user placed by hand.
+function syncBreathEdits() {
+  if (!state) return;
+  const before = JSON.stringify(state.edits);
+  state.edits = state.edits.filter((e) => e.src !== 'breath');
+  if (els.inBreathMode.value === 'shorten') {
+    const TARGET = 0.18;    // what a shortened breath is squeezed to, in seconds
+    const MIN = 0.35;       // leave short breaths alone; there's nothing to gain
+    for (const b of state.breaths || []) {
+      const dur = b.end - b.start;
+      if (dur < MIN) continue;
+      // Don't fight an edit the user already made over this stretch.
+      if (state.edits.some((e) => b.start < e.end - 1e-3 && b.end > e.start + 1e-3)) continue;
+      state.edits.push({
+        start: b.start, end: b.end, rate: Math.min(8, dur / TARGET), audio: 'mute', src: 'breath',
+      });
+    }
+  }
+  mergeEdits();
+  if (JSON.stringify(state.edits) !== before) {
+    renderTrim();
+    captions.renderList();
+    captions.renderOverlay();
+    queueSave();
+  }
 }
 
 function audioBytesPerSecond() {
@@ -1090,10 +1201,14 @@ function updateEstimate() {
 async function analyzeAudio(st) {
   const chunks = [];   // mono-mixed Float32Array pieces, concatenated at the end
   const ok = await decodeAudioTrack(st, (frame) => chunks.push(mixToMono(frame)));
-  if (!ok) return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0 };
+  if (!ok) return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0, breaths: [] };
   const mono = concatFloat32(chunks);
-  if (!mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0 };
-  return analyzeVoiceLevel(mono, st.audio.audio.sample_rate);
+  if (!mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0, breaths: [] };
+  const rate = st.audio.audio.sample_rate;
+  // The track is already decoded and in hand, so finding the breaths costs one
+  // more pass over it rather than another trip through the decoder.
+  const { breaths } = detectBreaths(mono, rate);
+  return { ...analyzeVoiceLevel(mono, rate), breaths };
 }
 
 function mixToMono(frame) {
@@ -1320,8 +1435,11 @@ async function compress() {
     // the original samples are copied through untouched — much the fastest path.
     const hasSpeed = spansUS.some((sp) => sp.rate !== 1);
     const wantsBoost = s.audioGainDb > 0.05;
+    // Turning breaths down is a change to the samples, so it needs the same
+    // decode → process → re-encode round trip that a boost or a speed-up does.
+    const wantsBreathWork = s.breathMode !== 'off' && !!(state.breaths && state.breaths.length);
     const canReencode = state.audioEncoderSupported;
-    const needAudioWork = s.keepAudio && !!audio && (hasSpeed || wantsBoost) && canReencode;
+    const needAudioWork = s.keepAudio && !!audio && (hasSpeed || wantsBoost || wantsBreathWork) && canReencode;
     // A speed-up we can't re-encode would silently desync the audio, so drop it.
     const dropAudio = s.keepAudio && !!audio && hasSpeed && !canReencode;
 
@@ -1438,6 +1556,18 @@ async function compress() {
       curProc = null;
     };
 
+    // Breaths are turned down *before* the leveller rather than after: the
+    // leveller holds its gain over anything this far below the voice, so a
+    // ducked breath stays ducked instead of being boosted back up — and the
+    // regions line up with the source timeline here, before the leveller's
+    // lookahead shifts everything by a few ms.
+    const breathRegions = wantsBreathWork ? state.breaths : [];
+    const duckBreaths = (slice, frames, startSec) => {
+      if (!breathRegions.length) return slice;
+      const copy = new Float32Array(slice);   // never write into the decoder's buffer
+      return duckRegions(copy, CH, SR, startSec, breathRegions, s.breathDb);
+    };
+
     // Boost first, so a sped-up section is boosted like everything else, then
     // speed. Returns interleaved samples ready for the section's processor.
     const gainStage = (slice, frames) => {
@@ -1456,10 +1586,10 @@ async function compress() {
       return g;
     };
 
-    const feedSpan = (slice, frames) => {
+    const feedSpan = (slice, frames, startSec) => {
       if (!curSpan) return;
       if (curSpan.rate !== 1 && curSpan.audio !== 'keep') return;   // silent: nothing to carry over
-      const processed = gainStage(slice, frames);
+      const processed = gainStage(duckBreaths(slice, frames, startSec), frames);
       if (curProc) spanOut(curProc.process(processed));
       else spanOut(processed);
     };
@@ -1503,7 +1633,7 @@ async function compress() {
             if (sp !== curSpan) { closeSpan(); openSpan(sp); }
             const room = Math.max(1, Math.ceil(((sp.endUS - tUS) / 1e6) * rate));
             const end = Math.min(n, i + room);
-            feedSpan(interleaved.subarray(i * ch, end * ch), end - i);
+            feedSpan(interleaved.subarray(i * ch, end * ch), end - i, tUS / 1e6);
             i = end;
           }
         } finally {
@@ -1699,13 +1829,14 @@ async function compress() {
     let audioNote = '';
     if (s.keepAudio && audio) {
       const speedNote = hasSpeed ? ' · sped-up sections re-timed' : '';
+      const breathNote = wantsBreathWork && !dropAudio ? ` · ${state.breaths.length} breaths turned down` : '';
       if (dropAudio) {
         audioNote = " (audio dropped — this browser can't re-encode AAC, which a speed change needs)";
       } else if (needAudioWork) {
         audioNote = audioEmitted > 0
           ? (wantsBoost
-              ? `${leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`}${speedNote}`
-              : speedNote)
+              ? `${leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`}${speedNote}${breathNote}`
+              : `${speedNote}${breathNote}`)
           : ' (no audio in the selected range)';
       } else if (audioOut.length) {
         let first = true;
@@ -1803,6 +1934,14 @@ function initUI() {
   [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain,
     els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapLook, els.inCapBurn]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
+  // Changing how breaths are handled can add or drop timeline edits, so it does
+  // more than the generic "something changed" refresh.
+  [els.inBreathMode, els.inBreathDb].forEach((el) => el.addEventListener('change', () => {
+    syncBreathEdits();
+    updateBreathUI();
+    updatePreviewGain();
+    updateEstimate();
+  }));
   document.querySelectorAll('input[name="volume"]').forEach((r) => r.addEventListener('change', updateEstimate));
 
   // The timeline is laid out in pixels, so it has to be repainted whenever its

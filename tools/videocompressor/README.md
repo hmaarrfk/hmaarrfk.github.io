@@ -195,6 +195,9 @@ reached, so trims near the start of a long video finish quickly.
 |------|------------|
 | `index.html` | The page. No Jekyll front matter, so the JS is served verbatim. Loads MP4Box as a global `<script>`, then the module. |
 | `compressor.js` | ES module: streaming demux, preview/trim, transcode, mux, and all UI wiring. |
+| `breath.js` | ES module: breath detection (gap + level + noise-like + rises out of the floor) and region ducking with ramps. Pure `Float32Array` maths, tested by `breath.test.mjs`. |
+| `breath.test.mjs` | Node test for the above. `node breath.test.mjs`. |
+| `audio-boost.test.mjs` | Node test for the leveller's non-speech hold. `node audio-boost.test.mjs`. |
 | `speed.js` | ES module: WSOLA time compression for sped-up sections that keep their narration. Pure functions on interleaved `Float32Array`s — no DOM/WebCodecs — so it runs under Node, which is where `speed.test.mjs` tests it. |
 | `speed.test.mjs` | Node test for the above: output length, pitch preservation, level, chunk-size independence. `node speed.test.mjs`. |
 | `audio-boost.js` | ES module: the voice-band loudness analysis, auto-gain, and soft-limiter math. Pure functions on `Float32Array`s — no DOM/WebCodecs — so it's usable standalone (e.g. under Node, fed raw PCM from `ffmpeg`) to sanity-check the algorithm outside the browser. |

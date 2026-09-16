@@ -355,6 +355,38 @@
         <p class="small muted" id="hint-volume" style="margin:8px 0 0"></p>
       </div>
 
+      <div class="field-group" id="breath-group" style="margin-top:14px">
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Breaths</label>
+        <p class="small muted" style="margin:6px 0 0">
+          Breathing between phrases is normal, and every podcast quietens it
+          afterwards rather than expecting the speaker not to breathe. Breaths
+          are found by character — noise-like, unvoiced, in the gaps — so quiet
+          <em>speech</em> isn't mistaken for one. Turning them down keeps the
+          rhythm of your delivery; removing them entirely tends to sound rushed,
+          which is why ducking is the default.
+        </p>
+        <div class="controls" style="margin-top:10px">
+          <div class="field">
+            <label for="in-breath-mode">Breath control</label>
+            <select id="in-breath-mode">
+              <option value="off" selected>Leave them alone</option>
+              <option value="duck">Turn them down</option>
+              <option value="shorten">Turn down and shorten</option>
+            </select>
+          </div>
+          <div class="field" id="field-breath-db" hidden>
+            <label for="in-breath-db">How much</label>
+            <select id="in-breath-db">
+              <option value="-10">Gentle (−10 dB)</option>
+              <option value="-15" selected>Medium (−15 dB)</option>
+              <option value="-24">Strong (−24 dB)</option>
+              <option value="-60">Near-silent (−60 dB)</option>
+            </select>
+          </div>
+        </div>
+        <p class="small muted" id="hint-breath" style="margin:8px 0 0"></p>
+      </div>
+
       <div class="field-group" id="captions-look-group" style="margin-top:14px">
         <label style="font-size:.85rem;color:var(--muted);font-weight:600">Caption appearance</label>
         <p class="small muted" style="margin:6px 0 0">
