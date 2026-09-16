@@ -463,12 +463,12 @@ export function createCaptions(ctx) {
         () => ctx.edits.apply(edit.start, edit.end, 1), 'active'));
       return wrap;
     }
-    const r = ctx.edits.rate();
+    const r = ctx.edits.rate(), rl = ctx.edits.rateLabel();
     wrap.append(
       actionButton('cut', 'Remove this from the video', () => ctx.edits.apply(start, end, 0), 'danger'),
-      actionButton(`${r}× voice`, `Play ${r}× faster, narration time-stretched (pitch kept)`,
+      actionButton(`${rl} voice`, `Play ${rl} faster, narration time-stretched (pitch kept)`,
         () => ctx.edits.apply(start, end, r, 'keep')),
-      actionButton(`${r}× silent`, `Play ${r}× faster with no sound — a time-lapse`,
+      actionButton(`${rl} silent`, `Play ${rl} faster with no sound — a time-lapse`,
         () => ctx.edits.apply(start, end, r, 'mute')),
     );
     return wrap;
@@ -499,9 +499,9 @@ export function createCaptions(ctx) {
       label.className = 'small muted';
       label.textContent = `${gaps.length} silence${gaps.length > 1 ? 's' : ''} over ${GAP_MIN}s · ${fmt.fmtTime(total)} total`;
       label.style.marginRight = 'auto';
-      const r = ctx.edits.rate();
+      const r = ctx.edits.rate(), rl = ctx.edits.rateLabel();
       bar.append(label,
-        actionButton(`all ${r}× silent`, 'Speed every one of those silences up, with no sound',
+        actionButton(`all ${rl} silent`, 'Speed every one of those silences up, with no sound',
           () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, r, 'mute'); }),
         actionButton('cut all', 'Remove every one of those silences',
           () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, 0); }, 'danger'));

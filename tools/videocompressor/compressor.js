@@ -271,6 +271,7 @@ const captions = createCaptions({
     apply: (start, end, rate, audio) => applyEdit(start, end, rate, audio),
     at: (t) => activeEdits().find((e) => t >= e.start - 1e-3 && t < e.end - 1e-3) || null,
     rate: () => currentSpeedRate(),
+    rateLabel: () => fmtRate(currentSpeedRate()),
     label: (e) => editLabel(e),
   },
   audio: {
@@ -734,8 +735,11 @@ function mergeEdits() {
 // The speed the two "speed up" buttons apply.
 function currentSpeedRate() {
   const r = parseFloat(els.inSpeedRate && els.inSpeedRate.value);
-  return isFinite(r) && r > 1 ? r : 4;
+  return isFinite(r) && r > 1 ? r : 2;
 }
+
+// Rates come from the menu in tenths, so print them without float dust.
+const fmtRate = (r) => `${Math.round(r * 100) / 100}×`;
 
 // "…, 2 cuts removed, 1 sped up" for the final-preview caption.
 function editNote() {
@@ -766,7 +770,7 @@ function applySpanPlayback() {
 // How an edit reads in the UI, everywhere.
 function editLabel(e) {
   if (!(e.rate > 0)) return 'cut';
-  return `${e.rate}×${e.audio === 'keep' ? '' : ' silent'}`;
+  return `${fmtRate(e.rate)}${e.audio === 'keep' ? '' : ' silent'}`;
 }
 
 function renderEdits() {

@@ -113,7 +113,9 @@ encoder via WebCodecs — entirely client-side — and optionally add
 - **Transcript-first.** Step 2 transcribes the *whole* file, then cutting and
   speeding are done by reading: each line and each silence longer than 1.5 s
   gets a row with `cut` / `N× voice` / `N× silent`, plus a toolbar that applies
-  one choice to every silence at once. The timeline still takes manual
+  one choice to every silence at once. The speed menu runs 1.1×–2× in tenths
+  (narration stays listenable in that range, so the fine steps are worth it)
+  then 2.5×–4× in halves; default 2×. The timeline still takes manual
   mark-start → action edits; red bands are cuts, blue are speed-ups.
 - **Speed, in the export.** Frames are spaced in *output* time, so a 4× section
   keeps every fourth frame instead of arriving 4× too fast. Any speed change
