@@ -4,7 +4,15 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-15 (**Read AAC from QuickTime sound descriptions.**
+_Last updated: 2026-09-15 (**Stop re-downloading Whisper.** The weights were
+being cached all along, but nothing said so and nothing protected the cache:
+the model list now reads `transformers-cache` and labels a model `downloaded`
+instead of quoting a size, and the page asks for durable storage before the
+first download so a 1.6 GB cache isn't evicted. The cache is per origin, so
+the live site and each local test *port* keep their own copy — use one fixed
+port locally.)_
+
+_Earlier: 2026-09-15 (**Read AAC from QuickTime sound descriptions.**
 macOS/iOS screen recordings store their AAC in a version-1 `mp4a` entry with
 the `esds` inside a `wave` box. MP4Box can't parse that, so it reported the
 codec as a bare `mp4a` and no `esds`. `AudioDecoder` rejects that config, so
@@ -91,6 +99,11 @@ encoder via WebCodecs — entirely client-side — and optionally add
     string is rebuilt from the AudioSpecificConfig (`mp4a` → `mp4a.40.2`).
 - **Captions**
   - Models: `onnx-community/whisper-{large-v3-turbo,small,base}_timestamped`.
+    Weights live in Cache Storage (`transformers-cache`), keyed by Hub URL.
+    The model list probes that cache for the preset's two `.onnx` weight files
+    and shows `downloaded` in place of the size; `navigator.storage.persist()`
+    is requested before the first download. The cache is per origin (and each
+    localhost port is its own origin).
     WebGPU dtypes: turbo = fp16 encoder + q4 decoder (q4 encoder if no
     `shader-f16`); small/base = fp32 encoder + q4 decoder. WASM: q8.
     Default: turbo with WebGPU, base without.
@@ -144,6 +157,10 @@ encoder via WebCodecs — entirely client-side — and optionally add
   live encode view, and in the result's frames; no console errors.
 - Regression: compress without captions (canvas only used when scaling),
   with volume boost, with trim + cuts.
+- Model cache: with weights already downloaded, the model list must say
+  `downloaded` for exactly those presets. Checked 2026-09-15 against the real
+  Cache Storage (turbo + base cached, small not) and Chrome granted durable
+  storage silently.
 - QuickTime audio: load a macOS screen recording `.mov`. The info line must
   say `audio: mp4a.40.2` (not `mp4a`), and Auto-boost must show a measured
   voice-band level. Checked 2026-09-15 on a 4.1 GB, 10 min ReplayKit

@@ -54,6 +54,7 @@ export function createCaptions(ctx) {
   let jobSeq = 0;
   let saveTimer = null;
   let raf = 0;
+  let cachedModels = {};   // preset key -> weights already in Cache Storage
 
   // ---- model presets -------------------------------------------------------
   async function detectDevice() {
@@ -61,12 +62,56 @@ export function createCaptions(ctx) {
       const adapter = navigator.gpu && await navigator.gpu.requestAdapter();
       if (adapter) asrEnv = { device: 'webgpu', f16: adapter.features.has('shader-f16') };
     } catch (_) { /* no WebGPU: the CPU (WASM) it is */ }
+    refreshCached();       // the device picks the dtype, and so the files to look for
   }
 
   function preset(key) {
     const m = ASR_MODELS[key] || ASR_MODELS.base;
     const cfg = asrEnv.device === 'webgpu' ? ((!asrEnv.f16 && m.webgpuNoF16) || m.webgpu) : m.wasm;
     return { key: ASR_MODELS[key] ? key : 'base', model: m.id, label: m.label, device: asrEnv.device, dtype: cfg.dtype, mb: cfg.mb };
+  }
+
+  // ---- the model cache -----------------------------------------------------
+  // transformers.js keeps downloaded weights in Cache Storage under
+  // `transformers-cache`, keyed by the Hub URL it fetched them from. That cache
+  // belongs to *this* origin, so the live site and a local test server each
+  // keep their own copy — same model, downloaded twice.
+  //
+  // Two things make the download feel less repetitive: ask the browser to make
+  // the storage durable (otherwise Chrome may evict a 1.6 GB cache when disk
+  // runs low), and tell the user which models are already on disk, so picking
+  // one isn't a gamble on a long download.
+  const HUB = 'https://huggingface.co/';
+  const DTYPE_SUFFIX = { fp32: '', fp16: '_fp16', q8: '_quantized', q4: '_q4', q4f16: '_q4f16', int8: '_int8', uint8: '_uint8', bnb4: '_bnb4' };
+  let persistedStorage = null;    // null = not asked yet
+
+  // The weight files a preset downloads. Everything else it fetches (configs,
+  // the tokenizer) is a few KB, so these alone decide "is it already here".
+  function weightURLs(p) {
+    const d = typeof p.dtype === 'string' ? { encoder_model: p.dtype, decoder_model_merged: p.dtype } : p.dtype;
+    return Object.entries(d).map(([f, t]) =>
+      `${HUB}${p.model}/resolve/main/onnx/${f}${DTYPE_SUFFIX[t] ?? ''}.onnx`);
+  }
+
+  async function isModelCached(p) {
+    try {
+      if (!self.caches || !(await caches.has('transformers-cache'))) return false;
+      const cache = await caches.open('transformers-cache');
+      const hits = await Promise.all(weightURLs(p).map((u) => cache.match(u)));
+      return hits.every(Boolean);
+    } catch (_) { return false; }   // private window, storage blocked: just quote the size
+  }
+
+  // Durable storage keeps the weights from being evicted under disk pressure.
+  // Chrome decides silently (bookmark the page / visit it a few times and it
+  // says yes); Safari and Firefox may prompt or refuse. Either way it's a
+  // hint, not a guarantee, so nothing here depends on the answer.
+  async function requestPersistence() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) return false;
+      persistedStorage = (await navigator.storage.persisted()) || (await navigator.storage.persist());
+    } catch (_) { persistedStorage = false; }
+    return persistedStorage;
   }
 
   // Built once at boot and again when the GPU probe answers (the labels carry
@@ -81,11 +126,22 @@ export function createCaptions(ctx) {
       const p = preset(key);
       const o = document.createElement('option');
       o.value = key;
-      o.textContent = `${p.label} (${fmtMB(p.mb)})`;
+      o.textContent = `${p.label} (${cachedModels[key] ? 'downloaded' : fmtMB(p.mb)})`;
       sel.appendChild(o);
     }
     sel.value = chosen && ASR_MODELS[chosen] ? chosen : (asrEnv.device === 'webgpu' ? 'turbo' : 'base');
     if (getState()) updateUI();
+  }
+
+  // Which presets are already on disk, for the labels above. Re-run after a
+  // download so the list stops quoting a size the user no longer has to pay.
+  async function refreshCached() {
+    const seen = await Promise.all(Object.keys(ASR_MODELS).map((k) => isModelCached(preset(k))));
+    let changed = false;
+    Object.keys(ASR_MODELS).forEach((k, i) => {
+      if (cachedModels[k] !== seen[i]) { cachedModels[k] = seen[i]; changed = true; }
+    });
+    if (changed) populateModels();
   }
 
   // ---- small helpers -------------------------------------------------------
@@ -100,9 +156,11 @@ export function createCaptions(ctx) {
     const state = getState();
     if (!state) return;
     const p = preset(els.inCapModel.value);
+    const cached = cachedModels[p.key];
+    const download = cached ? 'Already downloaded — starts straight away' : `${fmtMB(p.mb)} download the first time (cached after)`;
     els.hintCapModel.textContent = p.device === 'webgpu'
-      ? `${fmtMB(p.mb)} download the first time (cached after) · runs on your GPU via WebGPU.`
-      : `${fmtMB(p.mb)} download the first time · no WebGPU in this browser, so it runs on the CPU — much slower (Whisper base recommended).`;
+      ? `${download} · runs on your GPU via WebGPU.`
+      : `${download} · no WebGPU in this browser, so it runs on the CPU — much slower (Whisper base recommended).`;
     const has = !!(state.captions && state.captions.cues.length);
     const busy = !!job;
     els.btnCapGen.hidden = busy;
@@ -309,6 +367,9 @@ export function createCaptions(ctx) {
       setProgress(0, els.capProgress);
 
       const finished = new Promise((resolve, reject) => { j.resolve = resolve; j.reject = reject; });
+      // Ask for durable storage before the weights land, so a 1.6 GB cache
+      // isn't the first thing evicted when the disk fills up.
+      if (persistedStorage === null) await requestPersistence();
       ensureWorker().postMessage({
         type: 'transcribe', id: j.id, model: p.model, dtype: p.dtype, device: p.device,
         audio: compact.audio, chunks: j.chunks, language: els.inCapLang.value,
@@ -321,6 +382,7 @@ export function createCaptions(ctx) {
     } finally {
       if (job === j) job = null;
       setProgress(null, els.capProgress);
+      refreshCached();   // anything downloaded just now is cached from here on
       if (getState() === st) {
         if (!j.words.length) st.captions = outcome === 'done' ? null : prev;
         const n = st.captions ? st.captions.cues.length : 0;
@@ -490,6 +552,7 @@ export function createCaptions(ctx) {
   // Buttons the page doesn't otherwise touch.
   function wire() {
     els.inCapModel.addEventListener('change', () => { els.inCapModel.dataset.chosen = els.inCapModel.value; });
+    refreshCached();
     els.btnCapGen.addEventListener('click', generate);
     els.btnCapCancel.addEventListener('click', stop);
     els.btnCapClear.addEventListener('click', clear);

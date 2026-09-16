@@ -82,9 +82,20 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     large-v3-turbo (default with WebGPU; fp16 encoder + q4 decoder ≈ 1.6 GB),
     small (≈ 590 MB), base (≈ 210 MB; default without WebGPU). Weights
     download from the Hugging Face Hub the first time and are cached by the
-    browser (Cache Storage). ONNX Runtime's WASM comes from jsDelivr (pinned
-    by transformers.js) — so captions, unlike the rest of the tool, need the
-    network the first time. The audio itself never leaves the page.
+    browser (Cache Storage, under `transformers-cache`, keyed by the Hub URL).
+    ONNX Runtime's WASM comes from jsDelivr (pinned by transformers.js) — so
+    captions, unlike the rest of the tool, need the network the first time.
+    The audio itself never leaves the page.
+  - **"Downloaded" labels** — the model list looks the weights up in that cache
+    and says `downloaded` instead of a size when they're already there, so
+    picking a model isn't a gamble on a long download.
+  - **Durable storage** — before the first download the page calls
+    `navigator.storage.persist()`, so the browser won't evict a 1.6 GB model
+    cache under disk pressure. Chrome usually grants this silently.
+  - That cache is **per origin**. `https://www.markharfouche.com/` and a local
+    `http://127.0.0.1:<port>/` each keep their own copy, and *each port is a
+    different origin* — so testing on a new port re-downloads the model. Use
+    one fixed port locally to reuse it.
   - **Audio** — only the kept sections (trim minus cuts) are decoded,
     resampled to 16 kHz mono and joined back to back, i.e. exactly the
     output's audio.
