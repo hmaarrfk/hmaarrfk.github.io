@@ -183,6 +183,21 @@ export function createLeveler(sampleRate, opts = {}) {
   const envAttackCoef = timeConst(opts.envAttackSec ?? 0.002);
   const envReleaseCoef = timeConst(opts.envReleaseSec ?? 0.2);
   const lookaheadFrames = Math.max(1, Math.round((opts.lookaheadSec ?? 0.015) * sampleRate));
+  // Sit this far under the loudest recent voice and nobody is talking, so there
+  // is nothing worth turning up: hold the gain where it is rather than riding
+  // it toward the ceiling. Without this the gaps are exactly where the AGC has
+  // the most room to push, so it amplifies breaths, room tone and keyboard
+  // noise — and the quieter the recording, the louder they get. Gain may still
+  // come *down* here, so the limiter keeps working.
+  //
+  // The reference is measured here, from the same envelope the gain is computed
+  // from, rather than taken from the caller: a level measured any other way
+  // (say, a bandpassed percentile over the whole track) is on a different
+  // scale, and comparing across the two silently does nothing.
+  const holdRange = dbToLinear(-(opts.holdRangeDb ?? 18));
+  const voicePeakAttack = timeConst(opts.voicePeakAttackSec ?? 0.05);
+  const voicePeakRelease = timeConst(opts.voicePeakReleaseSec ?? 30);
+  let voicePeak = 0;
 
   const bandpass = createVoiceBandpassStream(sampleRate, opts.loHz, opts.hiHz);
   let voiceEnv = 0, peakEnv = 0, gain = 1;
@@ -218,9 +233,23 @@ export function createLeveler(sampleRate, opts = {}) {
         for (let c = 0; c < channels; c++) { const a = Math.abs(interleaved[srcBase + c]); if (a > bAbs) bAbs = a; }
         peakEnv = stepEnv(peakEnv, bAbs, envAttackCoef, envReleaseCoef);
 
+        // Remembers the level of speech across a gap (slow release), so the
+        // hold still knows what "talking" sounded like a second ago.
+        voicePeak = stepEnv(voicePeak, voiceEnv, voicePeakAttack, voicePeakRelease);
+
         const desired = Math.min(maxGainLinear, targetLinear / Math.max(1e-6, voiceEnv));
         const headroom = ceiling / Math.max(1e-6, peakEnv);
-        const wanted = Math.max(1, Math.min(desired, headroom));
+        let wanted = Math.max(1, Math.min(desired, headroom));
+        if (voiceEnv < voicePeak * holdRange) {
+          // Nobody is talking. Don't push any further, and come back to the
+          // gain the recent speech actually needed: by the time the envelope
+          // has fallen this far the gain has already been climbing for a few
+          // hundred ms, so holding alone would leave the gap louder than the
+          // voice around it. Matching the speech gain keeps a breath exactly
+          // as far below the voice as it was when it was recorded.
+          const speechGain = Math.min(maxGainLinear, targetLinear / Math.max(1e-6, voicePeak));
+          wanted = Math.min(wanted, gain, speechGain);
+        }
         gain = (wanted < gain ? attackCoef : releaseCoef) * gain + (1 - (wanted < gain ? attackCoef : releaseCoef)) * wanted;
 
         // The ring slot we're about to overwrite holds the oldest buffered

@@ -54,6 +54,7 @@ export function createCaptions(ctx) {
   let jobSeq = 0;
   let saveTimer = null;
   let raf = 0;
+  let cachedModels = {};   // preset key -> weights already in Cache Storage
 
   // ---- model presets -------------------------------------------------------
   async function detectDevice() {
@@ -61,12 +62,56 @@ export function createCaptions(ctx) {
       const adapter = navigator.gpu && await navigator.gpu.requestAdapter();
       if (adapter) asrEnv = { device: 'webgpu', f16: adapter.features.has('shader-f16') };
     } catch (_) { /* no WebGPU: the CPU (WASM) it is */ }
+    refreshCached();       // the device picks the dtype, and so the files to look for
   }
 
   function preset(key) {
     const m = ASR_MODELS[key] || ASR_MODELS.base;
     const cfg = asrEnv.device === 'webgpu' ? ((!asrEnv.f16 && m.webgpuNoF16) || m.webgpu) : m.wasm;
     return { key: ASR_MODELS[key] ? key : 'base', model: m.id, label: m.label, device: asrEnv.device, dtype: cfg.dtype, mb: cfg.mb };
+  }
+
+  // ---- the model cache -----------------------------------------------------
+  // transformers.js keeps downloaded weights in Cache Storage under
+  // `transformers-cache`, keyed by the Hub URL it fetched them from. That cache
+  // belongs to *this* origin, so the live site and a local test server each
+  // keep their own copy — same model, downloaded twice.
+  //
+  // Two things make the download feel less repetitive: ask the browser to make
+  // the storage durable (otherwise Chrome may evict a 1.6 GB cache when disk
+  // runs low), and tell the user which models are already on disk, so picking
+  // one isn't a gamble on a long download.
+  const HUB = 'https://huggingface.co/';
+  const DTYPE_SUFFIX = { fp32: '', fp16: '_fp16', q8: '_quantized', q4: '_q4', q4f16: '_q4f16', int8: '_int8', uint8: '_uint8', bnb4: '_bnb4' };
+  let persistedStorage = null;    // null = not asked yet
+
+  // The weight files a preset downloads. Everything else it fetches (configs,
+  // the tokenizer) is a few KB, so these alone decide "is it already here".
+  function weightURLs(p) {
+    const d = typeof p.dtype === 'string' ? { encoder_model: p.dtype, decoder_model_merged: p.dtype } : p.dtype;
+    return Object.entries(d).map(([f, t]) =>
+      `${HUB}${p.model}/resolve/main/onnx/${f}${DTYPE_SUFFIX[t] ?? ''}.onnx`);
+  }
+
+  async function isModelCached(p) {
+    try {
+      if (!self.caches || !(await caches.has('transformers-cache'))) return false;
+      const cache = await caches.open('transformers-cache');
+      const hits = await Promise.all(weightURLs(p).map((u) => cache.match(u)));
+      return hits.every(Boolean);
+    } catch (_) { return false; }   // private window, storage blocked: just quote the size
+  }
+
+  // Durable storage keeps the weights from being evicted under disk pressure.
+  // Chrome decides silently (bookmark the page / visit it a few times and it
+  // says yes); Safari and Firefox may prompt or refuse. Either way it's a
+  // hint, not a guarantee, so nothing here depends on the answer.
+  async function requestPersistence() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) return false;
+      persistedStorage = (await navigator.storage.persisted()) || (await navigator.storage.persist());
+    } catch (_) { persistedStorage = false; }
+    return persistedStorage;
   }
 
   // Built once at boot and again when the GPU probe answers (the labels carry
@@ -81,11 +126,22 @@ export function createCaptions(ctx) {
       const p = preset(key);
       const o = document.createElement('option');
       o.value = key;
-      o.textContent = `${p.label} (${fmtMB(p.mb)})`;
+      o.textContent = `${p.label} (${cachedModels[key] ? 'downloaded' : fmtMB(p.mb)})`;
       sel.appendChild(o);
     }
     sel.value = chosen && ASR_MODELS[chosen] ? chosen : (asrEnv.device === 'webgpu' ? 'turbo' : 'base');
     if (getState()) updateUI();
+  }
+
+  // Which presets are already on disk, for the labels above. Re-run after a
+  // download so the list stops quoting a size the user no longer has to pay.
+  async function refreshCached() {
+    const seen = await Promise.all(Object.keys(ASR_MODELS).map((k) => isModelCached(preset(k))));
+    let changed = false;
+    Object.keys(ASR_MODELS).forEach((k, i) => {
+      if (cachedModels[k] !== seen[i]) { cachedModels[k] = seen[i]; changed = true; }
+    });
+    if (changed) populateModels();
   }
 
   // ---- small helpers -------------------------------------------------------
@@ -100,9 +156,11 @@ export function createCaptions(ctx) {
     const state = getState();
     if (!state) return;
     const p = preset(els.inCapModel.value);
+    const cached = cachedModels[p.key];
+    const download = cached ? 'Already downloaded — starts straight away' : `${fmtMB(p.mb)} download the first time (cached after)`;
     els.hintCapModel.textContent = p.device === 'webgpu'
-      ? `${fmtMB(p.mb)} download the first time (cached after) · runs on your GPU via WebGPU.`
-      : `${fmtMB(p.mb)} download the first time · no WebGPU in this browser, so it runs on the CPU — much slower (Whisper base recommended).`;
+      ? `${download} · runs on your GPU via WebGPU.`
+      : `${download} · no WebGPU in this browser, so it runs on the CPU — much slower (Whisper base recommended).`;
     const has = !!(state.captions && state.captions.cues.length);
     const busy = !!job;
     els.btnCapGen.hidden = busy;
@@ -120,7 +178,7 @@ export function createCaptions(ctx) {
     let note = '';
     if (has && !busy && state.captions.segs) {
       const covered = timeline.keptSegments().every((k) => state.captions.segs.some((c) => k.start >= c.start - 0.05 && k.end <= c.end + 0.05));
-      if (!covered) note = 'Your trim now includes parts that weren’t transcribed — generate again to caption them.';
+      if (!covered) note = 'Parts of your selection weren’t transcribed — generate again to cover them.';
     }
     els.capNote.textContent = note;
     els.capNote.hidden = !note;
@@ -257,6 +315,12 @@ export function createCaptions(ctx) {
     const toSource = (o) => timeline.fromOutputTime(o, j.segs);
     state.captions = {
       cues: wordsToCues(onOutput).map((c) => ({ start: toSource(c.start), end: toSource(c.end), text: c.text })),
+      // The word timings are kept, not just the cues they get merged into. A
+      // cue spans a whole phrase *including its pauses* — consecutive cues are
+      // usually butted right up against each other — so it says almost nothing
+      // about where speech actually stops. Word spans do, and that's what the
+      // breath detector needs to know where the gaps are.
+      words: onOutput.map((w) => ({ start: toSource(w.start), end: toSource(w.end) })),
       language: j.language, model: j.preset.key, segs: j.segs,
     };
     renderOverlay();
@@ -269,7 +333,7 @@ export function createCaptions(ctx) {
     const st = state;
     const p = preset(els.inCapModel.value);
     const j = job = {
-      id: ++jobSeq, st, preset: p, segs: timeline.keptSegments(),
+      id: ++jobSeq, st, preset: p, segs: timeline.fullSegments(),
       chunks: [], chunkWords: [], words: [], map: null, files: {}, language: null, stop: false,
     };
     const prev = st.captions;
@@ -309,6 +373,9 @@ export function createCaptions(ctx) {
       setProgress(0, els.capProgress);
 
       const finished = new Promise((resolve, reject) => { j.resolve = resolve; j.reject = reject; });
+      // Ask for durable storage before the weights land, so a 1.6 GB cache
+      // isn't the first thing evicted when the disk fills up.
+      if (persistedStorage === null) await requestPersistence();
       ensureWorker().postMessage({
         type: 'transcribe', id: j.id, model: p.model, dtype: p.dtype, device: p.device,
         audio: compact.audio, chunks: j.chunks, language: els.inCapLang.value,
@@ -321,6 +388,7 @@ export function createCaptions(ctx) {
     } finally {
       if (job === j) job = null;
       setProgress(null, els.capProgress);
+      refreshCached();   // anything downloaded just now is cached from here on
       if (getState() === st) {
         if (!j.words.length) st.captions = outcome === 'done' ? null : prev;
         const n = st.captions ? st.captions.cues.length : 0;
@@ -366,6 +434,52 @@ export function createCaptions(ctx) {
 
   // ---- the cue list --------------------------------------------------------
   // Editable list of cues (output timecodes; cues in removed sections dimmed).
+  // The transcript is the edit surface. Every line can be cut or sped up, and
+  // the silences *between* lines get rows of their own — reading down the
+  // column is how you decide what the screencast keeps, which is much easier
+  // than guessing from a waveform.
+  const GAP_MIN = 1.5;            // shorter than this is a breath, not a section
+
+  function actionButton(label, title, onClick, tone) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.title = title;
+    b.style.cssText =
+      'padding:2px 7px;font-size:.72rem;font-weight:600;border-radius:5px;cursor:pointer;' +
+      'border:1px solid var(--border);background:var(--panel-2);color:var(--text);white-space:nowrap;' +
+      (tone === 'danger' ? 'border-color:#e74c3c;color:#e74c3c;' : '') +
+      (tone === 'active' ? 'border-color:#3478f6;background:#3478f6;color:#fff;' : '');
+    b.onclick = onClick;
+    return b;
+  }
+
+  // The buttons every row carries: cut it, speed it up with the voice kept,
+  // speed it up silently, or put it back.
+  function rowActions(start, end) {
+    const wrap = document.createElement('span');
+    wrap.style.cssText = 'display:flex;gap:4px;flex:0 0 auto';
+    const edit = ctx.edits.at(start + 0.01);
+    const covers = edit && edit.start <= start + 0.05 && edit.end >= end - 0.05;
+    if (covers) {
+      const tag = document.createElement('span');
+      tag.textContent = ctx.edits.label(edit);
+      tag.style.cssText = 'font-size:.72rem;font-weight:700;color:var(--muted);align-self:center;min-width:4.2em;text-align:right';
+      wrap.append(tag, actionButton('restore', 'Play this at normal speed again',
+        () => ctx.edits.apply(edit.start, edit.end, 1), 'active'));
+      return wrap;
+    }
+    const r = ctx.edits.rate(), rl = ctx.edits.rateLabel();
+    wrap.append(
+      actionButton('cut', 'Remove this from the video', () => ctx.edits.apply(start, end, 0), 'danger'),
+      actionButton(`${rl} voice`, `Play ${rl} faster, narration time-stretched (pitch kept)`,
+        () => ctx.edits.apply(start, end, r, 'keep')),
+      actionButton(`${rl} silent`, `Play ${rl} faster with no sound — a time-lapse`,
+        () => ctx.edits.apply(start, end, r, 'mute')),
+    );
+    return wrap;
+  }
+
   function renderList() {
     const state = getState();
     const list = els.capList;
@@ -373,15 +487,61 @@ export function createCaptions(ctx) {
     const caps = state && state.captions;
     if (!caps || !caps.cues.length || job) { list.hidden = true; return; }
     const frag = document.createDocumentFragment();
+
+    // One-tap tidy-up: every long silence becomes a time-lapse.
+    const gaps = [];
+    let prevEnd = 0;
     for (const c of caps.cues) {
-      const os = timeline.toOutputTime(c.start), oe = timeline.toOutputTime(c.end);
-      const kept = oe - os > 0.05;
+      if (c.start - prevEnd > GAP_MIN) gaps.push({ start: prevEnd, end: c.start });
+      prevEnd = Math.max(prevEnd, c.end);
+    }
+    if (state.durationS - prevEnd > GAP_MIN) gaps.push({ start: prevEnd, end: state.durationS });
+
+    if (gaps.length) {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'display:flex;gap:6px;align-items:center;padding:4px 0 8px;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap';
+      const label = document.createElement('span');
+      const total = gaps.reduce((n, g) => n + (g.end - g.start), 0);
+      label.className = 'small muted';
+      label.textContent = `${gaps.length} silence${gaps.length > 1 ? 's' : ''} over ${GAP_MIN}s · ${fmt.fmtTime(total)} total`;
+      label.style.marginRight = 'auto';
+      const r = ctx.edits.rate(), rl = ctx.edits.rateLabel();
+      bar.append(label,
+        actionButton(`all ${rl} silent`, 'Speed every one of those silences up, with no sound',
+          () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, r, 'mute'); }),
+        actionButton('cut all', 'Remove every one of those silences',
+          () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, 0); }, 'danger'));
+      frag.appendChild(bar);
+    }
+
+    const gapRow = (start, end) => {
       const row = document.createElement('div');
-      row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${kept ? '' : 'opacity:.4'}`;
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:3px 0;opacity:.75';
+      const time = document.createElement('span');
+      time.textContent = fmt.fmtTime(timeline.toOutputTime(start));
+      time.style.cssText = 'font-variant-numeric:tabular-nums;min-width:5.2em;font-size:.85rem;color:var(--muted)';
+      const what = document.createElement('span');
+      what.textContent = `— ${(end - start).toFixed(1)} s of silence —`;
+      what.className = 'small muted';
+      what.style.cssText = 'flex:1;min-width:0;font-style:italic';
+      row.append(time, what, rowActions(start, end));
+      return row;
+    };
+
+    let last = 0;
+    for (const c of caps.cues) {
+      if (c.start - last > GAP_MIN) frag.appendChild(gapRow(last, c.start));
+      last = Math.max(last, c.end);
+
+      const os = timeline.toOutputTime(c.start), oe = timeline.toOutputTime(c.end);
+      const edit = ctx.edits.at(c.start + 0.01);
+      const cut = !!edit && !(edit.rate > 0);
+      const row = document.createElement('div');
+      row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${cut || oe - os <= 0.02 ? 'opacity:.45' : ''}`;
       const time = document.createElement('button');
       time.type = 'button';
-      time.textContent = kept ? fmt.fmtTime(os) : 'cut';
-      time.title = 'Jump to this caption';
+      time.textContent = cut ? 'cut' : fmt.fmtTime(os);
+      time.title = 'Jump to this line';
       time.style.cssText = 'background:none;border:0;color:inherit;cursor:pointer;font:inherit;font-variant-numeric:tabular-nums;min-width:5.2em;text-align:left;padding:0';
       time.onclick = () => { els.preview.pause(); timeline.seek(c.start + 0.01); };
       const input = document.createElement('input');
@@ -389,9 +549,11 @@ export function createCaptions(ctx) {
       input.value = c.text;
       input.style.cssText = 'flex:1;min-width:0';
       input.oninput = () => { c.text = input.value; renderOverlay(); queueSave(); };
-      row.append(time, input);
+      row.append(time, input, rowActions(c.start, c.end));
       frag.appendChild(row);
     }
+    if (state.durationS - last > GAP_MIN) frag.appendChild(gapRow(last, state.durationS));
+
     list.appendChild(frag);
     list.hidden = false;
   }
@@ -432,6 +594,10 @@ export function createCaptions(ctx) {
     const state = getState();
     const out = [];
     for (const c of state.captions.cues) {
+      // A silent time-lapse has nothing to say: flashing its transcript past at
+      // 8× would be unreadable noise over footage nobody can hear.
+      const edit = ctx.edits.at(c.start + 0.01);
+      if (edit && edit.rate !== 1 && edit.audio !== 'keep') continue;
       const start = timeline.toOutputTime(c.start), end = timeline.toOutputTime(c.end);
       const text = c.text.trim();
       if (end - start > 0.05 && text) out.push({ start, end, text });
@@ -463,7 +629,8 @@ export function createCaptions(ctx) {
       const d = JSON.parse(localStorage.getItem(LS_CAP_KEY) || 'null');
       if (!d || !d.file || d.file.name !== file.name || d.file.size !== file.size || d.file.lastModified !== file.lastModified) return null;
       const cues = (d.cues || []).filter((c) => c && isFinite(c.start) && isFinite(c.end) && typeof c.text === 'string');
-      return cues.length ? { cues, language: d.language || null, model: d.model || null, segs: Array.isArray(d.segs) ? d.segs : null } : null;
+      const words = (d.words || []).filter((w) => w && isFinite(w.start) && isFinite(w.end));
+      return cues.length ? { cues, words, language: d.language || null, model: d.model || null, segs: Array.isArray(d.segs) ? d.segs : null } : null;
     } catch (_) { return null; }
   }
 
@@ -490,6 +657,7 @@ export function createCaptions(ctx) {
   // Buttons the page doesn't otherwise touch.
   function wire() {
     els.inCapModel.addEventListener('change', () => { els.inCapModel.dataset.chosen = els.inCapModel.value; });
+    refreshCached();
     els.btnCapGen.addEventListener('click', generate);
     els.btnCapCancel.addEventListener('click', stop);
     els.btnCapClear.addEventListener('click', clear);
