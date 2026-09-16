@@ -369,20 +369,59 @@ async function videoDescription(file, mp4, trackId) {
   return null;
 }
 
-async function aacDescription(file, mp4, trackId) {
+// The esds payload (after its version/flags) of an mp4a sample entry. MP4Box
+// finds it directly in MP4 files, but QuickTime sound descriptions — version
+// 1/2 entries, which macOS/iOS screen recordings write — carry extra fields
+// MP4Box doesn't skip, and nest the esds inside a `wave` box. MP4Box then sees
+// no esds at all, so look for it in the entry's raw bytes instead.
+async function esdsPayload(file, entry) {
+  if (entry.esds) return boxPayload(file, entry.esds);
+  const bytes = new Uint8Array(await readRange(file, entry.start, entry.start + entry.size));
+  const dv = new DataView(bytes.buffer);
+  for (let i = 4; i + 12 <= bytes.length; i++) {
+    if (bytes[i] !== 0x65 || bytes[i + 1] !== 0x73 || bytes[i + 2] !== 0x64 || bytes[i + 3] !== 0x73) continue;   // 'esds'
+    const size = dv.getUint32(i - 4);
+    if (size >= 12 && i - 4 + size <= bytes.length) return bytes.slice(i + 8, i - 4 + size);
+  }
+  return null;
+}
+
+// The MPEG-4 descriptors of an esds: the object type and the
+// AudioSpecificConfig (what AudioDecoder wants as `description`).
+async function aacConfig(file, mp4, trackId) {
   const trak = mp4.getTrackById(trackId);
   for (const entry of trak.mdia.minf.stbl.stsd.entries) {
-    if (!entry.esds) continue;
-    const v = await boxPayload(file, entry.esds);
+    if (entry.type !== 'mp4a') continue;
+    const v = await esdsPayload(file, entry);
+    if (!v) continue;
     const o = { p: 0 };
     const readLen = () => { let b, n = 0; do { b = v[o.p++]; n = (n << 7) | (b & 0x7f); } while (b & 0x80); return n; };
     if (v[o.p++] !== 0x03) return null; readLen(); o.p += 3;   // ES_Descriptor
-    if (v[o.p++] !== 0x04) return null; readLen(); o.p += 13;  // DecoderConfigDescriptor
+    if (v[o.p++] !== 0x04) return null; readLen();             // DecoderConfigDescriptor
+    const objectType = v[o.p]; o.p += 13;
     if (v[o.p++] !== 0x05) return null;                        // DecoderSpecificInfo
     const len = readLen();                                     // advance o.p BEFORE slicing
-    return v.slice(o.p, o.p + len);
+    return { objectType, asc: v.slice(o.p, o.p + len) };
   }
   return null;
+}
+
+async function aacDescription(file, mp4, trackId) {
+  const cfg = await aacConfig(file, mp4, trackId);
+  return cfg ? cfg.asc : null;
+}
+
+// WebCodecs needs the full codec string (`mp4a.40.2`), which MP4Box builds
+// from the esds — for a QuickTime sound description it reports just `mp4a`.
+// Rebuild it from the AudioSpecificConfig's audio object type.
+async function fixAacCodec(file, mp4, audio) {
+  if (!audio || audio.codec !== 'mp4a') return;
+  const cfg = await aacConfig(file, mp4, audio.id).catch(() => null);
+  if (!cfg || !cfg.asc.length) return;
+  const a = cfg.asc;
+  let aot = a[0] >> 3;
+  if (aot === 31 && a.length > 1) aot = 32 + (((a[0] & 0x07) << 3) | (a[1] >> 5));
+  audio.codec = `mp4a.${cfg.objectType.toString(16)}.${aot}`;
 }
 
 // Parse a file's metadata into a fresh MP4Box instance. Cheap (moov only), so
@@ -428,6 +467,7 @@ async function loadFile(file) {
   const video = info.videoTracks && info.videoTracks[0];
   if (!video) throw new Error('No video track found in this file.');
   const audio = info.audioTracks && info.audioTracks[0];
+  await fixAacCodec(file, mp4, audio);
 
   const durationS = info.duration / info.timescale;
   const fps = video.nb_samples / (video.duration / video.timescale);

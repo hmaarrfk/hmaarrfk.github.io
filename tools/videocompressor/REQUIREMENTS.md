@@ -4,7 +4,16 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-13 (**Captions: transcribe only the speech, and split
+_Last updated: 2026-09-15 (**Read AAC from QuickTime sound descriptions.**
+macOS/iOS screen recordings store their AAC in a version-1 `mp4a` entry with
+the `esds` inside a `wave` box. MP4Box can't parse that, so it reported the
+codec as a bare `mp4a` and no `esds`. `AudioDecoder` rejects that config, so
+captions failed with "This browser can't decode the video's audio", auto-boost
+silently measured nothing, and passthrough muxed AAC without its
+AudioSpecificConfig. `compressor.js` now finds the `esds` in the entry's raw
+bytes and rebuilds `mp4a.40.<aot>` at load.)_
+
+_Earlier: 2026-09-13 (**Captions: transcribe only the speech, and split
 the source up.** Voice activity detection + silence compaction (with a span
 map back to real time) replace "feed it everything"; cues break at punctuation
 rather than a hard character count; the caption UI/job code moved out of
@@ -76,6 +85,10 @@ encoder via WebCodecs — entirely client-side — and optionally add
   Settings/Export after a resize, and a scrollbar appearing or the cue list
   growing was missed everywhere.
 - AAC audio passthrough, or volume boost (manual / auto).
+  - AAC in QuickTime sound descriptions (version 1/2 `mp4a` with the `esds`
+    nested in `wave`, as macOS/iOS screen recordings write it) is found by
+    scanning the sample entry's bytes, since MP4Box doesn't see it. The codec
+    string is rebuilt from the AudioSpecificConfig (`mp4a` → `mp4a.40.2`).
 - **Captions**
   - Models: `onnx-community/whisper-{large-v3-turbo,small,base}_timestamped`.
     WebGPU dtypes: turbo = fp16 encoder + q4 decoder (q4 encoder if no
@@ -131,6 +144,10 @@ encoder via WebCodecs — entirely client-side — and optionally add
   live encode view, and in the result's frames; no console errors.
 - Regression: compress without captions (canvas only used when scaling),
   with volume boost, with trim + cuts.
+- QuickTime audio: load a macOS screen recording `.mov`. The info line must
+  say `audio: mp4a.40.2` (not `mp4a`), and Auto-boost must show a measured
+  voice-band level. Checked 2026-09-15 on a 4.1 GB, 10 min ReplayKit
+  recording: −34 dBFS, and Chrome's `AudioDecoder` rejects a bare `mp4a`.
 
 ## Future ideas
 
