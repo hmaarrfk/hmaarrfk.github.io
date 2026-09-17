@@ -19,11 +19,12 @@
 //                          ─► shapeEnds      ─► no click at the seam
 //                          ─► toInterleaved  ─► what the encoder takes
 //
-// Two things make this work at all on a screencast. The span is snapped to
-// the *middle of the surrounding pauses* rather than to the words, so the
-// seam lands in room tone where a few ms of fade is inaudible; and the
-// reference clip comes out of the same recording, so the cloned voice
-// arrives with the same microphone and the same room already on it.
+// Two things make this work at all on a screencast. The span is snapped
+// *into the surrounding pauses* rather than to the words, so the seam lands
+// in room tone where a few ms of fade is inaudible and no part of the old
+// line survives at the edges; and the reference clip comes out of the same
+// recording, so the cloned voice arrives with the same microphone and the
+// same room already on it.
 
 import { createTimeStretcher } from './speed.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
@@ -75,13 +76,29 @@ export function isChanged(cue) {
 // A cue's own start and end sit on the first and last word, which is the
 // worst place to cut: the seam lands on a consonant, and any level or
 // timbre mismatch is fully exposed. The pauses on either side are the right
-// place. Snap each edge to the middle of its neighbouring gap, but never
-// further than `maxSnapS` — on a dense line the "gap" may be 20 ms of stop
-// closure, and a long reach would swallow a real word.
+// place, so each edge moves out into its neighbouring gap.
+//
+// How far it may move matters more than it looks. The edge it starts from is
+// a *word timestamp*, and Whisper's word timestamps are an alignment, not a
+// measurement: they routinely land some tens of milliseconds late on an onset
+// and early on a release. Leaving the edge exactly there leaves the attack of
+// the word being replaced in the recording — and since the replacement starts
+// right after it, you hear the original say the first syllable and then the
+// clone say the whole line ("I— I'm here today to…"). The only way to be rid
+// of that is to start the replacement *before* the word can possibly have
+// begun, i.e. inside the pause.
+//
+// So: reach out by half the gap (two respoken lines either side of one pause
+// then meet in the middle instead of overlapping), and never by more than
+// `maxSnapS` — a long reach into a long pause is pointless, and on a dense
+// line the "gap" may be 20 ms of stop closure, where any reach at all would
+// swallow a real word. What it gives back is `lead` and `tail`: the silence
+// borrowed at each end, which finishDub() keeps silent so the respoken line
+// still begins where the recorded one did.
 
 export function snapSpan(start, end, words, { maxSnapS = 0.25, minGapS = 0.04 } = {}) {
   const ws = (words || []).filter((w) => isFinite(w.start) && isFinite(w.end));
-  if (!ws.length) return { start, end, snapped: false };
+  if (!ws.length) return { start, end, snapped: false, lead: 0, tail: 0 };
 
   // The word that ends last before `start`, and the one that starts first
   // after `end`. Words inside the span are irrelevant — they are the ones
@@ -92,16 +109,17 @@ export function snapSpan(start, end, words, { maxSnapS = 0.25, minGapS = 0.04 } 
     if (w.start >= end - 1e-3 && (!after || w.start < after.start)) after = w;
   }
 
-  const mid = (gapStart, gapEnd, edge) => {
-    const gap = gapEnd - gapStart;
-    if (!(gap > minGapS)) return edge;                 // no room: leave it alone
-    const m = gapStart + gap / 2;
-    return Math.abs(m - edge) <= maxSnapS ? m : edge;  // too far to reach
-  };
+  // How far an edge may move into a pause of `gap` seconds.
+  const reach = (gap) => (gap > minGapS ? Math.min(gap / 2, maxSnapS) : 0);
 
-  const s2 = before ? mid(before.end, start, start) : start;
-  const e2 = after ? mid(end, after.start, end) : end;
-  return { start: Math.min(s2, end - 1e-3), end: Math.max(e2, s2 + 1e-3), snapped: s2 !== start || e2 !== end };
+  const s2 = before ? start - reach(start - before.end) : start;
+  const e2 = after ? end + reach(after.start - end) : end;
+  const s3 = Math.min(s2, end - 1e-3);
+  const e3 = Math.max(e2, s3 + 1e-3);
+  return {
+    start: s3, end: e3, snapped: s3 !== start || e3 !== end,
+    lead: Math.max(0, start - s3), tail: Math.max(0, e3 - end),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -180,10 +198,11 @@ export function pickReference(words, {
 
 export function fitToDuration(mono, sampleRate, targetSamples, {
   minRate = FIT_MIN_RATE, maxRate = FIT_MAX_RATE, padFadeMs = 25, roomTone = null,
+  leadSamples = 0,
 } = {}) {
   const src = mono || new Float32Array(0);
   if (!src.length || !(targetSamples > 0)) {
-    return { pcm: new Float32Array(Math.max(0, targetSamples | 0)), rate: 1, clamped: false, wanted: 1, spoken: 0 };
+    return { pcm: new Float32Array(Math.max(0, targetSamples | 0)), rate: 1, clamped: false, wanted: 1, spoken: 0, lead: 0 };
   }
   const wanted = src.length / targetSamples;        // >1: too long, squeeze
   const rate = Math.min(maxRate, Math.max(minRate, wanted));
@@ -204,22 +223,43 @@ export function fitToDuration(mono, sampleRate, targetSamples, {
   // it overshoots or undershoots by up to one. The video expects a span to be
   // its own length to the sample.
   const fit = new Float32Array(targetSamples);
-  const spoken = Math.min(out.length, targetSamples);
-  fit.set(out.subarray(0, spoken), 0);
+  // The span reaches back into the pause before the line (see snapSpan), and
+  // that borrowed silence has to stay silent: the generation goes in *after*
+  // it, so the respoken line still starts where the recorded one did instead
+  // of arriving a quarter of a second early. Only genuinely spare room is
+  // spent on it — a line that needs the whole hole keeps the whole hole.
+  const spare = Math.max(0, targetSamples - out.length);
+  const lead = Math.min(Math.max(0, Math.round(leadSamples) || 0), spare);
+  const spoken = Math.min(out.length, targetSamples - lead);
+  fit.set(out.subarray(0, spoken), lead);
 
+  const fadeN = Math.max(0, Math.round((padFadeMs / 1000) * sampleRate));
   // A line that is genuinely shorter than the hole it replaces leaves a pause
   // at the end, which is right — but the pause has to sound like the room, not
   // like the file ended. Ramp the speech down, then fill the rest with room
-  // tone rather than zeros.
-  if (spoken < targetSamples) {
-    const n = Math.min(spoken, Math.round((padFadeMs / 1000) * sampleRate));
-    for (let i = 0; i < n; i++) fit[spoken - 1 - i] *= i / n;
-    // The recording's own room tone is the right filler when it's available;
-    // reconstructing one from the generation's quiet moments is the fallback
-    // for a recording that never stops long enough to sample.
-    if (!(roomTone && roomTone.length)) fillWithRoomTone(fit, spoken, sampleRate);
+  // tone rather than zeros. The lead gets the same treatment in reverse.
+  const spokenEnd = lead + spoken;
+  if (lead > 0) {
+    const n = Math.min(spoken, fadeN);
+    for (let i = 0; i < n; i++) fit[lead + i] *= i / n;
   }
-  return { pcm: fit, rate, clamped, wanted, spoken };
+  if (spokenEnd < targetSamples) {
+    const n = Math.min(spoken, fadeN);
+    for (let i = 0; i < n; i++) fit[spokenEnd - 1 - i] *= i / n;
+  }
+  // The recording's own room tone is the right filler when it's available
+  // (layRoomTone lays it under the whole span, lead included); reconstructing
+  // one from the generation's quiet moments is the fallback for a recording
+  // that never stops long enough to sample.
+  if (!(roomTone && roomTone.length) && spoken > 0) {
+    if (spokenEnd < targetSamples) {
+      fillWithRoomTone(fit, spokenEnd, sampleRate, { learnFrom: lead, learnTo: spokenEnd });
+    }
+    if (lead > 0) {
+      fillWithRoomTone(fit, 0, sampleRate, { to: lead, learnFrom: lead, learnTo: spokenEnd });
+    }
+  }
+  return { pcm: fit, rate, clamped, wanted, spoken, lead };
 }
 
 /**
@@ -323,10 +363,16 @@ export function layRoomTone(mono, tone, { from = 0 } = {}) {
   return out;
 }
 
-export function fillWithRoomTone(out, from, sampleRate, { windowMs = 120, maxWindows = 8 } = {}) {
-  const need = out.length - from;
+// `to` bounds the stretch being filled (the default runs to the end of the
+// buffer), and `learnFrom`/`learnTo` say where the spoken part is — which is
+// not always before `from`: the silence borrowed at the head of a span is
+// filled from the line that follows it.
+export function fillWithRoomTone(out, from, sampleRate, {
+  windowMs = 120, maxWindows = 8, to = out.length, learnFrom = 0, learnTo = from,
+} = {}) {
+  const need = to - from;
   if (need <= 0) return out;
-  const win = Math.min(from, Math.round((windowMs / 1000) * sampleRate));
+  const win = Math.min(Math.max(0, learnTo - learnFrom), Math.round((windowMs / 1000) * sampleRate));
   if (win < 64) return out;                 // nothing to learn the room from
 
   // Score every candidate window of the spoken part, quietest first. This is a
@@ -334,7 +380,7 @@ export function fillWithRoomTone(out, from, sampleRate, { windowMs = 120, maxWin
   // steps coarsely.
   const step = Math.max(1, Math.floor(win / 4));
   const cands = [];
-  for (let at = 0; at + win <= from; at += step) cands.push({ at, level: rms(out, at, at + win) });
+  for (let at = learnFrom; at + win <= learnTo; at += step) cands.push({ at, level: rms(out, at, at + win) });
   if (!cands.length) return out;
   cands.sort((a, b) => a.level - b.level);
   if (!(cands[0].level > 0)) return out;    // the line really is silent; leave it
@@ -343,7 +389,7 @@ export function fillWithRoomTone(out, from, sampleRate, { windowMs = 120, maxWin
   // A line with no quiet stretch anywhere (one continuous word, or a bad
   // generation) has no room tone to lend, and tiling its quietest window would
   // fill the pause with looping speech, which is far worse than silence.
-  const overall = rms(out, 0, from);
+  const overall = rms(out, learnFrom, learnTo);
   if (!(cands[0].level < overall * 0.25)) return out;
 
   // Take several *non-overlapping* quiet windows, not just the best one.
@@ -641,7 +687,7 @@ export function crossfadeEdges(dub, orig, { channels = 1, sampleRate = 48000, fa
 export function finishDub(modelPcm, {
   modelRate, outRate, channels, targetSamples, targetDbfs = null,
   resample = null, fadeMs = 12, minRate = FIT_MIN_RATE, maxRate = FIT_MAX_RATE,
-  roomTone = null, toneReference = null,
+  roomTone = null, toneReference = null, leadSamples = 0,
 }) {
   let mono = modelPcm || new Float32Array(0);
   if (modelRate !== outRate) {
@@ -665,7 +711,7 @@ export function finishDub(modelPcm, {
   }
 
   const fitted = fitToDuration(mono, outRate, targetSamples, {
-    minRate, maxRate, roomTone,
+    minRate, maxRate, roomTone, leadSamples,
   });
 
   // The room goes under the whole line, not just the pause at the end: it is
@@ -686,6 +732,7 @@ export function finishDub(modelPcm, {
     gainDb,
     gainsDb,
     spoken: fitted.spoken,
+    lead: fitted.lead,
   };
 }
 
@@ -734,13 +781,19 @@ export function naturalRate(srcS, dubS, { minRate = 0.5, maxRate = 2 } = {}) {
  *   pause <= deadAirS → nothing to do, the picture is left alone
  *   pause >  deadAirS → the span runs at srcS / (dubS + deadAirS)
  *
+ * `borrowedS` is the silence snapSpan() reached into on either side so the
+ * seam would land in a pause. It is part of the span but it is not pause the
+ * user asked to be rid of — it is pause that was already there, on both sides
+ * of the line, and trimming it would speed the picture up over a change the
+ * tool made for its own reasons. So it is added to the allowance.
+ *
  * Returns `{ mode, rate, outS, padS }`. `mode` is 'fit' (rate 1, the picture
  * untouched) or 'natural' (the rate absorbs the difference). `padS` is what
  * will still be pause, which is worth telling the user about when the rate
  * bound stops it reaching zero.
  */
 export function planFit(srcS, dubS, {
-  trimDeadAir = true, deadAirS = 0.15,
+  trimDeadAir = true, deadAirS = 0.15, borrowedS = 0,
   maxVideoRate = 1.15, minVideoRate = 0.87,
   maxSqueeze = FIT_MAX_RATE,
 } = {}) {
@@ -774,7 +827,7 @@ export function planFit(srcS, dubS, {
   // spends it on the picture, but only as far as `maxVideoRate` — a gentle
   // change everywhere beats a lurch in one place — and reports whatever pause
   // is left rather than forcing it out.
-  const allowed = trimDeadAir ? dubS + Math.max(0, deadAirS) : srcS;
+  const allowed = trimDeadAir ? dubS + Math.max(0, deadAirS) + Math.max(0, borrowedS) : srcS;
   if (srcS <= allowed + 1e-6) {
     return { mode: 'fit', rate: 1, outS: srcS, padS: srcS - dubS, squeeze: 1, short: 0 };
   }

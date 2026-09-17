@@ -33,7 +33,23 @@ import { createCaptions } from './captions-ui.js';
 import { createVoice } from './voice-ui.js';
 
 const MP4Box = window.MP4Box;
-const AAC_CODEC = 'mp4a.40.2';   // AAC-LC — what we re-encode audio to when a boost is on
+
+// What the audio is re-encoded to when it can't simply be copied — a boost, a
+// speed change, a ducked breath or a respoken line.
+//
+// AAC-LC first: it is what the source already is, and it plays in everything.
+// But a browser only has an AAC *encoder* where the platform provides one, and
+// Chrome on Linux does not — AudioEncoder.isConfigSupported('mp4a.40.2') comes
+// back false there. That used to mean the whole audio track was dropped from
+// the export, silently, the moment anything needed re-encoding. Opus is the
+// answer: Chrome ships its own encoder for it everywhere, MP4 carries it
+// (mp4-muxer writes the Opus sample entry), and every browser that can't
+// encode AAC can play it. An MP4 whose audio is Opus is a far better outcome
+// than an MP4 with no audio at all — the export says which one it wrote.
+const AUDIO_CODECS = [
+  { track: 'aac', codec: 'mp4a.40.2', label: 'AAC' },
+  { track: 'opus', codec: 'opus', label: 'Opus' },
+];
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -78,6 +94,7 @@ const els = {
   capProgress: $('cap-progress'), capStatus: $('cap-status'), capNote: $('cap-note'), capList: $('cap-list'),
   // overdub
   inVoiceLang: $('in-voice-lang'), hintVoiceLang: $('hint-voice-lang'),
+  hintVoiceAudio: $('hint-voice-audio'),
   inVoiceTrack: $('in-voice-track'),
   inVoiceTrim: $('in-voice-trim'), inVoiceDeadAir: $('in-voice-deadair'),
   inVoiceStretch: $('in-voice-stretch'),
@@ -240,6 +257,28 @@ function showStep(name) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+// Whether the export will have to decode and re-encode the audio rather than
+// copying it: a boost, a speed change, a ducked breath or a respoken line.
+// compress() works this out again from the spans it is about to encode; this
+// is the same question asked early, so the summary can say what the audio
+// will come out as before anyone presses the button.
+function willReencodeAudio(s) {
+  if (!state || !s.keepAudio || !state.audio) return false;
+  if (s.audioGainDb > 0.05) return true;
+  if (s.breathMode !== 'off' && !!(state.breaths && state.breaths.length)) return true;
+  return editSpans().some((sp) => sp.rate !== 1 || !!sp.dub);
+}
+
+// Said wherever a re-encode is on the cards, because it changes the file: the
+// audio comes out as Opus instead of AAC, which plays in the browsers that
+// needed it but not in QuickTime.
+function audioCodecNote() {
+  const enc = state && state.audioEnc;
+  if (!enc || enc.track === 'aac') return '';
+  return `This browser can’t encode AAC, so re-encoded audio is written as ${enc.label} instead`
+    + ' — it plays in Chrome, Edge and Firefox, but not in QuickTime.';
+}
+
 function updateExportSummary() {
   if (!state) return;
   const s = currentSettings();
@@ -249,9 +288,11 @@ function updateExportSummary() {
   const volumeNote = s.keepAudio && s.audioGainDb > 0.05
     ? ` · ${s.volumeMode === 'auto' ? 'up to ' : ''}+${s.audioGainDb.toFixed(1)} dB (${s.volumeMode})`
     : '';
+  const enc = state.audioEnc;
+  const codecNote = enc && enc.track !== 'aac' && willReencodeAudio(s) ? ` · audio as ${enc.label}` : '';
   els.exportSummary.textContent =
     `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
-    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}${captions.burnOn() ? ' · captions burned in' : ''}`;
+    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}${codecNote}${captions.burnOn() ? ' · captions burned in' : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +584,7 @@ async function loadFile(file) {
   state = {
     file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
     inS: 0, outS: durationS, edits: [], pendingMarkStart: null,
-    audioAnalysis: null, audioEncoderSupported: false, breaths: [],
+    audioAnalysis: null, audioEncoderSupported: false, audioEnc: null, breaths: [],
     isAac: false, captions: captions.restore(file),
     // Respoken lines: the samples aren't persisted (they're regenerated from
     // the same text and seed), so this starts empty even when intent survives.
@@ -576,13 +617,11 @@ async function loadFile(file) {
   const decCfg = { codec: video.codec, codedWidth: video.track_width, codedHeight: video.track_height, description: state.description };
   state.decoderSupported = (await VideoDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported;
 
-  // Volume boost needs to decode + re-encode the audio (passthrough only
-  // remuxes it), so check the browser can actually encode AAC before
-  // offering it.
-  if (isAac && typeof AudioEncoder !== 'undefined') {
-    const aacEncCfg = { codec: AAC_CODEC, sampleRate: audio.audio.sample_rate, numberOfChannels: audio.audio.channel_count, bitrate: audio.bitrate || 160_000 };
-    state.audioEncoderSupported = (await AudioEncoder.isConfigSupported(aacEncCfg).catch(() => ({ supported: false }))).supported;
-  }
+  // A boost, a speed change, a ducked breath or a respoken line all mean
+  // decoding and re-encoding the audio (passthrough only remuxes it), so find
+  // out now which codec this browser can actually encode to.
+  state.audioEnc = isAac ? await pickAudioEncoder(audio) : null;
+  state.audioEncoderSupported = !!state.audioEnc;
   document.querySelectorAll('input[name="volume"][value="manual"], input[name="volume"][value="auto"]')
     .forEach((r) => { r.disabled = !state.audioEncoderSupported; });
   if (!state.audioEncoderSupported) {
@@ -591,7 +630,10 @@ async function loadFile(file) {
   }
   // Kick off (background, non-blocking) analysis for Auto mode's hint. Cheap
   // relative to the encode itself — it's a decode-only pass over the audio.
-  if (isAac && state.audioEncoderSupported) {
+  // It runs whenever the audio is readable, not only when it can be
+  // re-encoded: overdub needs the room tone and the voice level out of it to
+  // make a respoken line sit in the recording, whatever the export does.
+  if (isAac) {
     const loadedFor = state;
     analyzeAudio(loadedFor).then((result) => {
       if (state !== loadedFor) return;   // a different file was loaded meanwhile
@@ -1228,7 +1270,7 @@ function updateAudioUI() {
 
   if (!state.audioEncoderSupported) {
     els.hintVolume.textContent = state.audio
-      ? "This browser can't encode AAC, so volume boost isn't available here — audio will pass through unchanged."
+      ? "This browser can't re-encode audio, so volume boost isn't available here — audio will pass through unchanged."
       : '';
   } else if (mode === 'auto') {
     els.hintVolume.textContent = state.audioAnalysis
@@ -1238,6 +1280,15 @@ function updateAudioUI() {
     els.hintVolume.textContent = 'Applied to the whole track, then limited so it can’t clip.';
   } else {
     els.hintVolume.textContent = '';
+  }
+  // Whatever needs the re-encode, say once what the audio will come out as.
+  const note = audioCodecNote();
+  if (note && mode !== 'none') els.hintVolume.textContent += ` ${note}`;
+  if (els.hintVoiceAudio) {
+    els.hintVoiceAudio.textContent = !state.audio || !state.isAac ? ''
+      : state.audioEncoderSupported ? note
+      : 'This browser can’t re-encode audio, so a respoken line can’t be written to the export —'
+        + ' the download would come out with no sound at all. Respeak in Chrome or Edge instead.';
   }
   updateBreathUI();
   updatePreviewGain();
@@ -1326,7 +1377,7 @@ function updateBreathUI() {
   }
   if (!state || !state.audioEncoderSupported) {
     const note = state && state.audio && state.isAac
-      ? " This browser can't re-encode AAC, so breaths can't be changed here."
+      ? " This browser can't re-encode audio, so breaths can't be changed here."
       : '';
     if (note) els.hintBreath.textContent = note.trim();
   }
@@ -1408,8 +1459,11 @@ function updateEstimate() {
 // ---------------------------------------------------------------------------
 async function analyzeAudio(st) {
   const chunks = [];   // mono-mixed Float32Array pieces, concatenated at the end
+  // A level of 0 dBFS here would read as "this track is already as loud as it
+  // can get", which overdub takes as the level to match a respoken line to.
+  // Nothing was measured, so say so the same way the empty case does.
   const ok = await decodeAudioTrack(st, (frame) => chunks.push(mixToMono(frame)));
-  if (!ok) return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0, breaths: [], roomTone: null };
+  if (!ok) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0, breaths: [], roomTone: null };
   const mono = concatFloat32(chunks);
   if (!mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0, breaths: [], roomTone: null };
   const rate = st.audio.audio.sample_rate;
@@ -1517,6 +1571,24 @@ async function decodeAudioTrack(st, onFrame, { untilS = Infinity, onProgress = n
 // ---------------------------------------------------------------------------
 // Encoder config probing
 // ---------------------------------------------------------------------------
+
+// The first codec in AUDIO_CODECS this browser will actually encode the
+// source's sample rate and channel count at, or null if it won't encode audio
+// at all (in which case anything needing a re-encode has to be refused up
+// front rather than quietly costing the file its sound).
+async function pickAudioEncoder(audio) {
+  if (!audio || typeof AudioEncoder === 'undefined') return null;
+  const sampleRate = audio.audio.sample_rate;
+  const numberOfChannels = audio.audio.channel_count;
+  const bitrate = audio.bitrate || 160_000;
+  for (const c of AUDIO_CODECS) {
+    const config = { codec: c.codec, sampleRate, numberOfChannels, bitrate };
+    const { supported } = await AudioEncoder.isConfigSupported(config).catch(() => ({ supported: false }));
+    if (supported) return { ...c, config };
+  }
+  return null;
+}
+
 async function pickEncoderConfig(codec, width, height, bitrate, framerate) {
   // Try a ladder of profile@level strings from high to low so large frames
   // (e.g. 4K) find a level that supports them. AVC level 4.0 (…28) only covers
@@ -1652,10 +1724,13 @@ async function compress() {
     const wantsBreathWork = s.breathMode !== 'off' && !!(state.breaths && state.breaths.length);
     // A respoken line replaces samples outright, so it needs the re-encode too.
     const hasDubs = spansUS.some((sp) => !!sp.dub);
-    const canReencode = state.audioEncoderSupported;
+    const audioEnc = state.audioEnc;              // AAC, or Opus where AAC can't be encoded
+    const canReencode = !!audioEnc;
     const needAudioWork = s.keepAudio && !!audio && (hasSpeed || wantsBoost || wantsBreathWork || hasDubs) && canReencode;
     // A speed-up or an overdub we can't re-encode would silently desync the
-    // audio (or quietly drop the new words), so drop it.
+    // audio (or quietly drop the new words), so drop it. This is now the last
+    // resort it reads like — it takes a browser with no audio encoder at all,
+    // and the UI has already said so next to the controls that need one.
     const dropAudio = s.keepAudio && !!audio && (hasSpeed || hasDubs) && !canReencode;
 
     // ---- Muxer ----
@@ -1667,7 +1742,9 @@ async function compress() {
     };
     if (s.keepAudio && audio && !dropAudio) {
       muxerOpts.audio = {
-        codec: 'aac',
+        // Copied samples are the source's own AAC; re-encoded ones are
+        // whatever this browser could encode.
+        codec: needAudioWork ? audioEnc.track : 'aac',
         numberOfChannels: audio.audio.channel_count,
         sampleRate: audio.audio.sample_rate,
       };
@@ -1857,9 +1934,7 @@ async function compress() {
         output: (chunk, meta) => { muxer.addAudioChunk(chunk, meta); audioEmitted++; },
         error: (e) => { encodeErr = encodeErr || e; },
       });
-      audioEncoder.configure({
-        codec: AAC_CODEC, sampleRate: SR, numberOfChannels: CH, bitrate: audio.bitrate || 160_000,
-      });
+      audioEncoder.configure(audioEnc.config);
       leveler = (wantsBoost && s.volumeMode === 'auto') ? createLeveler(SR, { maxGainDb: s.audioGainDb }) : null;
 
       const onAudioDecoded = (frame) => {
@@ -2088,13 +2163,23 @@ async function compress() {
     if (s.keepAudio && audio) {
       const speedNote = hasSpeed ? ' · sped-up sections re-timed' : '';
       const breathNote = wantsBreathWork && !dropAudio ? ` · ${state.breaths.length} breaths turned down` : '';
+      const dubs = spansUS.filter((sp) => !!sp.dub).length;
+      const dubNote = dubs && !dropAudio ? ` · ${dubs} respoken line${dubs > 1 ? 's' : ''}` : '';
+      // Opus only ever turns up on a browser that can't encode AAC, and it is
+      // the reason the track is there at all, so it is worth a word.
+      const codecNote = needAudioWork && audioEnc.track !== 'aac'
+        ? ` · audio re-encoded as ${audioEnc.label} (this browser can't encode AAC)` : '';
       if (dropAudio) {
-        audioNote = " (audio dropped — this browser can't re-encode AAC, which a speed change needs)";
+        // Name what actually needed the re-encode, so "audio dropped" is never
+        // a message about a speed change to someone who only respoke a line.
+        const why = [hasDubs && 'a respoken line', hasSpeed && 'a speed change'].filter(Boolean);
+        audioNote = " (audio dropped — this browser can't re-encode audio, which "
+          + `${why.length > 1 ? `${why.join(' and ')} both need` : `${why[0]} needs`})`;
       } else if (needAudioWork) {
         audioNote = audioEmitted > 0
           ? (wantsBoost
-              ? `${leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`}${speedNote}${breathNote}`
-              : `${speedNote}${breathNote}`)
+              ? `${leveler ? ` · boosted up to +${s.audioGainDb.toFixed(1)} dB (auto)` : ` · boosted +${s.audioGainDb.toFixed(1)} dB`}${speedNote}${breathNote}${dubNote}${codecNote}`
+              : `${speedNote}${breathNote}${dubNote}${codecNote}`)
           : ' (no audio in the selected range)';
       } else if (audioOut.length) {
         let first = true;

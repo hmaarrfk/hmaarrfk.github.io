@@ -4,7 +4,33 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-16 (**Overdub: respeak a line in your own voice.**
+_Last updated: 2026-09-17 (**Two overdub bugs, from the first person to
+use it.** (1) *You could hear yourself start the line the clone then said* —
+"I— I'm here today to…". `snapSpan` moved each edge of a replaced span to the
+*middle* of the neighbouring pause, but only if the middle was within 0.25 s;
+a line after a real pause is the common case, and there the middle is seconds
+away, so the edge stayed exactly on Whisper's word timestamp. That timestamp is
+an alignment, not a measurement, and it lands late on an onset — so the attack
+of the old word survived in the recording, immediately before the replacement.
+Each edge now *reaches into* the pause by half of it, capped at 0.25 s, which
+is always inside it. The borrowed silence stays silence: `fitToDuration` takes
+a `leadSamples` and puts the generation in after it (room tone under it, faded
+in), so the respoken line still starts on its own timestamp instead of a
+quarter-second early, and `planFit` adds the borrowed pause to the dead-air
+allowance so the picture isn't sped up to trim padding the tool added itself.
+(2) *The downloaded file had no audio at all.* Respeaking needs an audio
+re-encode, and the export only ever tried AAC — which Chrome cannot encode on
+Linux at all (`AudioEncoder.isConfigSupported('mp4a.40.2')` is false there).
+The whole audio track was then dropped, with a note about "a speed change" the
+user never made. The export now falls back to **Opus in MP4**, which Chrome can
+always encode and every browser that lacks AAC encoding can play, and says so
+in the summary and the result line; audio is only dropped if the browser can
+encode neither, and the note then names what actually needed it. The
+background audio analysis also no longer hides behind AAC-encode support — it
+is where overdub's room tone and voice level come from, so on Linux Chrome
+every respoken line was being laid over silence instead of the room.)_
+
+_Earlier: 2026-09-16 (**Overdub: respeak a line in your own voice.**
 Edit a transcript line and a **respeak** button appears on it; the words are
 spoken back in your voice and dropped into the gap the old line left. The voice
 is cloned zero-shot from the clearest 6-15 s of the recording itself
@@ -214,10 +240,19 @@ encoder via WebCodecs — entirely client-side — and optionally add
     break toward the middle of the file. "Use a different reference clip"
     cycles the next-best non-overlapping candidates.
   - **The seam goes in the pause, not on the word.** `snapSpan` moves each
-    edge of the replaced span to the *middle of the neighbouring gap* (at most
-    0.25 s, and only if the gap is over 40 ms — a 20 ms stop closure is a
-    consonant, not a pause). A few ms of fade over room tone is inaudible;
-    the same fade across a word is not.
+    edge of the replaced span *into* the neighbouring gap — by half of it, so
+    two respoken lines either side of one pause meet rather than overlap, and
+    never by more than 0.25 s, and not at all if the gap is under 40 ms (a
+    20 ms stop closure is a consonant, not a pause). A few ms of fade over room
+    tone is inaudible; the same fade across a word is not. It has to *reach*,
+    not just aim for the middle: the edge starts from a Whisper word timestamp,
+    which is an alignment rather than a measurement and lands late on an onset,
+    so an edge left where the timestamp says leaves the attack of the old word
+    in the recording — and you hear yourself start the line the clone is about
+    to say. The silence it borrows at each end is reported as `lead`/`tail` and
+    stays silent: the generation goes in *after* the lead (`leadSamples`), so
+    the line keeps its own timestamp, and `planFit` counts the borrowed pause
+    as allowance rather than dead air to trim.
   - **The picture moves before the speech does.** A respoken line that runs
     long used to be squeezed by WSOLA first and only then given time; that was
     backwards. A few percent of picture is invisible, where squeezing speech is
@@ -351,6 +386,16 @@ encoder via WebCodecs — entirely client-side — and optionally add
     nested in `wave`, as macOS/iOS screen recordings write it) is found by
     scanning the sample entry's bytes, since MP4Box doesn't see it. The codec
     string is rebuilt from the AudioSpecificConfig (`mp4a` → `mp4a.40.2`).
+  - **Anything that changes the samples needs an audio encoder**, and AAC
+    encoding is a platform feature a browser may simply not have — Chrome on
+    Linux has no AAC encoder at all. `pickAudioEncoder()` probes AAC first and
+    falls back to **Opus**, which is valid in MP4 and which Chrome can always
+    encode; the export summary and the result line say when that happened,
+    because Opus in MP4 plays in Chrome, Edge and Firefox but not QuickTime.
+    Copied (not re-encoded) audio is always the source's own AAC. Audio is
+    dropped only if neither codec can be encoded, and the note then names the
+    edit that needed one. Before this, a respoken line on Linux Chrome
+    exported a video with **no audio track at all**.
 - **Captions**
   - Models: `onnx-community/whisper-{large-v3-turbo,small,base}_timestamped`.
     Weights live in Cache Storage (`transformers-cache`), keyed by Hub URL.
