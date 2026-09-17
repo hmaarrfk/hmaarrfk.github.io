@@ -218,10 +218,21 @@ encoder via WebCodecs — entirely client-side — and optionally add
     0.25 s, and only if the gap is over 40 ms — a 20 ms stop closure is a
     consonant, not a pause). A few ms of fade over room tone is inaudible;
     the same fade across a word is not.
-  - **A dub is never time-stretched, only squeezed.** Slowing a short line
-    down to fill its slot makes it drawl; it keeps its own pace instead. A
-    *longer* line is squeezed up to 1.38x by WSOLA (`speed.js`, the same
-    stretcher the sped-up sections use) and past that takes the time it needs.
+  - **The picture moves before the speech does.** A respoken line that runs
+    long used to be squeezed by WSOLA first and only then given time; that was
+    backwards. A few percent of picture is invisible, where squeezing speech is
+    audible the moment it does real work — so `planFit` spends the picture's
+    budget first (`Video may stretch`, default 50%, applied as the span's rate)
+    and squeezes only what the picture could not absorb, up to 1.38x, then
+    reports the shortfall. At the default a line 5% long costs 4.8% of picture
+    and no audio processing at all. A dub is still never *stretched* to fill a
+    slot: slowing a short line down to fill it makes it drawl.
+  - **Three places the time can go, and only three.** A line respoken shorter
+    frees time that must become pause, a faster picture, or a cut — there is no
+    fourth option, and no setting can conjure one. `Video may stretch` and
+    `Dead air threshold` are the two ends of that trade, and the stretch limit
+    is the one that holds: asking for zero pause cannot force a lurch, it just
+    leaves the pause the limit could not remove, and says so.
   - **Dead air is the user's call, not a built-in number.** `Trim dead air`
     and a `Dead air threshold` in seconds (default 0.15) decide what happens
     when a respoken line is shorter than the one it replaced. The threshold is

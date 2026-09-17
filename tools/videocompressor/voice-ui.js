@@ -228,7 +228,15 @@ export function createVoice(ctx) {
   function fitOpts() {
     const trimDeadAir = els.inVoiceTrim ? els.inVoiceTrim.checked : true;
     const raw = els.inVoiceDeadAir ? parseFloat(els.inVoiceDeadAir.value) : 0.15;
-    return { trimDeadAir, deadAirS: Number.isFinite(raw) ? Math.max(0, raw) : 0.15 };
+    const pct = els.inVoiceStretch ? parseFloat(els.inVoiceStretch.value) : 50;
+    const span = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) / 100 : 0.5;
+    return {
+      trimDeadAir,
+      deadAirS: Number.isFinite(raw) ? Math.max(0, raw) : 0.15,
+      // How far the picture may drift from real time, in either direction.
+      maxVideoRate: 1 + span,
+      minVideoRate: 1 / (1 + span),
+    };
   }
 
   function dubs() {
@@ -293,14 +301,19 @@ export function createVoice(ctx) {
       // because the right answer then is to cut the section, not respeak it.
       const outS = srcS / rate;
       const padS = Math.max(0, outS - dubS);
+      const pct = Math.abs(rate - 1) * 100;
+      const pictureNote = pct >= 0.5
+        ? ` Picture ${rate > 1 ? 'runs' : 'eases'} ${pct.toFixed(0)}% ${rate > 1 ? 'faster' : 'slower'} here.`
+        : '';
+      const squeezeNote = plan.squeeze > 1.01
+        ? ` Speech squeezed ${((plan.squeeze - 1) * 100).toFixed(0)}% to finish fitting.` : '';
       // Past the speed bound there can still be real dead air. Say so, rather
       // than producing it quietly — the answer there is Cut, not respeak.
       const tail = padS > fitOpts().deadAirS + 0.25
         ? ` ${padS.toFixed(1)} s of it is still pause — consider cutting this section instead.` : '';
       if (!quiet) {
-        status(chosen === 'natural'
-          ? `Respoken — the section now runs ${outS.toFixed(1)} s instead of ${srcS.toFixed(1)} s.${tail}`
-          : `Respoken — fitted into ${srcS.toFixed(1)} s.${tail}`);
+        status(`Respoken — ${outS.toFixed(1)} s where the original took ${srcS.toFixed(1)} s.`
+          + pictureNote + squeezeNote + tail);
       }
       save();
       if (onChanged) onChanged();
@@ -569,6 +582,7 @@ export function createVoice(ctx) {
       voiceTrack: els.inVoiceTrack ? els.inVoiceTrack.value : 'respoken',
       voiceTrim: els.inVoiceTrim ? els.inVoiceTrim.checked : true,
       voiceDeadAir: els.inVoiceDeadAir ? els.inVoiceDeadAir.value : '0.15',
+      voiceStretch: els.inVoiceStretch ? els.inVoiceStretch.value : '50',
     };
   }
   function applySettings(g) {
@@ -577,6 +591,7 @@ export function createVoice(ctx) {
     if (els.inVoiceTrack && g.voiceTrack) els.inVoiceTrack.value = g.voiceTrack;
     if (els.inVoiceTrim && g.voiceTrim != null) els.inVoiceTrim.checked = !!g.voiceTrim;
     if (els.inVoiceDeadAir && g.voiceDeadAir != null) els.inVoiceDeadAir.value = g.voiceDeadAir;
+    if (els.inVoiceStretch && g.voiceStretch != null) els.inVoiceStretch.value = g.voiceStretch;
   }
 
   function wire() {
@@ -592,7 +607,7 @@ export function createVoice(ctx) {
         refreshCachedLabel();
       });
     }
-    for (const el of [els.inVoiceTrim, els.inVoiceDeadAir]) {
+    for (const el of [els.inVoiceTrim, els.inVoiceDeadAir, els.inVoiceStretch]) {
       if (!el) continue;
       // Both re-time every line already respoken, so the setting is something
       // you can turn and hear rather than a promise about the next generation.

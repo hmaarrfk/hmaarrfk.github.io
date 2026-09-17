@@ -80,6 +80,7 @@ const els = {
   inVoiceLang: $('in-voice-lang'), hintVoiceLang: $('hint-voice-lang'),
   inVoiceTrack: $('in-voice-track'),
   inVoiceTrim: $('in-voice-trim'), inVoiceDeadAir: $('in-voice-deadair'),
+  inVoiceStretch: $('in-voice-stretch'),
   btnVoiceRef: $('btn-voice-ref'), voiceRef: $('voice-ref'),
   btnVoiceAll: $('btn-voice-all'), btnVoiceAllCancel: $('btn-voice-all-cancel'),
   voiceProgress: $('voice-progress'), voiceStatus: $('voice-status'),

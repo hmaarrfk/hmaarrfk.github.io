@@ -562,23 +562,51 @@ test('finishDub at a matching rate needs no resampler at all', () => {
 // ---------------------------------------------------------------------------
 console.log('\nletting the section breathe instead');
 
-test('a modestly longer line is squeezed rather than shown slower', () => {
-  assert.equal(planFit(3.0, 3.3).mode, 'fit');
+test('a longer line slows the picture rather than squeezing the speech', () => {
+  // The order matters and is the whole point: a few percent of picture is
+  // invisible, where squeezing speech is audible as soon as it does real work.
+  const p = planFit(3.0, 3.3, { maxVideoRate: 1.15, minVideoRate: 1 / 1.15 });
+  assert.equal(p.squeeze, 1, 'the speech was not touched');
+  assert.ok(p.rate < 1, 'the picture eased off instead');
+  assert.ok(Math.abs(p.outS - 3.3) < 1e-9, 'and the whole line fits');
+  assert.equal(p.padS, 0);
 });
 
-test('a much longer line is given the time it needs', () => {
-  const p = planFit(3.0, 6.0);
-  assert.equal(p.mode, 'natural');
-  assert.ok(p.rate < 1, 'the section slows down');
+test('the picture only stretches as far as it is allowed', () => {
+  const p = planFit(3.0, 6.0, { maxVideoRate: 1.15, minVideoRate: 1 / 1.15 });
+  assert.ok(Math.abs(p.rate - 1 / 1.15) < 1e-9, `rate ${p.rate} exceeded the limit`);
+  assert.ok(p.squeeze > 1, 'the rest is taken out of the speech');
+});
+
+test('a line far too long to fit says how much did not fit', () => {
+  const p = planFit(3.0, 12.0, { maxVideoRate: 1.15, minVideoRate: 1 / 1.15 });
+  assert.ok(p.squeeze <= FIT_MAX_RATE + 1e-9, 'the squeeze is still bounded');
+  assert.ok(p.short > 0, 'and the shortfall is reported rather than hidden');
+});
+
+test('zero stretch leaves the picture completely alone', () => {
+  const p = planFit(3.0, 3.3, { maxVideoRate: 1, minVideoRate: 1 });
+  assert.equal(p.rate, 1, 'the picture never moves');
+  assert.ok(p.squeeze > 1, 'so the speech has to absorb all of it');
 });
 
 test('the dead-air threshold is a tolerance, not a trigger', () => {
   // "Keep at most this much pause" — so what is left over is the threshold,
-  // not zero and not the whole gap.
-  const p = planFit(8.8, 4.6, { deadAirS: 0.15 });
+  // not zero and not the whole gap. (Given enough stretch allowance to do it.)
+  const p = planFit(8.8, 4.6, { deadAirS: 0.15, maxVideoRate: 2 });
   assert.equal(p.mode, 'natural');
   assert.ok(Math.abs(p.outS - (4.6 + 0.15)) < 1e-6, `section runs ${p.outS}s, wanted 4.75s`);
   assert.ok(Math.abs(p.padS - 0.15) < 1e-6, `left ${p.padS}s of pause`);
+});
+
+test('a gentle stretch limit trades dead air for a calm picture', () => {
+  // The conservation problem, stated as a test: a much shorter line cannot be
+  // both gentle on the picture and free of pause. With the limit at 15% the
+  // picture stays calm and the leftover shows up as pause, honestly reported.
+  const p = planFit(8.8, 4.6, { deadAirS: 0.15, maxVideoRate: 1.15 });
+  assert.ok(Math.abs(p.rate - 1.15) < 1e-9, `rate ${p.rate}`);
+  assert.ok(p.padS > 2, `expected real leftover pause, got ${p.padS.toFixed(2)}s`);
+  assert.ok(Math.abs(p.outS - 8.8 / 1.15) < 1e-9);
 });
 
 test('a pause already under the threshold is left alone', () => {
@@ -588,10 +616,18 @@ test('a pause already under the threshold is left alone', () => {
   assert.ok(Math.abs(p.padS - 0.1) < 1e-6);
 });
 
-test('a zero threshold removes the pause entirely', () => {
-  const p = planFit(8.8, 4.6, { deadAirS: 0 });
+test('a zero threshold removes the pause entirely, given the room to do it', () => {
+  const p = planFit(8.8, 4.6, { deadAirS: 0, maxVideoRate: 2 });
   assert.ok(Math.abs(p.outS - 4.6) < 1e-6, `section runs ${p.outS}s`);
   assert.ok(p.padS < 1e-6, 'no pause left');
+});
+
+test('the stretch limit wins over the dead-air threshold', () => {
+  // Two settings pulling opposite ways, and the picture's limit is the one
+  // that holds: asking for no pause cannot force a lurch.
+  const p = planFit(8.8, 4.6, { deadAirS: 0, maxVideoRate: 1.15 });
+  assert.ok(Math.abs(p.rate - 1.15) < 1e-9, `rate ${p.rate} broke the limit`);
+  assert.ok(p.padS > 0, 'the pause the limit could not remove is kept, not forced out');
 });
 
 test('turning trimming off keeps the whole pause', () => {
@@ -604,7 +640,7 @@ test('turning trimming off keeps the whole pause', () => {
 test('the speed-up is bounded, and the leftover pause is reported', () => {
   // Cutting nearly all of a long line: even at the bound there is pause left,
   // and the caller has to be able to say so.
-  const p = planFit(10, 0.5, { deadAirS: 0.1, maxSpeed: 2 });
+  const p = planFit(10, 0.5, { deadAirS: 0.1, maxVideoRate: 2 });
   assert.equal(p.rate, 2);
   assert.ok(Math.abs(p.outS - 5) < 1e-6);
   assert.ok(p.padS > 4, `expected real leftover pause, got ${p.padS}`);
@@ -621,7 +657,7 @@ test('planFit rates round-trip through the edit model', () => {
   // The span's output length is (end - start) / rate, so a plan is only
   // correct if that comes back as outS.
   for (const [srcS, dubS, deadAirS] of [[8.8, 4.6, 0.15], [3, 2.5, 0.1], [3, 6, 0], [10, 0.5, 0.1]]) {
-    const p = planFit(srcS, dubS, { deadAirS });
+    const p = planFit(srcS, dubS, { deadAirS, maxVideoRate: 1.5 });
     assert.ok(Math.abs(srcS / p.rate - p.outS) < 1e-9, `${srcS}/${dubS}: ${srcS / p.rate} vs ${p.outS}`);
   }
 });

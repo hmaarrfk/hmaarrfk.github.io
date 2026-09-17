@@ -30,6 +30,10 @@ import { analyzeVoiceLevel } from './audio-boost.js';
 
 // How far a dub may be squeezed to fit its slot before it sounds processed.
 // Measured on WSOLA at 40 ms windows: past about a third the consonants smear.
+// This is a last resort, not the first move: when a respoken line runs long,
+// stretching the *picture* by a few percent is invisible where squeezing the
+// speech is audible the moment it does any real work. planFit() therefore
+// spends the picture's budget first and only squeezes what is left over.
 //
 // Note the floor is 1, not its mirror image: a dub is never *stretched*. If
 // the new line is shorter than the old one, slowing it down to fill the gap
@@ -737,22 +741,47 @@ export function naturalRate(srcS, dubS, { minRate = 0.5, maxRate = 2 } = {}) {
  */
 export function planFit(srcS, dubS, {
   trimDeadAir = true, deadAirS = 0.15,
-  maxSqueeze = FIT_MAX_RATE, maxSpeed = 2, minSpeed = 0.5,
+  maxVideoRate = 1.15, minVideoRate = 0.87,
+  maxSqueeze = FIT_MAX_RATE,
 } = {}) {
-  if (!(srcS > 0) || !(dubS > 0)) return { mode: 'fit', rate: 1, outS: srcS || 0, padS: 0 };
-
-  // Longer than the hole: squeeze while that stays inaudible, otherwise give
-  // it the seconds and let the section slow down.
-  if (dubS > srcS) {
-    if (dubS / srcS <= maxSqueeze) return { mode: 'fit', rate: 1, outS: srcS, padS: 0 };
-    const rate = Math.max(minSpeed, srcS / dubS);
-    return { mode: 'natural', rate, outS: srcS / rate, padS: Math.max(0, srcS / rate - dubS) };
+  if (!(srcS > 0) || !(dubS > 0)) {
+    return { mode: 'fit', rate: 1, outS: srcS || 0, padS: 0, squeeze: 1, short: 0 };
   }
 
-  // Shorter: how much of the leftover pause is allowed to remain?
+  // ---- The line came out LONGER than the one it replaces -----------------
+  // Here the picture can simply take its time, and that is the better tool:
+  // stretching the video by a few percent is invisible, where squeezing the
+  // speech to fit is audible as soon as it is doing any real work. So the
+  // order is: slow the picture first, and only squeeze what the picture
+  // cannot absorb.
+  if (dubS > srcS) {
+    const want = srcS / dubS;                       // <1: the picture slows
+    if (want >= minVideoRate) {
+      return { mode: 'natural', rate: want, outS: dubS, padS: 0, squeeze: 1, short: 0 };
+    }
+    // Past the gentle limit: slow as far as allowed, squeeze the remainder.
+    const rate = minVideoRate;
+    const outS = srcS / rate;
+    const squeeze = Math.min(maxSqueeze, dubS / outS);
+    // What still will not fit — the caller warns, and fitToDuration clamps.
+    const short = Math.max(0, dubS / squeeze - outS);
+    return { mode: 'natural', rate, outS, padS: 0, squeeze, short };
+  }
+
+  // ---- The line came out SHORTER -----------------------------------------
+  // The time it no longer fills has to go somewhere, and there are only three
+  // places: leave it as pause, run the picture faster through it, or cut. This
+  // spends it on the picture, but only as far as `maxVideoRate` — a gentle
+  // change everywhere beats a lurch in one place — and reports whatever pause
+  // is left rather than forcing it out.
   const allowed = trimDeadAir ? dubS + Math.max(0, deadAirS) : srcS;
-  if (srcS <= allowed + 1e-6) return { mode: 'fit', rate: 1, outS: srcS, padS: srcS - dubS };
-  const rate = Math.min(maxSpeed, srcS / allowed);
+  if (srcS <= allowed + 1e-6) {
+    return { mode: 'fit', rate: 1, outS: srcS, padS: srcS - dubS, squeeze: 1, short: 0 };
+  }
+  const rate = Math.min(maxVideoRate, srcS / allowed);
   const outS = srcS / rate;
-  return { mode: 'natural', rate, outS, padS: Math.max(0, outS - dubS) };
+  return {
+    mode: rate > 1 + 1e-6 ? 'natural' : 'fit',
+    rate, outS, padS: Math.max(0, outS - dubS), squeeze: 1, short: 0,
+  };
 }
