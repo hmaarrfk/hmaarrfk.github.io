@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<!-- Development harness for the overdub voice model. Not linked from the tool.
+     Serve this directory and open it to check the JS port against the Python
+     reference: with temperature 0 the model is deterministic, so both must
+     produce the same samples. See REQUIREMENTS.md ("Overdub → Testing"). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Overdub bench</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
+  pre { background: #f4f4f4; padding: .75rem; overflow: auto; max-height: 24rem; }
+  button { font: inherit; padding: .4rem .8rem; }
+  input[type=text] { width: 30rem; font: inherit; }
+</style>
+</head>
+<body>
+<h1>Overdub bench</h1>
+<p>Reference clip: <input type="file" id="ref" accept="audio/*"> (or it fetches
+<code>ref_nuclei.wav</code> from this directory)</p>
+<p>Text: <input type="text" id="text" value="This is a deterministic parity check."></p>
+<p>Temperature: <input type="number" id="temp" value="0" step="0.1" style="width:5rem">
+   &nbsp;<button id="go">Clone &amp; speak</button>
+   &nbsp;<button id="save" disabled>Save WAV</button></p>
+<pre id="log"></pre>
+<audio id="player" controls></audio>
+
+<script type="module">
+const log = (m) => { document.getElementById('log').textContent += m + '\n'; };
+let lastPcm = null, lastRate = 24000;
+
+const worker = new Worker('./voice-worker.js', { type: 'module' });
+const waitFor = (type) => new Promise((resolve, reject) => {
+  const on = (e) => {
+    const m = e.data;
+    if (m.type === 'error') { worker.removeEventListener('message', on); reject(new Error(m.message)); }
+    else if (m.type === type) { worker.removeEventListener('message', on); resolve(m); }
+    else if (m.type === 'status') log('  · ' + m.text);
+    else if (m.type === 'load' && m.status === 'done') log(`  · downloaded ${m.file} (${(m.loaded/1e6).toFixed(1)} MB)`);
+    else if (m.type === 'progress') log(`  · ${m.frames}/${m.estimate} frames`);
+  };
+  worker.addEventListener('message', on);
+});
+
+async function refAudio() {
+  const f = document.getElementById('ref').files[0];
+  if (!f) {
+    const r = await fetch('./ref_nuclei.wav');
+    if (!r.ok) throw new Error('Pick a reference clip above (ref_nuclei.wav is not in the repo — extract one with ffmpeg).');
+    var buf = await r.arrayBuffer();
+  } else { var buf = await f.arrayBuffer(); }
+  const ctx = new OfflineAudioContext(1, 1, 24000);
+  const decoded = await ctx.decodeAudioData(buf);
+  if (decoded.sampleRate === 24000) return decoded.getChannelData(0).slice();
+  // Resample to the model's rate.
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * 24000), 24000);
+  const src = off.createBufferSource();
+  src.buffer = decoded; src.connect(off.destination); src.start();
+  return (await off.startRendering()).getChannelData(0).slice();
+}
+
+document.getElementById('go').onclick = async () => {
+  document.getElementById('log').textContent = '';
+  try {
+    const t0 = performance.now();
+    log('loading models…');
+    worker.postMessage({ type: 'load', id: 1, bundle: {
+      repo: 'KevinAHM/pocket-tts-onnx', language: 'english_2026-04', precision: 'int8',
+    } });
+    await waitFor('ready');
+    log(`models ready in ${((performance.now()-t0)/1000).toFixed(1)} s`);
+
+    const audio = await refAudio();
+    log(`reference: ${audio.length} samples (${(audio.length/24000).toFixed(2)} s)`);
+    const t1 = performance.now();
+    worker.postMessage({ type: 'clone', id: 2, audio }, [audio.buffer]);
+    await waitFor('cloned');
+    log(`cloned in ${((performance.now()-t1)/1000).toFixed(2)} s`);
+
+    const text = document.getElementById('text').value;
+    const temperature = Number(document.getElementById('temp').value);
+    const t2 = performance.now();
+    worker.addEventListener('message', (e) => { if (e.data.type === 'latents') window.__latents = e.data; });
+    worker.postMessage({ type: 'speak', id: 3, text, temperature, debugLatents: true });
+    const res = await waitFor('audio');
+    const secs = (performance.now()-t2)/1000;
+    const pcm = res.pcm;
+    lastPcm = pcm; lastRate = res.sampleRate;
+    let sum = 0, peak = 0;
+    for (const v of pcm) { sum += v*v; peak = Math.max(peak, Math.abs(v)); }
+    log(`\nGENERATED ${pcm.length} samples (${(pcm.length/res.sampleRate).toFixed(3)} s) in ${secs.toFixed(2)} s`);
+    log(`  real-time factor: ${((pcm.length/res.sampleRate)/secs).toFixed(2)}x`);
+    log(`  rms ${Math.sqrt(sum/pcm.length).toFixed(9)}  peak ${peak.toFixed(9)}`);
+
+    const blob = wav(pcm, res.sampleRate);
+    document.getElementById('player').src = URL.createObjectURL(blob);
+    document.getElementById('save').disabled = false;
+    document.getElementById('save').onclick = () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'parity_js.wav'; a.click();
+    };
+    // Expose for automated checking.
+    window.__result = { length: pcm.length, rms: Math.sqrt(sum/pcm.length), peak, pcm };
+  } catch (e) {
+    log('ERROR: ' + e.message);
+    console.error(e);
+  }
+};
+
+function wav(pcm, rate) {
+  const b = new ArrayBuffer(44 + pcm.length*2), v = new DataView(b);
+  const s = (o, t) => { for (let i=0;i<t.length;i++) v.setUint8(o+i, t.charCodeAt(i)); };
+  s(0,'RIFF'); v.setUint32(4, 36+pcm.length*2, true); s(8,'WAVEfmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true);
+  v.setUint16(34,16,true); s(36,'data'); v.setUint32(40, pcm.length*2, true);
+  for (let i=0;i<pcm.length;i++) v.setInt16(44+i*2, Math.max(-1,Math.min(1,pcm[i]))*32767, true);
+  return new Blob([b], { type: 'audio/wav' });
+}
+</script>
+</body>
+</html>

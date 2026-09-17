@@ -4,7 +4,21 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-15 (**Breath control, part two.** The volume boost no
+_Last updated: 2026-09-16 (**Overdub: respeak a line in your own voice.**
+Edit a transcript line and a **respeak** button appears on it; the words are
+spoken back in your voice and dropped into the gap the old line left. The voice
+is cloned zero-shot from the clearest 6-15 s of the recording itself
+(`pickReference` over Whisper's word timings), so there is no sample to record
+and the clone arrives with the same microphone and room already on it. The
+model is Kyutai Pocket TTS as ONNX (five graphs, 146 MB int8), driven directly
+on a vendored onnxruntime-web — `voice-worker.js` is a port of the reference
+Python driver, KV cache and all, because the cloned voice *is* a primed KV
+cache. A respoken span is an ordinary `state.edits` entry carrying a `dub` id,
+so the timeline, the export and the frame-exact span padding already understood
+it. WASM, not WebGPU: measured, WebGPU is ~2x slower here because the int8 ops
+fall back to CPU and every autoregressive step pays a round trip.)_
+
+_Earlier: 2026-09-15 (**Breath control, part two.** The volume boost no
 longer follows you from the last recording — it starts **off** every time, since
 it re-encodes the audio and lifts whatever sits in the gaps. Whisper's *word*
 timings are now kept alongside the cues (a cue spans a whole phrase including
@@ -120,6 +134,13 @@ encoder via WebCodecs — entirely client-side — and optionally add
 | `breath.test.mjs` | Node test for `breath.js` — `node breath.test.mjs` |
 | `audio-boost.test.mjs` | Node test for the leveller's non-speech hold |
 | `speed.test.mjs` | Node test for `speed.js` — `node speed.test.mjs` |
+| `voice.js` | Pure overdub logic: `changedLines`, `snapSpan`, `pickReference`, `fitToDuration`, `matchLevel`, `shapeEnds`, `finishDub`, `suggestMode`, `naturalRate` |
+| `voice.test.mjs` | Node test for `voice.js` — `node voice.test.mjs` |
+| `voice-tokenizer.js` | SentencePiece protobuf reader + unigram Viterbi with byte fallback |
+| `voice-tokenizer.test.mjs` | Node test for the above — `node voice-tokenizer.test.mjs` |
+| `voice-ui.js` | Overdub UI + job orchestration: model cache, reference clip, respeak, `pcmFor()` for the encoder (given a `ctx` by `compressor.js`) |
+| `voice-worker.js` | Module worker running Pocket TTS on onnxruntime-web |
+| `voice-bench.html` | Dev-only harness for the Python/JS parity check (not linked) |
 | `vendor/` | Vendored deps + `update-vendor.sh` |
 
 ## Features
@@ -163,6 +184,153 @@ encoder via WebCodecs — entirely client-side — and optionally add
   shorten mode expresses itself as ordinary `src: 'breath'` speed edits, so it
   shows on the timeline and can be clicked away. Ducking happens *before* the
   leveller, whose hold then keeps it down.
+
+- **Overdub (respeak a line).**
+  - **The whole script can be respoken at once**, which is both a feature in
+    its own right — rewrite the transcript, hear the narration delivered again
+    — and the best answer to blending there is. Every splice is a join between
+    generated speech and a recording, and those never match perfectly; respeak
+    everything and no such join remains anywhere. Each line still dubs into its
+    own span at its own timestamp, under the same dead-air rules, so the
+    picture is untouched and the timing holds.
+  - **Every line can be respoken**, not only edited ones. A cue keeps `orig`
+    (what Whisper said) beside `text` (what you typed), and `restore text`
+    appears when they differ — but the respeak button is always there, because
+    disliking how you said a line is as good a reason as changing the words,
+    and the transcript can be perfectly correct while the delivery is not.
+  - **You can hear it before exporting.** Every line and every silence has a
+    play button that seeks to it and plays just that line, as it will be in
+    the export (sped up if it's in a fast section, respoken if respoken); a
+    second button appears once a line has a dub, to play the original for
+    comparison. Through the preview, the `<video>` is muted inside a dubbed
+    span and the finished samples play in its place, through the same gain and
+    limiter nodes, so the preview keeps telling the truth. A `Preview plays`
+    setting switches the whole timeline between respoken and original.
+  - **The reference clip comes out of the recording.** `pickReference` walks
+    the word timings for runs with no pause longer than 0.45 s and scores the
+    best 6-15 s window by *speech density* — the fraction actually covered by
+    words. Density is what matters because the model reproduces the recording,
+    not just the voice: a window full of room tone teaches it room tone. Ties
+    break toward the middle of the file. "Use a different reference clip"
+    cycles the next-best non-overlapping candidates.
+  - **The seam goes in the pause, not on the word.** `snapSpan` moves each
+    edge of the replaced span to the *middle of the neighbouring gap* (at most
+    0.25 s, and only if the gap is over 40 ms — a 20 ms stop closure is a
+    consonant, not a pause). A few ms of fade over room tone is inaudible;
+    the same fade across a word is not.
+  - **The picture moves before the speech does.** A respoken line that runs
+    long used to be squeezed by WSOLA first and only then given time; that was
+    backwards. A few percent of picture is invisible, where squeezing speech is
+    audible the moment it does real work — so `planFit` spends the picture's
+    budget first (`Video may stretch`, default 50%, applied as the span's rate)
+    and squeezes only what the picture could not absorb, up to 1.38x, then
+    reports the shortfall. At the default a line 5% long costs 4.8% of picture
+    and no audio processing at all. A dub is still never *stretched* to fill a
+    slot: slowing a short line down to fill it makes it drawl.
+  - **Three places the time can go, and only three.** A line respoken shorter
+    frees time that must become pause, a faster picture, or a cut — there is no
+    fourth option, and no setting can conjure one. `Video may stretch` and
+    `Dead air threshold` are the two ends of that trade, and the stretch limit
+    is the one that holds: asking for zero pause cannot force a lurch, it just
+    leaves the pause the limit could not remove, and says so.
+  - **Dead air is the user's call, not a built-in number.** `Trim dead air`
+    and a `Dead air threshold` in seconds (default 0.15) decide what happens
+    when a respoken line is shorter than the one it replaced. The threshold is
+    a *tolerance*, not a trigger: `planFit` keeps at most that much pause and
+    trims the rest by running the section at `srcS / (dubS + deadAirS)`,
+    bounded to 2x. Off, the whole pause stays. This went through two wrong
+    defaults first — never moving the picture (which left a second of dead air
+    in the middle of a screencast) and then a hard-coded 0.6 s (still too long
+    for the person using it) — which is the argument for it being a setting
+    rather than a better guess. Changing either control calls `replanAll()`,
+    which re-times every line already respoken without regenerating anything,
+    so the setting is something you turn and hear. When even the bounded rate
+    leaves real pause (cutting nearly all of a long line), the status says how
+    much and points at Cut, which is the honest answer there.
+  - **A dub is an ordinary edit.** `{ start, end, rate, audio: 'keep', dub }`,
+    where `dub` is an id into `state.dubs`. `applyEdit` stores a rate-1 edit
+    when — and only when — it carries a dub; `mergeEdits` never merges two,
+    since each owns its own audio. At export, `openSpan` asks
+    `voice.pcmFor(id, …)` for exactly `curTarget` frames and emits them, and
+    `feedSpan` drops the decoded source for those seconds. The gain stage and
+    the leveller are deliberately skipped: the level was matched to the
+    neighbouring speech at generation time and re-levelling would undo it.
+    Any dub forces the audio re-encode, like a speed change does.
+  - **The level is matched to the recording, and then boosted with it.** The
+    generation comes back at whatever level the model chose, which is not
+    yours. `matchVoiceLevel` measures it with `analyzeVoiceLevel` — the
+    300-3400 Hz band *while somebody is talking* — and moves it to the track's
+    own `voiceDbfs` (the number auto-boost already works from), falling back to
+    the reference clip's level. Plain whole-buffer RMS is the wrong yardstick
+    and audibly so: it calls a line with a pause in it quiet and shoves it up,
+    so the amount of silence in a sentence would decide the volume of the
+    voice. Capped at ±18 dB — more than that is a bad generation, not a level
+    problem. The dub then goes through the export's **gain stage like
+    everything else**; skipping it (on the theory that the level was already
+    matched) meant that with a boost on, every other second was lifted and the
+    respoken line was not, which is exactly how it was first reported.
+  - **The splice is built the way dialogue is replaced, not by fading.** Three
+    things, all standard practice and all missing from the first version, which
+    is why it "just didn't blend":
+    1. **Room tone under the whole line.** `findRoomTone` takes the longest
+       quiet stretch of the recording during the load-time analysis pass (the
+       track is decoded exactly once, so it is free there) and `layRoomTone`
+       mixes it under the generation. The background then never stops at a
+       splice — the ear notices *that* far sooner than it notices a voice being
+       slightly off — and it carries everything above the 12 kHz a 24 kHz model
+       cannot produce at all, which is what made a bare dub sound like a hole
+       punched in the track. A recording that never pauses yields no tone
+       rather than a bad one: with no real gap the percentile floor lands
+       inside the speech, and taking it would lay the speaker's own voice under
+       every line.
+    2. **Equal-power crossfades into the recording at both edges**, using the
+       original audio for the span — which the export has decoded anyway and
+       used to throw away. Fading in from silence and out to silence leaves a
+       dip at each boundary; crossfading means the background runs straight
+       through. Equal power rather than linear because the two sides are
+       uncorrelated noise and sum in power. The span edges were already snapped
+       into pauses, so what is being crossfaded is room tone into room tone.
+    3. **Tonal matching** (`matchTone`, three bands, ±6 dB) against the
+       recording of the line being replaced — the ideal reference, being the
+       same speaker, microphone, room and words. Applied before the level
+       match, since moving the balance moves the energy.
+  - **The pause is room tone, and must not loop.** A short line leaves a pause,
+    filled from the *generation's own* quiet stretches — the clone carries the
+    room, so its pauses are the right pauses. Tiling one 120 ms window is not
+    enough: a 1.5 s pad is that fragment a dozen times and the ear hears the
+    period as a breath or hum that was never recorded (reported in use). Up to
+    8 non-overlapping quiet windows are taken, shuffled deterministically, and
+    equal-power crossfaded; each tile is randomly reversed and jittered ±1.5 dB
+    so that even a line with only *one* usable pause doesn't repeat. Digital
+    silence is the fallback when a line has no quiet stretch at all — filling
+    it with looping speech would be far worse.
+  - **The samples are not persisted.** localStorage keeps only the intent
+    (text, span, mode, seed) — a minute of narration is several MB of floats
+    against a ~5 MB budget shared with the captions, and a seeded generation
+    can be made again exactly. `regenerateAll()` rebuilds on demand.
+  - **The model.** `KevinAHM/pocket-tts-onnx` (CC-BY-4.0 weights, MIT export
+    code), `english_2026-04` plus French/German/Italian/Portuguese/Spanish,
+    int8: `mimi_encoder` 21 MB, `text_conditioner` 16 MB, `flow_lm_main`
+    76 MB, `flow_lm_flow` 10 MB, `mimi_decoder` 23 MB = 146 MB, in the same
+    `transformers-cache` the Whisper weights use. 24 kHz mono out.
+    `kyutai/pocket-tts` itself is **gated** and cannot be fetched from a page.
+  - **Cloning is one forward pass.** The reference audio goes through
+    `mimi_encoder` to embeddings, the model's `bos_before_voice` is prepended,
+    and one `flow_lm_main` pass over them leaves a primed KV cache. That cache
+    *is* the voice — 18 tensors, threaded in and out of every subsequent step
+    by hand, per `bundle.json`'s manifest. The caches must be **NaN**-filled,
+    not zero-filled: NaN is how the graph marks a slot as empty.
+  - **WASM, single-threaded, on purpose.** GitHub Pages can't send COOP/COEP,
+    so there is no SharedArrayBuffer and no WASM threads; `numThreads` is
+    pinned to 1 to skip the warning. WebGPU was measured at roughly *half*
+    the speed, because the int8 ops fall back to CPU and each autoregressive
+    step pays a GPU round trip. onnxruntime-web is vendored separately from
+    transformers.js (which bundles ORT but exposes no session API), pinned to
+    the same build so both share one cached WASM binary.
+  - **Consent.** The weights' terms forbid cloning a voice without lawful
+    consent; the panel says so, and the feature is framed as respeaking your
+    own narration.
+
 - **The leveller holds its gain where nobody is talking** (`holdRangeDb`, 18 dB
   under the loudest recent voice) and returns to the gain that speech needed.
   Without it a gap was boosted ~12 dB harder than the speech around it. The
@@ -258,6 +426,38 @@ encoder via WebCodecs — entirely client-side — and optionally add
   once a second, with 2–6 s at 4× silent and 6–10 s at 2× voice: the export was
   exactly 7.00 s / 210 frames, the sped-silent second measured −91 dB, and the
   2× section kept all four beeps at half duration and 0.5 s spacing.
+- Overdub: `node voice.test.mjs` (what changed, seam snapping, reference
+  choice, fitting/padding/clamping, level matching, the whole finish, and the
+  asymmetric short/long policy) and `node voice-tokenizer.test.mjs` (protobuf
+  field skipping, Viterbi picking the best split, byte fallback, round trip).
+  - **Tokenizer, against the real model.** The synthetic test can't prove the
+    4000-piece model is read correctly, so that is checked by hand: tokenise a
+    corpus with Python's `sentencepiece` and compare ids one for one. Checked
+    2026-09-16 on 83 cases — real transcript lines, accents, CJK, emoji, Greek,
+    Cyrillic, tabs, zero-width spaces, 60 random printable-ASCII strings —
+    **83/83 exact**, and every case round-tripped through `decode`.
+  - **The model port, against Python.** With `temperature: 0` the model is
+    deterministic, so `voice-bench.html` and `generate.py` must agree. Checked
+    2026-09-16 on a 10 s reference from a real screencast: both produced
+    **25 frames / 48000 samples**, and the **first latent frame correlates at
+    0.9996** (max deviation 1.4%). The waveforms then diverge (envelope
+    correlation 0.85) — expected, and not a port bug: int8 GEMM differs
+    slightly between the native CPU kernels and WASM SIMD, and an
+    autoregressive loop compounds it. The first frame is the one that proves
+    the wiring, since nothing has fed back into it yet.
+  - **Seeding.** Same text + same seed must give bit-identical audio on one
+    machine (it is what makes a regenerated line reproducible). Checked
+    2026-09-16: seed 42 twice → identical length, rms and peak to 9 decimals;
+    seed 99 → different. Across *machines* it is not reproducible, for the
+    int8 reason above.
+  - **Speed.** Single-threaded WASM, Chrome on an Apple Silicon Mac: models
+    open in ~10 s from cache, cloning a 10 s reference ~2.1 s, generation
+    ~2.2x real time.
+  - **End to end.** Checked 2026-09-16 on the 5:50 Nuclei Segmentation
+    walkthrough: transcript (81 lines, Whisper base) → edit line 2's version
+    number → `respeak` appeared on that line only → cloned from 5:04-5:19
+    (15.0 s, 98% speech) → "fitted into 8.8 s", picture untouched → export ran
+    to 5:50.82, the original duration.
 - Transcript flow: a 20 s clip with three spoken sentences transcribed whole,
   two silence rows detected (5.9 s and 6.5 s), "all 4× silent" took 20.18 s →
   10.93 s, and cutting one line took it to 9.25 s.
@@ -275,6 +475,18 @@ encoder via WebCodecs — entirely client-side — and optionally add
 
 ## Future ideas
 
+- Overdub: respeak a whole *run* of consecutive edited lines as one generation,
+  so prosody carries across the join instead of restarting per line.
+- Overdub: the dub starts on the next animation frame after the playhead
+  enters its span, so it can be up to ~16 ms late in the preview (the export
+  is sample-exact). Scheduling it ahead with `start(when)` would remove that.
+- A higher-quality voice preset was investigated and **rejected**: F5-TTS is
+  792 MB (not the ~200 MB its README claims — the fp16 transformer alone is
+  661 MB), WebGPU-only in practice, has its sampling steps baked at 32 so there
+  is no quality/speed knob, and its base weights are CC-BY-NC-4.0 while the
+  ONNX mirrors are mislabelled Apache-2.0. If a second tier is ever wanted,
+  `onnx-community/Supertonic-TTS-2-ONNX` (~262 MB) is the candidate to check
+  first — its zero-shot cloning interface is unconfirmed.
 - Soft subtitle track (switchable) — needs a muxer with text tracks
   (Mediabunny writes WebVTT-in-MP4; Apple players prefer tx3g).
 - Sidecar `.srt` / `.vtt` download (cues already exist; trivial).

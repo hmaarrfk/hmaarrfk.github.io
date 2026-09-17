@@ -6,6 +6,11 @@
 #   mp4-muxer     — writes the WebCodecs output back into an MP4 container
 #   transformers  — @huggingface/transformers (transformers.js), runs the
 #                   Whisper speech model for auto-captions
+#   onnxruntime   — onnxruntime-web, WASM build. Overdub drives the voice
+#                   model's ONNX graphs directly; transformers.js bundles ORT
+#                   but doesn't expose a session API, so this is its own copy.
+#                   Pinned to the exact build transformers.js depends on, so
+#                   the two share one cached WASM binary instead of two.
 #
 # None is an npm runtime dep / submodule: this copies the published files in
 # so the tool stays a static page (no build step). Network is used only while
@@ -15,6 +20,7 @@
 # Usage:
 #   ./update-vendor.sh                       # re-vendor the pinned default versions
 #   ./update-vendor.sh 0.5.2 5.1.5 4.2.0     # mp4box + mp4-muxer + transformers versions
+#   (the onnxruntime-web build is pinned below — keep it matching transformers.js)
 #
 # Requires: npm, tar.
 
@@ -23,9 +29,12 @@ set -euo pipefail
 MP4BOX_VERSION="${1:-0.5.2}"          # keep in sync with README.md
 MUXER_VERSION="${2:-5.1.5}"           # keep in sync with README.md
 TRANSFORMERS_VERSION="${3:-4.2.0}"    # keep in sync with README.md
+# Must match what @huggingface/transformers depends on:
+#   npm view @huggingface/transformers@$TRANSFORMERS_VERSION dependencies
+ORT_VERSION="${4:-1.26.0-dev.20260416-b7804b056c}"   # keep in sync with README.md and voice-worker.js
 VENDOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Vendoring mp4box@${MP4BOX_VERSION} + mp4-muxer@${MUXER_VERSION} + @huggingface/transformers@${TRANSFORMERS_VERSION} → ${VENDOR_DIR}"
+echo "Vendoring mp4box@${MP4BOX_VERSION} + mp4-muxer@${MUXER_VERSION} + @huggingface/transformers@${TRANSFORMERS_VERSION} + onnxruntime-web@${ORT_VERSION} → ${VENDOR_DIR}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -57,6 +66,26 @@ mkdir -p "$tmp/transformers" && tar -xzf "$tmp"/huggingface-transformers-*.tgz -
 mkdir -p "$VENDOR_DIR/transformers"
 cp "$tmp/transformers/package/dist/transformers.min.js" "$VENDOR_DIR/transformers/transformers.min.js"
 cp "$tmp/transformers/package/LICENSE"                  "$VENDOR_DIR/transformers/LICENSE"
+
+# --- onnxruntime-web (WASM-only ESM build, 50 KB; it fetches its own ~13 MB
+# .wasm from jsDelivr at the pinned version the first time overdub runs).
+# WebGPU is deliberately NOT used: measured on this model it is ~2x SLOWER than
+# single-threaded WASM, because the int8 ops fall back to CPU and every
+# autoregressive step pays a GPU round trip. ---
+fetch "onnxruntime-web@${ORT_VERSION}"
+mkdir -p "$tmp/ort" && tar -xzf "$tmp"/onnxruntime-web-*.tgz -C "$tmp/ort"
+mkdir -p "$VENDOR_DIR/onnxruntime"
+# Renamed .mjs → .js for the same GitHub Pages MIME reason as mp4-muxer.
+cp "$tmp/ort/package/dist/ort.wasm.min.mjs" "$VENDOR_DIR/onnxruntime/ort.wasm.min.js"
+curl -sL https://raw.githubusercontent.com/microsoft/onnxruntime/main/LICENSE \
+  -o "$VENDOR_DIR/onnxruntime/LICENSE"
+
+# The version is also baked into voice-worker.js, which points ORT at the
+# matching WASM on jsDelivr. Drift there is silent and fatal, so check it.
+if ! grep -q "ORT_VERSION = '${ORT_VERSION}'" "$VENDOR_DIR/../voice-worker.js"; then
+  echo "ERROR: voice-worker.js's ORT_VERSION does not match ${ORT_VERSION}. Update it." >&2
+  exit 1
+fi
 
 # GitHub's secret scanning rejects a push containing anything shaped like a
 # Mistral API key: a standalone 32-character alphanumeric token. The bundle
@@ -95,12 +124,13 @@ fi
 
 echo "Done. Vendored files:"
 ( cd "$VENDOR_DIR" && ls -l mp4box/mp4box.all.min.js mp4box/LICENSE mp4-muxer/mp4-muxer.js mp4-muxer/LICENSE \
-    transformers/transformers.min.js transformers/LICENSE )
+    transformers/transformers.min.js transformers/LICENSE onnxruntime/ort.wasm.min.js onnxruntime/LICENSE )
 
 cat <<NOTE
 
 Next steps:
-  1. Update the pinned versions in README.md to ${MP4BOX_VERSION} / ${MUXER_VERSION} / ${TRANSFORMERS_VERSION}.
-  2. Re-test the tool (load a video → Compress; generate captions → Compress).
+  1. Update the pinned versions in README.md to ${MP4BOX_VERSION} / ${MUXER_VERSION} / ${TRANSFORMERS_VERSION} / ${ORT_VERSION}.
+  2. Re-test the tool (load a video → Compress; generate captions → Compress;
+     edit a transcript line → Respeak → Compress).
   3. Commit the changed vendor/ files.
 NOTE

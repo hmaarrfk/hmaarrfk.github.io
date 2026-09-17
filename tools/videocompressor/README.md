@@ -204,11 +204,19 @@ reached, so trims near the start of a long video finish quickly.
 | `captions.js` | ES module: the pure caption logic — 16 kHz resampler, `detectSpeech`/`compactSpeech`/`mapCompactSpan`, window planning, `mergeChunkWords`, words → cues, `cueAt`, and `drawCaption` (used by both the preview overlay and the encoder). No DOM/model, so it runs under Node too. |
 | `captions-ui.js` | ES module: the interactive half — model presets and the WebGPU probe, the transcription job and its worker, the editable cue list, the preview overlay, and caption persistence. Gets the DOM, the state and a few timeline/audio helpers from `compressor.js` through one `ctx` object. |
 | `captions-worker.js` | Module Web Worker: loads Whisper through transformers.js, detects the language, transcribes chunk by chunk and posts words (with timestamps) back as it goes. Jobs are id-tagged and serialized so a cancelled one can't interleave with a new one. |
+| `voice.js` | ES module: the pure overdub logic — which transcript lines changed, where a replacement may start and stop (`snapSpan`), which few seconds to clone from (`pickReference`), and fitting a generation into its slot (`fitToDuration`, `matchLevel`, `shapeEnds`, `finishDub`). No DOM or model, so it runs under Node, which is where `voice.test.mjs` tests it. |
+| `voice.test.mjs` | Node test for the above. `node voice.test.mjs`. |
+| `voice-tokenizer.js` | ES module: a minimal SentencePiece reader (protobuf) and unigram Viterbi segmenter with byte fallback, so the voice model's `tokenizer.model` can be used directly rather than vendoring a converted copy per language. |
+| `voice-tokenizer.test.mjs` | Node test for the above, against models built in the test. `node voice-tokenizer.test.mjs`. |
+| `voice-ui.js` | ES module: the interactive half of overdub — the model download and its cache probe, choosing and decoding the reference clip, respeaking a line, and handing the encoder finished samples through `pcmFor()`. Gets its DOM/state/timeline through one `ctx`, like `captions-ui.js`. |
+| `voice-worker.js` | Module Web Worker: runs the five Pocket TTS ONNX graphs on onnxruntime-web. A port of the reference Python driver, including the hand-threaded KV cache that *is* the cloned voice. |
+| `voice-bench.html` | Development harness, not linked from the tool: clone from a WAV and speak a line, to check the port against the Python reference. |
 | `REQUIREMENTS.md` | Living spec / design notes — update with every change. |
 | `vendor/mp4box/` | Vendored MP4Box.js UMD bundle + license. |
 | `vendor/mp4-muxer/` | Vendored mp4-muxer ESM bundle (`.mjs` renamed to `.js` so GitHub Pages serves it with a JS MIME type) + license. |
 | `vendor/transformers/` | Vendored transformers.js self-contained ESM bundle (`transformers.min.js`, ONNX Runtime's JS inside; no bare imports) + license. |
-| `vendor/update-vendor.sh` | Re-vendors all three deps from npm (see below). |
+| `vendor/onnxruntime/` | Vendored onnxruntime-web WASM build (`ort.wasm.min.js`, 50 KB) + license. Overdub drives ONNX graphs directly, which transformers.js doesn't expose; its WASM binary is fetched from jsDelivr on demand. |
+| `vendor/update-vendor.sh` | Re-vendors all four deps from npm (see below). |
 
 ## Vendoring
 
@@ -221,6 +229,7 @@ captions.) Pinned versions:
 - `mp4box` **0.5.2**
 - `mp4-muxer` **5.1.5**
 - `@huggingface/transformers` **4.2.0**
+- `onnxruntime-web` **1.26.0-dev.20260416-b7804b056c** (the exact build transformers.js 4.2.0 pins, so both share one cached WASM)
 
 To update:
 
