@@ -46,7 +46,7 @@ function langName(code) {
 //        audio: { decodeAudioTrack, mixToMono, concatFloat32 },
 //        fmt: { fmtTime, fmtBytes }, setProgress, onChanged }
 export function createCaptions(ctx) {
-  const { els, getState, timeline, audio: audioApi, fmt, setProgress, onChanged } = ctx;
+  const { els, getState, timeline, audio: audioApi, fmt, setProgress, onChanged, voice } = ctx;
 
   let asrEnv = { device: 'wasm', f16: false };
   let worker = null;
@@ -314,13 +314,18 @@ export function createCaptions(ctx) {
     const onOutput = j.words.map((w) => ({ text: w.text, ...mapCompactSpan(j.map, w.start, w.end) }));
     const toSource = (o) => timeline.fromOutputTime(o, j.segs);
     state.captions = {
-      cues: wordsToCues(onOutput).map((c) => ({ start: toSource(c.start), end: toSource(c.end), text: c.text })),
+      // `orig` is what the model said; `text` is what the user may have
+      // retyped. Overdub respeaks a line exactly when the two differ.
+      cues: wordsToCues(onOutput).map((c) => ({ start: toSource(c.start), end: toSource(c.end), text: c.text, orig: c.text })),
       // The word timings are kept, not just the cues they get merged into. A
       // cue spans a whole phrase *including its pauses* — consecutive cues are
       // usually butted right up against each other — so it says almost nothing
       // about where speech actually stops. Word spans do, and that's what the
       // breath detector needs to know where the gaps are.
-      words: onOutput.map((w) => ({ start: toSource(w.start), end: toSource(w.end) })),
+      // The text rides along too: overdub picks its cloning reference out of
+      // these, and showing which words it is about to imitate is the
+      // difference between a trustworthy button and a magic one.
+      words: onOutput.map((w) => ({ start: toSource(w.start), end: toSource(w.end), text: w.text })),
       language: j.language, model: j.preset.key, segs: j.segs,
     };
     renderOverlay();
@@ -524,7 +529,15 @@ export function createCaptions(ctx) {
       what.textContent = `— ${(end - start).toFixed(1)} s of silence —`;
       what.className = 'small muted';
       what.style.cssText = 'flex:1;min-width:0;font-style:italic';
-      row.append(time, what, rowActions(start, end));
+      // Gaps get one too: a silence is often the thing you want to check.
+      const gapPlay = document.createElement('button');
+      gapPlay.type = 'button';
+      gapPlay.textContent = '▶';
+      gapPlay.title = 'Play this silence';
+      gapPlay.style.cssText = 'flex:0 0 auto;font:inherit;font-size:.78rem;padding:2px 8px;border-radius:6px;'
+        + 'border:1px solid var(--border);background:var(--panel-2);color:inherit;cursor:pointer';
+      gapPlay.onclick = () => ctx.playLine(start, end, { dubs: true });
+      row.append(time, what, gapPlay, rowActions(start, end));
       return row;
     };
 
@@ -548,8 +561,87 @@ export function createCaptions(ctx) {
       input.type = 'text';
       input.value = c.text;
       input.style.cssText = 'flex:1;min-width:0';
-      input.oninput = () => { c.text = input.value; renderOverlay(); queueSave(); };
-      row.append(time, input, rowActions(c.start, c.end));
+      input.oninput = () => { c.text = input.value; renderOverlay(); queueSave(); refreshDub(); };
+      // Respeaking is offered on every line, not only edited ones. Changing
+      // the words is one reason to respeak; disliking how you said them is
+      // just as good a one, and the transcript can be perfectly correct while
+      // the delivery is not.
+      const smallBtn = (bg) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.style.cssText = 'flex:0 0 auto;font:inherit;font-size:.78rem;padding:2px 8px;border-radius:6px;'
+          + `border:1px solid var(--border);background:${bg};color:inherit;cursor:pointer`;
+        return b;
+      };
+      const undoBtn = smallBtn('var(--panel-2)');   // put the transcript text back
+      const dubBtn = smallBtn('var(--panel-2)');    // respeak / undo respeak
+
+      // Hear just this line, as it will be in the export — sped up if it's in
+      // a fast section, respoken if it's been respoken. A second button
+      // appears once there's a dub, so the two can be compared back to back.
+      const playBtn = smallBtn('var(--panel-2)');
+      playBtn.textContent = '▶';
+      playBtn.title = 'Play this line';
+      playBtn.onclick = () => ctx.playLine(c.start, c.end, { dubs: true });
+      const playOrigBtn = smallBtn('var(--panel-2)');
+      playOrigBtn.textContent = '▶ orig';
+      playOrigBtn.title = 'Play the original recording of this line';
+      playOrigBtn.onclick = () => ctx.playLine(c.start, c.end, { dubs: false });
+
+      const refreshDub = () => {
+        playOrigBtn.hidden = !c.dub;      // nothing to compare against otherwise
+        if (!voice) { dubBtn.hidden = true; undoBtn.hidden = true; return; }
+        const edited = voice.isChanged(c);
+
+        // Restoring the transcript means going back to the recording, so it
+        // drops the respoken audio with it — otherwise you'd be left with a
+        // generated line claiming to be what the model heard.
+        undoBtn.hidden = !edited;
+        undoBtn.textContent = 'restore text';
+        undoBtn.title = 'Put the transcribed wording back' + (c.dub ? ' (and drop the respoken audio)' : '');
+        undoBtn.onclick = () => {
+          c.text = c.orig;
+          input.value = c.orig;
+          if (c.dub) voice.revert(c);
+          renderOverlay();
+          queueSave();
+          renderList();
+        };
+
+        dubBtn.hidden = false;
+        const state = voice.jobState(c);
+        if (state) {
+          // Clicking a second line while the first is generating queues it.
+          // Saying so on the row is the whole point — the version that
+          // silently refused looked like a hung page.
+          dubBtn.disabled = true;
+          dubBtn.textContent = state === 'running' ? 'respeaking…' : 'queued';
+          dubBtn.title = state === 'running'
+            ? 'Generating this line now'
+            : 'Waiting for the lines ahead of it';
+          dubBtn.onclick = null;
+        } else if (c.dub) {
+          dubBtn.disabled = false;
+          dubBtn.textContent = 'undo respeak';
+          dubBtn.title = 'Put the original recording back for this line';
+          dubBtn.onclick = () => { voice.revert(c); renderList(); };
+        } else {
+          dubBtn.disabled = false;
+          dubBtn.textContent = 'respeak';
+          dubBtn.title = edited
+            ? 'Say this line as you typed it, in your voice'
+            : 'Say this line again in your voice — for when the words are right but the delivery wasn’t';
+          dubBtn.onclick = () => {
+            // Not awaited: the queue owns the ordering, and the list repaints
+            // from voice-ui's onChanged as each line starts and finishes.
+            voice.respeak(c).catch((e) => {
+              if (e && e.message !== 'cancelled') voice.setStatus(e.message);
+            });
+          };
+        }
+      };
+      refreshDub();
+      row.append(time, input, playBtn, playOrigBtn, undoBtn, dubBtn, rowActions(c.start, c.end));
       frag.appendChild(row);
     }
     if (state.durationS - last > GAP_MIN) frag.appendChild(gapRow(last, state.durationS));
@@ -628,7 +720,8 @@ export function createCaptions(ctx) {
     try {
       const d = JSON.parse(localStorage.getItem(LS_CAP_KEY) || 'null');
       if (!d || !d.file || d.file.name !== file.name || d.file.size !== file.size || d.file.lastModified !== file.lastModified) return null;
-      const cues = (d.cues || []).filter((c) => c && isFinite(c.start) && isFinite(c.end) && typeof c.text === 'string');
+      const cues = (d.cues || []).filter((c) => c && isFinite(c.start) && isFinite(c.end) && typeof c.text === 'string')
+        .map((c) => ({ ...c, orig: typeof c.orig === 'string' ? c.orig : c.text }));
       const words = (d.words || []).filter((w) => w && isFinite(w.start) && isFinite(w.end));
       return cues.length ? { cues, words, language: d.language || null, model: d.model || null, segs: Array.isArray(d.segs) ? d.segs : null } : null;
     } catch (_) { return null; }

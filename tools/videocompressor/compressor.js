@@ -28,7 +28,9 @@ import { dbToLinear, analyzeVoiceLevel, applyGainInPlace, createLeveler } from '
 import { cueAt, drawCaption } from './captions.js';
 import { createTimeStretcher } from './speed.js';
 import { detectBreaths, duckRegions } from './breath.js';
+import { findRoomTone, crossfadeEdges } from './voice.js';
 import { createCaptions } from './captions-ui.js';
+import { createVoice } from './voice-ui.js';
 
 const MP4Box = window.MP4Box;
 const AAC_CODEC = 'mp4a.40.2';   // AAC-LC — what we re-encode audio to when a boost is on
@@ -74,6 +76,13 @@ const els = {
   inCapBurn: $('in-cap-burn'), hintCapModel: $('hint-cap-model'),
   btnCapGen: $('btn-cap-gen'), btnCapCancel: $('btn-cap-cancel'), btnCapClear: $('btn-cap-clear'),
   capProgress: $('cap-progress'), capStatus: $('cap-status'), capNote: $('cap-note'), capList: $('cap-list'),
+  // overdub
+  inVoiceLang: $('in-voice-lang'), hintVoiceLang: $('hint-voice-lang'),
+  inVoiceTrack: $('in-voice-track'),
+  inVoiceTrim: $('in-voice-trim'), inVoiceDeadAir: $('in-voice-deadair'),
+  btnVoiceRef: $('btn-voice-ref'), voiceRef: $('voice-ref'),
+  btnVoiceAll: $('btn-voice-all'), btnVoiceAllCancel: $('btn-voice-all-cancel'),
+  voiceProgress: $('voice-progress'), voiceStatus: $('voice-status'),
   encodeWarnSettings: $('encode-warn-settings'), encodeWarnExport: $('encode-warn-export'),
   btnCompress: $('btn-compress'), btnCancel: $('btn-cancel'),
   est: $('est'), progress: $('progress'), status: $('status'),
@@ -266,8 +275,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Auto-captions live in their own module (captions-ui.js); it gets the DOM,
 // the current state, and the few timeline/audio helpers it needs from here.
 // ---------------------------------------------------------------------------
+// Overdub lives in its own module too (voice-ui.js). It is created first
+// because the transcript list offers a "respeak" button on every line, so
+// captions needs to be able to reach it.
+const voice = createVoice({
+  els,
+  getState: () => state,
+  timeline: { keptSegments, fullSegments, toOutputTime, fromOutputTime, seek },
+  edits: {
+    // A respoken span is an ordinary edit carrying the id of its audio.
+    applyDub: (start, end, rate, dub) => applyEdit(start, end, rate, 'keep', { dub }),
+    clearDub: (start, end) => applyEdit(start, end, 1, 'keep'),
+  },
+  audio: { decodeAudioTrack, mixToMono, concatFloat32 },
+  fmt: { fmtTime, fmtBytes },
+  setProgress,
+  onChanged: () => {
+    renderTrim();
+    captions.renderList();
+    if (currentStep === 'export') updateExportSummary();
+  },
+});
+
 const captions = createCaptions({
   els,
+  voice,
   getState: () => state,
   timeline: { keptSegments, fullSegments, toOutputTime, fromOutputTime, seek },
   // The transcript is an editing surface: each line can be cut or sped up.
@@ -284,6 +316,7 @@ const captions = createCaptions({
     gain: () => ({ mode: currentVolumeMode(), db: currentAudioGainDb() }),
   },
   fmt: { fmtTime, fmtBytes },
+  playLine,
   setProgress,
   onChanged: () => {
     if (currentStep === 'export') updateExportSummary();
@@ -316,6 +349,7 @@ function saveSettings() {
       volume: currentVolumeMode(), gain: els.inGain.value,
       breathMode: els.inBreathMode.value, breathDb: els.inBreathDb.value,
       ...captions.settings(),
+      ...voice.settings(),
     },
     file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
     trim: { inS: state.inS, outS: state.outS, edits: state.edits },
@@ -337,6 +371,7 @@ function applyGeneral(g) {
   if (g.breathMode != null) els.inBreathMode.value = g.breathMode;
   if (g.breathDb != null) els.inBreathDb.value = g.breathDb;
   captions.applySettings(g);
+  voice.applySettings(g);
   const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
   if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
   // The volume boost is deliberately *not* restored: it starts off for every
@@ -509,6 +544,9 @@ async function loadFile(file) {
     inS: 0, outS: durationS, edits: [], pendingMarkStart: null,
     audioAnalysis: null, audioEncoderSupported: false, breaths: [],
     isAac: false, captions: captions.restore(file),
+    // Respoken lines: the samples aren't persisted (they're regenerated from
+    // the same text and seed), so this starts empty even when intent survives.
+    dubs: new Map(), dubsRestored: voice.reset(file),
   };
 
   // Info line
@@ -629,7 +667,9 @@ function activeEdits() {
   for (const e of state.edits) {
     const a = clamp(e.start, state.inS, state.outS);
     const b = clamp(e.end, state.inS, state.outS);
-    if (b - a > 1e-3) out.push({ start: a, end: b, rate: e.rate, audio: e.audio || 'mute' });
+    // `dub` names a generated replacement for this span's narration; it has to
+    // survive down to the encoder, which is the only place it is ever read.
+    if (b - a > 1e-3) out.push({ start: a, end: b, rate: e.rate, audio: e.audio || 'mute', dub: e.dub || null });
   }
   return out.sort((x, y) => x.start - y.start);
 }
@@ -639,15 +679,15 @@ function activeEdits() {
 function editSpans() {
   const spans = [];
   let cur = state.inS, o = 0;
-  const push = (start, end, rate, audio) => {
+  const push = (start, end, rate, audio, dub) => {
     if (!(rate > 0) || end - start <= 1e-3) return;
     const dur = (end - start) / rate;
-    spans.push({ start, end, rate, audio, outStart: o, outEnd: o + dur });
+    spans.push({ start, end, rate, audio, dub: dub || null, outStart: o, outEnd: o + dur });
     o += dur;
   };
   for (const e of activeEdits()) {
     if (e.start > cur) push(cur, e.start, 1, 'keep');
-    push(Math.max(cur, e.start), e.end, e.rate, e.audio);
+    push(Math.max(cur, e.start), e.end, e.rate, e.audio, e.dub);
     cur = Math.max(cur, e.end);
   }
   if (cur < state.outS) push(cur, state.outS, 1, 'keep');
@@ -718,7 +758,7 @@ function inCut(t) {
 
 // Lay an edit over a source range, replacing whatever was there. `rate === 1`
 // clears the range back to normal speed, which is how "restore" works.
-function applyEdit(start, end, rate, audio = 'mute') {
+function applyEdit(start, end, rate, audio = 'mute', extra = null) {
   if (!state || end - start <= 1e-3) return;
   const kept = [];
   for (const e of state.edits) {
@@ -726,7 +766,9 @@ function applyEdit(start, end, rate, audio = 'mute') {
     if (e.start < start) kept.push({ ...e, end: start });
     if (e.end > end) kept.push({ ...e, start: end });
   }
-  if (rate !== 1) kept.push({ start, end, rate, audio });
+  // Rate 1 with nothing attached is "leave it alone", so it isn't stored — but
+  // an overdub at natural length is exactly that rate and must be.
+  if (rate !== 1 || (extra && extra.dub)) kept.push({ start, end, rate, audio, ...(extra || {}) });
   state.edits = kept.sort((a, b) => a.start - b.start);
   mergeEdits();
   renderTrim();
@@ -741,7 +783,10 @@ function mergeEdits() {
   const merged = [];
   for (const e of state.edits) {
     const last = merged[merged.length - 1];
-    if (last && e.start <= last.end + 1e-3 && last.rate === e.rate && last.audio === e.audio && last.src === e.src) {
+    // Two overdubs are never the same thing even when they abut: each carries
+    // its own generated audio, so merging them would throw one away.
+    if (last && e.start <= last.end + 1e-3 && last.rate === e.rate && last.audio === e.audio
+        && last.src === e.src && !last.dub && !e.dub) {
       last.end = Math.max(last.end, e.end);
     } else {
       merged.push({ ...e });
@@ -778,21 +823,106 @@ function editNote() {
   return note;
 }
 
+// ---------------------------------------------------------------------------
+// Respoken lines, in the preview
+// ---------------------------------------------------------------------------
+// The <video> is playing the original file, so a respoken line isn't in it.
+// While the playhead is inside a dubbed span, the element is muted and the
+// generated samples are played instead — the *same* samples the encoder will
+// get, so what you hear here is what you'll get out.
+//
+// It is routed through the same gain and limiter nodes as the recording,
+// because the export puts a dub through its gain stage too — so a boost lifts
+// the respoken line along with everything else, and the preview keeps telling
+// the truth about what you'll get.
+let dubSource = null, dubPlayingId = null;
+// Auditioning one line: play to here, then stop. `dubOverride` forces the
+// recording for the A/B button, without disturbing the page-wide choice.
+let playUntil = null, dubOverride = null;
+
+// Play one transcript line and stop at the end of it. Everything else about
+// playback still applies — a sped-up section still plays fast, a cut is still
+// skipped — so this is the line as it will be in the export, not a preview of
+// the source.
+function playLine(start, end, { dubs = true } = {}) {
+  const v = els.preview;
+  if (!v || !state) return;
+  dubOverride = dubs ? null : 'original';
+  playUntil = end;
+  stopDubPlayback();
+  ensureAudioGraph();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  seek(Math.max(0, start) + 0.001);
+  updatePreviewGain();
+  v.play();
+}
+
+function stopDubPlayback() {
+  if (dubSource) {
+    try { dubSource.onended = null; dubSource.stop(); } catch (_) {}
+    try { dubSource.disconnect(); } catch (_) {}
+  }
+  dubSource = null;
+  dubPlayingId = null;
+}
+
+// Returns whether a dub is sounding right now (so the original must stay down).
+function syncDubPlayback(span, t, playing) {
+  const track = dubOverride || voice.previewTrack();
+  const want = (playing && span && span.dub && track === 'respoken') ? span.dub : null;
+  if (!want) { if (dubPlayingId) stopDubPlayback(); return false; }
+  if (dubPlayingId === want) return true;
+
+  stopDubPlayback();
+  ensureAudioGraph();
+  if (!audioCtx) return false;
+  // The span occupies (end - start) / rate seconds of output, which is exactly
+  // how long the finished dub is — in 'natural' mode the rate is what absorbs
+  // the difference, so this holds either way.
+  const outSeconds = (span.end - span.start) / span.rate;
+  const frames = Math.round(outSeconds * audioCtx.sampleRate);
+  const buf = voice.previewBuffer(want, { sampleRate: audioCtx.sampleRate, frames }, audioCtx);
+  if (!buf) return false;
+  // Source time advances `rate` times per second of playback, so the elapsed
+  // wall-clock time into the span — which is where the buffer should be — is
+  // the source offset divided by the rate.
+  const offset = clamp((t - span.start) / span.rate, 0, Math.max(0, buf.duration - 0.01));
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(previewGainNode || audioCtx.destination);
+  src.onended = () => { if (dubSource === src) { dubSource = null; dubPlayingId = null; } };
+  try { src.start(0, offset); } catch (_) { return false; }
+  dubSource = src;
+  dubPlayingId = want;
+  return true;
+}
+
 // Follow the span under the playhead: faster sections play faster, and a silent
 // one is muted. Pitch is preserved, matching what the export's time-stretch
 // does, so the preview sounds like the file you'll get.
 function applySpanPlayback() {
   const v = els.preview;
   if (!state || !v) return;
+  if (playUntil != null && !v.paused && (v.currentTime || 0) >= playUntil) {
+    playUntil = null;
+    v.pause();
+    return;
+  }
   const s = spanAt(v.currentTime || 0);
   const rate = s ? s.rate : 1;
   if (Math.abs(v.playbackRate - rate) > 1e-3) v.playbackRate = rate;
   if (v.preservesPitch === false) v.preservesPitch = true;
-  const silent = !!s && s.rate !== 1 && s.audio !== 'keep';
-  if (v.muted !== silent) v.muted = silent;
+  const dubbing = syncDubPlayback(s, v.currentTime || 0, !v.paused);
+  const lapseSilent = !!s && s.rate !== 1 && s.audio !== 'keep';
+  // What silences the *original* under a respoken line is the element's own
+  // mute, not the gain node: the dub is routed through that node and has to
+  // keep coming out of it.
+  const mute = lapseSilent || dubbing;
+  if (v.muted !== mute) v.muted = mute;
   if (previewGainNode) {
-    const duck = inBreath(v.currentTime || 0) ? breathGainDb() : 0;
-    previewGainNode.gain.value = silent ? 0 : dbToLinear(currentAudioGainDb() + duck);
+    // Breath ducking describes the original audio, which isn't playing here.
+    const duck = (!dubbing && inBreath(v.currentTime || 0)) ? breathGainDb() : 0;
+    previewGainNode.gain.value = lapseSilent ? 0 : dbToLinear(currentAudioGainDb() + duck);
   }
 }
 
@@ -824,12 +954,16 @@ function startPreviewLoop() {
 }
 function stopPreviewLoop() {
   if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = 0; }
+  playUntil = null;
+  dubOverride = null;
+  stopDubPlayback();
   applySpanPlayback();
 }
 
 // How an edit reads in the UI, everywhere.
 function editLabel(e) {
   if (!(e.rate > 0)) return 'cut';
+  if (e.dub) return e.rate === 1 ? 'respoken' : `respoken ${fmtRate(e.rate)}`;
   return `${fmtRate(e.rate)}${e.audio === 'keep' ? '' : ' silent'}`;
 }
 
@@ -970,6 +1104,7 @@ function setupPreview() {
     renderPlayhead();
     captions.renderOverlay();
   };
+  v.onseeking = () => { stopDubPlayback(); };
   v.onseeked = () => {
     renderPlayhead();
     captions.renderOverlay();
@@ -980,7 +1115,7 @@ function setupPreview() {
   // playback started or stopped — the button, the Space bar, or the clip
   // reaching its end.
   v.onplay = () => { renderPlayButton(); captions.overlayLoop(); startPreviewLoop(); };
-  v.onpause = () => { renderPlayButton(); stopPreviewLoop(); };
+  v.onpause = () => { renderPlayButton(); stopPreviewLoop(); };   // stopPreviewLoop drops the dub
   v.onended = () => { renderPlayButton(); stopPreviewLoop(); };
   renderPlayButton();
 
@@ -1273,14 +1408,18 @@ function updateEstimate() {
 async function analyzeAudio(st) {
   const chunks = [];   // mono-mixed Float32Array pieces, concatenated at the end
   const ok = await decodeAudioTrack(st, (frame) => chunks.push(mixToMono(frame)));
-  if (!ok) return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0, breaths: [] };
+  if (!ok) return { voiceDbfs: 0, activeFraction: 0, autoGainDb: 0, breaths: [], roomTone: null };
   const mono = concatFloat32(chunks);
-  if (!mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0, breaths: [] };
+  if (!mono.length) return { voiceDbfs: -90, activeFraction: 0, autoGainDb: 0, breaths: [], roomTone: null };
   const rate = st.audio.audio.sample_rate;
   // The track is already decoded and in hand, so finding the breaths costs one
   // more pass over it rather than another trip through the decoder.
   const { breaths } = detectBreaths(mono, rate);
-  return { ...analyzeVoiceLevel(mono, rate), breaths };
+  // The whole track is in hand exactly once, which is the only cheap moment to
+  // take a room-tone sample. Overdub lays it under respoken lines so the
+  // background never stops at a splice — see voice.js findRoomTone().
+  const roomTone = findRoomTone(mono, rate);
+  return { ...analyzeVoiceLevel(mono, rate), breaths, roomTone };
 }
 
 function mixToMono(frame) {
@@ -1510,10 +1649,13 @@ async function compress() {
     // Turning breaths down is a change to the samples, so it needs the same
     // decode → process → re-encode round trip that a boost or a speed-up does.
     const wantsBreathWork = s.breathMode !== 'off' && !!(state.breaths && state.breaths.length);
+    // A respoken line replaces samples outright, so it needs the re-encode too.
+    const hasDubs = spansUS.some((sp) => !!sp.dub);
     const canReencode = state.audioEncoderSupported;
-    const needAudioWork = s.keepAudio && !!audio && (hasSpeed || wantsBoost || wantsBreathWork) && canReencode;
-    // A speed-up we can't re-encode would silently desync the audio, so drop it.
-    const dropAudio = s.keepAudio && !!audio && hasSpeed && !canReencode;
+    const needAudioWork = s.keepAudio && !!audio && (hasSpeed || wantsBoost || wantsBreathWork || hasDubs) && canReencode;
+    // A speed-up or an overdub we can't re-encode would silently desync the
+    // audio (or quietly drop the new words), so drop it.
+    const dropAudio = s.keepAudio && !!audio && (hasSpeed || hasDubs) && !canReencode;
 
     // ---- Muxer ----
     const muxerOpts = {
@@ -1595,6 +1737,7 @@ async function compress() {
     // sped-up one that keeps its narration goes through WSOLA, and a silent one
     // emits exactly its own length of silence.
     let curSpan = null, curProc = null, curEmitted = 0, curTarget = 0;
+    let curDub = null, curDubOrig = null;   // a respoken span, and the recording under it
     const spanTargetFrames = (sp) => Math.round(((sp.end - sp.start) / sp.rate) * SR);
 
     const spanOut = (interleaved) => {
@@ -1613,6 +1756,28 @@ async function compress() {
       curSpan = sp;
       curEmitted = 0;
       curTarget = spanTargetFrames(sp);
+      // An overdub replaces this span's narration outright: the generated
+      // samples were already fitted to exactly this many frames when the line
+      // was respoken, so they go straight out and the decoded source for these
+      // seconds is dropped on the floor.
+      //
+      // It does go through the gain stage, though, exactly like the recording
+      // around it. Skipping it — on the theory that the level was already
+      // matched at generation time — was wrong: with a boost on, every other
+      // second of the file gets lifted and the respoken line doesn't, so it
+      // lands conspicuously quiet. Matching at generation time puts it on the
+      // right scale; the gain stage then moves it with everything else. (The
+      // breath ducking is still skipped: those regions describe the original
+      // audio, which is no longer here.)
+      // The recording for these seconds is decoded anyway, so it is kept
+      // rather than discarded: its edges are what the dub crossfades into, and
+      // the line it replaces is the ideal tonal reference — same speaker, same
+      // microphone, same words. Both are used in closeSpan(), once the whole
+      // span has arrived.
+      curDub = sp.dub || null;
+      curDubOrig = curDub ? [] : null;
+      curProc = null;
+      if (curDub) return;
       curProc = (sp.rate !== 1 && sp.audio === 'keep')
         ? createTimeStretcher({ sampleRate: SR, channels: CH, speed: sp.rate })
         : null;
@@ -1620,6 +1785,23 @@ async function compress() {
 
     const closeSpan = () => {
       if (!curSpan) return;
+      // A respoken span is assembled here, where the whole of the recording it
+      // replaces is finally in hand: the generated line is tone-matched to it,
+      // laid over the room, and crossfaded into it at both edges so the
+      // background runs straight through the join.
+      if (curDub) {
+        const orig = concatFloat32(curDubOrig || []);
+        const dub = voice.pcmFor(curDub, {
+          sampleRate: SR, channels: CH, frames: curTarget, toneReference: orig,
+        });
+        if (dub) {
+          spanOut(gainStage(crossfadeEdges(dub, orig, { channels: CH, sampleRate: SR }), curTarget));
+        } else if (orig.length) {
+          spanOut(gainStage(orig, curTarget));   // generation missing: keep the recording
+        }
+        curDub = null;
+        curDubOrig = null;
+      }
       if (curProc) spanOut(curProc.flush());
       // Silence fills a muted section, and any shortfall elsewhere, so the
       // section lands at exactly the length the video expects.
@@ -1660,6 +1842,9 @@ async function compress() {
 
     const feedSpan = (slice, frames, startSec) => {
       if (!curSpan) return;
+      // Respoken: the recording is not emitted, but it is kept — closeSpan()
+      // crossfades into it and matches the generation's tone to it.
+      if (curDub) { curDubOrig.push(slice.slice ? slice.slice() : Float32Array.from(slice)); return; }
       if (curSpan.rate !== 1 && curSpan.audio !== 'keep') return;   // silent: nothing to carry over
       const processed = gainStage(duckBreaths(slice, frames, startSec), frames);
       if (curProc) spanOut(curProc.process(processed));
@@ -2041,6 +2226,7 @@ function initUI() {
   }
 
   captions.wire();
+  voice.wire();
 
   // Step navigation
   document.querySelectorAll('.stepbtn').forEach((b) => b.addEventListener('click', () => {
