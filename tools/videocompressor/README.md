@@ -61,7 +61,14 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   encoded chunks back into an MP4 with `fastStart` (moov at the front).
 - **Audio** — AAC audio is **copied through unchanged** via
   `addAudioChunkRaw` (remuxed, never re-encoded) by default. Non-AAC audio is
-  dropped, and the UI says so.
+  dropped, and the UI says so. When something *does* change the samples — a
+  boost, a speed change, a ducked breath, a respoken line — the track has to be
+  re-encoded, and `pickAudioEncoder()` decides how: AAC when the browser can
+  encode it (macOS, Windows), otherwise **Opus**, which is valid in MP4 and
+  which Chrome can encode everywhere. Chrome on Linux has no AAC encoder at
+  all, and the export used to respond by dropping the whole audio track; it now
+  writes Opus and says so in the summary and the result line. Audio is dropped
+  only if neither can be encoded.
 - **Volume boost** (optional) — decodes just the audio (`AudioDecoder`), gains
   it, and re-encodes it to AAC (`AudioEncoder`) instead of remuxing it raw
   (`audio-boost.js` has the gain math). Two modes:
@@ -78,9 +85,10 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     waveform into audible distortion, even under a *soft* limiter). It only
     ever turns audio up, never down.
 
-  Requires the browser to support AAC *encoding* via WebCodecs
-  (`AudioEncoder.isConfigSupported`) — checked per file at load; if it isn't
-  available, boost is disabled and audio still passes through unchanged.
+  Requires the browser to support *some* audio encoding via WebCodecs
+  (`AudioEncoder.isConfigSupported`, AAC then Opus) — checked per file at load;
+  if neither is available, boost is disabled and audio still passes through
+  unchanged.
   The Trim/Settings/Export preview applies the same gain live (Web Audio
   `GainNode` + `DynamicsCompressorNode`) so you can listen before exporting.
 - **Auto-captions** (optional) — transcribes the speech with OpenAI's

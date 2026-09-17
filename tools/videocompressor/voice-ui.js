@@ -273,14 +273,20 @@ export function createVoice(ctx) {
 
       const dubS = res.pcm.length / res.sampleRate;
       const srcS = span.end - span.start;
-      const plan = planFit(srcS, dubS, fitOpts());
+      // The pause the span reached into at each end: silence that belongs to
+      // the span but is not the line's own dead air. `leadS` is the half of it
+      // at the front, which is what keeps the respoken line on its timestamp.
+      const leadS = span.lead || 0;
+      const borrowedS = leadS + (span.tail || 0);
+      const plan = planFit(srcS, dubS, { ...fitOpts(), borrowedS });
       const chosen = mode || plan.mode;
 
       const id = `d${Date.now().toString(36)}${(Math.random() * 1e6 | 0).toString(36)}`;
       const rec = {
         id, text: cue.text, start: span.start, end: span.end,
         mode: chosen, seed: use, pcm: res.pcm, sampleRate: res.sampleRate,
-        dubS, srcS, cueStart: cue.start, targetDbfs: targetDbfs(), rate: 1,
+        dubS, srcS, leadS, borrowedS,
+        cueStart: cue.start, targetDbfs: targetDbfs(), rate: 1,
       };
       dubs().set(id, rec);
       finished.clear(); previewBufs.clear();
@@ -300,7 +306,10 @@ export function createVoice(ctx) {
       // still leave real dead air — say so instead of quietly producing it,
       // because the right answer then is to cut the section, not respeak it.
       const outS = srcS / rate;
-      const padS = Math.max(0, outS - dubS);
+      // Net of the pause borrowed for the seams: that much is *supposed* to be
+      // silence, so counting it would have the tool advising you to cut a
+      // section over padding it added itself.
+      const padS = Math.max(0, outS - dubS - borrowedS / rate);
       const pct = Math.abs(rate - 1) * 100;
       const pictureNote = pct >= 0.5
         ? ` Picture ${rate > 1 ? 'runs' : 'eases'} ${pct.toFixed(0)}% ${rate > 1 ? 'faster' : 'slower'} here.`
@@ -431,7 +440,7 @@ export function createVoice(ctx) {
     const opts = fitOpts();
     let moved = 0;
     for (const rec of list) {
-      const plan = planFit(rec.srcS, rec.dubS, opts);
+      const plan = planFit(rec.srcS, rec.dubS, { ...opts, borrowedS: rec.borrowedS || 0 });
       const rate = plan.mode === 'natural' ? plan.rate : 1;
       if (Math.abs(rate - (rec.rate ?? 1)) < 1e-6) continue;
       rec.rate = rate;
@@ -493,7 +502,10 @@ export function createVoice(ctx) {
   function pcmFor(id, { sampleRate, channels, frames, toneReference = null }) {
     const rec = dubs().get(id);
     if (!rec || !rec.pcm || !rec.pcm.length) return null;
-    const key = `${id}|${sampleRate}|${channels}|${frames}|${toneReference ? toneReference.length : 0}`;
+    // The span's head is borrowed pause (snapSpan), and the whole span plays
+    // at `rate`, so it occupies `leadS / rate` seconds of the output.
+    const leadSamples = Math.round(((rec.leadS || 0) / (rec.rate || 1)) * sampleRate);
+    const key = `${id}|${sampleRate}|${channels}|${frames}|${leadSamples}|${toneReference ? toneReference.length : 0}`;
     if (finished.has(key)) return finished.get(key);
 
     const out = finishDub(rec.pcm, {
@@ -501,7 +513,7 @@ export function createVoice(ctx) {
       targetDbfs: rec.targetDbfs ?? targetDbfs(),
       roomTone: roomToneAt(sampleRate),
       toneReference: toneReference ? toMono(toneReference, channels) : null,
-      resample: resampleMono,
+      resample: resampleMono, leadSamples,
     });
     finished.set(key, out.pcm);
     return out.pcm;

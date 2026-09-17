@@ -76,15 +76,48 @@ test('edges move to the middle of the surrounding pauses', () => {
   assert.equal(s.snapped, true);
 });
 
-test('a pause too long to reach is not crossed', () => {
+test('a long pause is reached into, but only as far as allowed', () => {
   const words = [
     { start: 0, end: 1.0, text: 'before' },
     { start: 5.0, end: 6.0, text: 'line' },
     { start: 9.0, end: 10.0, text: 'after' },
   ];
   const s = snapSpan(5.0, 6.0, words, { maxSnapS: 0.25 });
-  assert.equal(s.start, 5.0, 'a 4 s gap must not drag the start back 2 s');
-  assert.equal(s.end, 6.0);
+  // The middle of a 4 s gap is 2 s away and pointless; a quarter of a second
+  // of it is all that's needed to get the seam off the word.
+  assert.ok(Math.abs(s.start - 4.75) < 1e-6, `start ${s.start}`);
+  assert.ok(Math.abs(s.end - 6.25) < 1e-6, `end ${s.end}`);
+  assert.ok(Math.abs(s.lead - 0.25) < 1e-6, `lead ${s.lead}`);
+  assert.ok(Math.abs(s.tail - 0.25) < 1e-6, `tail ${s.tail}`);
+});
+
+test('the seam never lands on the word it is replacing', () => {
+  // This is the whole point: a word timestamp is an alignment, so the real
+  // onset may be a little before it. Start the replacement on the timestamp
+  // and the original says the first syllable before the clone says the line.
+  const words = [
+    { start: 0.0, end: 0.8, text: 'before' },
+    { start: 1.6, end: 2.4, text: 'line' },
+    { start: 2.7, end: 3.4, text: 'after' },
+  ];
+  for (const maxSnapS of [0.1, 0.25, 0.5]) {
+    const s = snapSpan(1.6, 2.4, words, { maxSnapS });
+    assert.ok(s.start < 1.6 - 1e-6, `start ${s.start} must be inside the pause`);
+    assert.ok(s.start > 0.8, `start ${s.start} must not reach the word before`);
+    assert.ok(s.end > 2.4 + 1e-6, `end ${s.end} must be inside the pause`);
+    assert.ok(s.end < 2.7, `end ${s.end} must not reach the word after`);
+  }
+});
+
+test('two respoken lines either side of one pause meet without overlapping', () => {
+  const words = [
+    { start: 0.0, end: 1.0, text: 'one' },
+    { start: 1.3, end: 2.0, text: 'two' },
+  ];
+  const first = snapSpan(0.0, 1.0, words);
+  const second = snapSpan(1.3, 2.0, words);
+  assert.ok(Math.abs(first.end - second.start) < 1e-6,
+    `${first.end} vs ${second.start}: no recording may be left between them, and none shared`);
 });
 
 test('a stop closure is too small a gap to snap into', () => {
@@ -199,6 +232,34 @@ test('an empty generation still fills its slot with silence', () => {
   const r = fitToDuration(new Float32Array(0), SR, 4800);
   assert.equal(r.pcm.length, 4800);
   assert.equal(rms(r.pcm), 0);
+});
+
+test('the borrowed pause at the head stays pause, and the line keeps its cue', () => {
+  const dub = tone(0.6, { amp: 0.25 });
+  const target = Math.round(1.0 * SR);
+  const lead = Math.round(0.2 * SR);
+  const r = fitToDuration(dub, SR, target, { leadSamples: lead });
+  assert.equal(r.pcm.length, target, 'still exactly the slot');
+  assert.equal(r.lead, lead, 'the whole lead was spare');
+  assert.ok(rms(r.pcm, 0, lead - 100) < rms(dub) / 8, 'the head is quiet');
+  assert.ok(rms(r.pcm, lead + 2000, lead + dub.length - 2000) > rms(dub) / 2,
+    'and the speech is sitting after it');
+});
+
+test('a line that needs the whole hole does not get a lead', () => {
+  const dub = tone(1.4);                    // longer than the slot already
+  const target = Math.round(1.0 * SR);
+  const r = fitToDuration(dub, SR, target, { leadSamples: Math.round(0.2 * SR) });
+  assert.equal(r.lead, 0, 'silence is only spent on room that was going spare');
+  assert.equal(r.pcm.length, target);
+  assert.ok(rms(r.pcm, 0, 2000) > 0.05, 'the speech starts at the top of the span');
+});
+
+test('the lead is faded into as well, so it cannot click either', () => {
+  const dub = tone(0.5, { amp: 0.3 });
+  const lead = Math.round(0.2 * SR);
+  const r = fitToDuration(dub, SR, Math.round(1.0 * SR), { leadSamples: lead });
+  assert.ok(Math.abs(r.pcm[lead]) < 0.02, `starts at ${r.pcm[lead]}`);
 });
 
 
@@ -628,6 +689,18 @@ test('the stretch limit wins over the dead-air threshold', () => {
   const p = planFit(8.8, 4.6, { deadAirS: 0, maxVideoRate: 1.15 });
   assert.ok(Math.abs(p.rate - 1.15) < 1e-9, `rate ${p.rate} broke the limit`);
   assert.ok(p.padS > 0, 'the pause the limit could not remove is kept, not forced out');
+});
+
+test('the pause borrowed for the seam is not counted as dead air', () => {
+  // snapSpan reaches into the pause on either side so the seam lands in
+  // silence. That silence is part of the span but it was never the line's own
+  // dead air, and speeding the picture up to squeeze it out would be the tool
+  // reacting to its own edit.
+  const bare = planFit(3.0, 2.5, { deadAirS: 0.15, maxVideoRate: 1.5 });
+  assert.ok(bare.rate > 1, 'without the allowance this line trims');
+  const p = planFit(3.0, 2.5, { deadAirS: 0.15, maxVideoRate: 1.5, borrowedS: 0.4 });
+  assert.equal(p.mode, 'fit');
+  assert.equal(p.rate, 1, 'the picture is left alone');
 });
 
 test('turning trimming off keeps the whole pause', () => {
