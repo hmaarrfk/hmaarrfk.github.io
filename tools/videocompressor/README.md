@@ -283,9 +283,13 @@ missing entirely, the page shows a compatibility notice instead of the tool.
 
 Auto-captions use **WebGPU** when the browser exposes it (Chrome/Edge, recent
 Safari); the large-v3-turbo preset's fp16 encoder also needs the
-`shader-f16` feature, and falls back to a q4 encoder without it. With no
-WebGPU at all, Whisper runs on the CPU (WASM) — it works, but slowly, so the
-base model is the default there.
+`shader-f16` feature, and falls back to a q4 encoder without it. The adapter
+probe asks for `powerPreference: 'high-performance'`, matching what
+transformers.js pins ONNX Runtime's WebGPU backend to — otherwise, on a
+machine with both an integrated and a discrete GPU, the preset could be
+chosen from one card's features and then run on the other. With no WebGPU at
+all, Whisper runs on the CPU (WASM) — it works, but slowly, so the base model
+is the default there.
 
 ## Notes / limitations
 
