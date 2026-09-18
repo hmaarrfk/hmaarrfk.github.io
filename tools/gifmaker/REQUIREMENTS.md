@@ -39,10 +39,12 @@ WebAssembly tools under `/tools/`.
 4. **Self-contained.** The gifski WASM + glue are **vendored** under `vendor/`
    (not loaded from a CDN at runtime) so the tool works offline and survives CDN
    outages.
-5. **No Jekyll/Liquid processing of the app.** `index.html`, `gifmaker.js`, and
-   the vendored files carry **no YAML front matter** so Jekyll copies them
-   verbatim and never mangles the JavaScript. (The `/tools/` gallery index *is* a
-   normal Jekyll page and may use front matter.)
+5. **No Jekyll/Liquid processing of the JavaScript.** `gifmaker.js`, its sibling
+   modules, and the vendored files carry **no YAML front matter**, so Jekyll
+   copies them verbatim and never mangles them. `index.html` holds no inline
+   script and *does* carry front matter (`layout: null`), purely so its asset
+   URLs can be stamped with `?v=<short commit hash>` and so the import map can
+   be generated — see "Versioning" below.
 6. **License compliance.** gifski/gifski-wasm are **AGPL-3.0**. The page must
    visibly state this, link the bundled `vendor/LICENSE`, and point to the
    corresponding source (encoder repos + this page's source on GitHub). The WebP
@@ -50,11 +52,23 @@ WebAssembly tools under `/tools/`.
    the About panel with their bundled licenses (`vendor-webp/LICENSE`,
    `vendor-apng/LICENSE.UPNG`, `vendor-apng/LICENSE.pako`).
 
+## Versioning (cache busting)
+
+Site-wide mechanism, documented in the repository root `README.md`: each build
+stamps `?v=<short commit hash>` onto every stylesheet and script, and the page
+footer shows that hash plus the build time. Because this page's JavaScript is a
+graph of ES modules, the `?v=` on `gifmaker.js` alone would not reach
+`formats.js` / `colormaps.js` — a relative import resolves without the
+importer's query string. The page's import map therefore does double duty: it
+resolves the vendored `wasm-feature-detect` bare specifier *and* points each of
+this tool's own modules at its versioned URL. The vendored encoders are pinned
+copies and are deliberately left unversioned.
+
 ## Files
 
 | Path | Role |
 |------|------|
-| `index.html` | Tool UI (raw HTML, no front matter) |
+| `index.html` | Tool UI (raw HTML; front matter only to stamp `?v=<commit>` on asset URLs) |
 | `gifmaker.js` | All app logic (ES module) |
 | `formats.js` | Animated WebP muxer + APNG encoder wrappers + `patchWebp`/`patchApng` (ES module) |
 | `colormaps.js` | 22 matplotlib colormap LUTs (256×[r,g,b]); generated from matplotlib, see header for licenses |
@@ -626,7 +640,8 @@ CPU/2D fallback (feature-detected; the vendored gifski WASM encode is unchanged)
 
 ## Adding sibling tools
 
-Each new tool gets its own folder under `/tools/<name>/` with a raw
-(front-matter-free) `index.html` + module JS, reuses `../assets/tools.css`, and
+Each new tool gets its own folder under `/tools/<name>/` with a script-free
+`index.html` + front-matter-free module JS, reuses `../assets/tools.css`, and
 adds a card to `/tools/index.html`. Vendor any WASM locally and document its
-license the same way.
+license the same way. Give the page `layout: null` front matter and follow the
+versioning recipe below so its assets are cache-busted per release.

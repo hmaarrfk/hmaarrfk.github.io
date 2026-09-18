@@ -1,9 +1,19 @@
+---
+# Front matter (even empty) is what makes Jekyll run Liquid over this file, which
+# is how the asset URLs below pick up ?v=<commit>. `layout: null` overrides the
+# site-wide default layout so the page stays standalone.
+layout: null
+---
 <!DOCTYPE html>
 <!--
   gifski in the browser — converts a video into a high-quality
   animated GIFs. Everything runs locally via WebAssembly; no file ever leaves
-  your machine. This page deliberately carries no Jekyll front matter so its
-  JavaScript is copied verbatim and never processed by Liquid.
+  your machine.
+
+  This page holds no inline JavaScript: every script lives in a .js file beside
+  it, and those files carry no Jekyll front matter, so they are copied verbatim
+  and never processed by Liquid. The page itself is templated, purely so each
+  asset URL can carry ?v=<short commit hash> (see the import map below).
 -->
 <html lang="en">
 <head>
@@ -12,11 +22,29 @@
   <title>GIF Maker — high-quality GIFs in your browser</title>
   <meta name="description" content="Turn a video into a high-quality animated GIF, WebP, or APNG entirely in your browser. Powered by WebAssembly. Nothing is uploaded.">
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/tools/assets/tools.css">
-  <!-- Resolve the @jsquash/webp encoder's bare `wasm-feature-detect` import to its
-       vendored copy (no bundler on this static page). Must precede the module. -->
+  {%- capture build_v %}{% include v.html %}{% endcapture %}
+  <meta name="build-revision" content="{{ site.github.build_revision | default: 'dev' }}">
+  <meta name="build-date" content="{{ site.time | date_to_xmlschema }}">
+  <link rel="stylesheet" href="/tools/assets/tools.css?v={{ build_v }}">
+
+  <!-- One import map, two jobs. It resolves the @jsquash/webp encoder's bare
+       `wasm-feature-detect` import to its vendored copy (there is no bundler on
+       this static page), and it points each of this tool's own modules at a URL
+       carrying ?v=<short commit hash>, so a release re-fetches the whole module
+       graph and not just the entry point — even where a file's bytes are
+       unchanged. That second part works because a relative import inside a
+       module ('./formats.js') resolves without the importer's query string, so
+       it lands on these bare keys and gets rewritten. Vendored third-party
+       libraries are pinned copies that only change by being replaced, so they
+       are left alone. Must precede the module. -->
+  {%- assign own_modules = "colormaps,formats,gifmaker" | split: "," %}
   <script type="importmap">
-  { "imports": { "wasm-feature-detect": "/tools/gifmaker/vendor-webp/wasm-feature-detect.js" } }
+  { "imports": {
+    "wasm-feature-detect": "/tools/gifmaker/vendor-webp/wasm-feature-detect.js",
+  {% for m in own_modules -%}
+    "/tools/gifmaker/{{ m }}.js": "/tools/gifmaker/{{ m }}.js?v={{ build_v }}"{% unless forloop.last %},{% endunless %}
+  {% endfor -%}
+  } }
   </script>
 </head>
 <body>
@@ -519,6 +547,8 @@
       <a href="https://github.com/hmaarrfk/hmaarrfk.github.io" target="_blank" rel="noopener">source on GitHub</a>.
       No data is transmitted; all encoding happens on your device.
     </footer>
+
+    {% include version.html %}
   </div>
 
   <!-- Fullscreen viewer for a single result GIF (opened by clicking a result). -->
@@ -540,8 +570,8 @@
 
   <!-- APNG encoder (UPNG.js + its pako deflate dep), vendored, loaded as globals
        before the module so gifmaker.js can read window.UPNG. -->
-  <script src="/tools/gifmaker/vendor-apng/pako.min.js"></script>
-  <script src="/tools/gifmaker/vendor-apng/UPNG.js"></script>
-  <script type="module" src="/tools/gifmaker/gifmaker.js"></script>
+  <script src="/tools/gifmaker/vendor-apng/pako.min.js?v={{ build_v }}"></script>
+  <script src="/tools/gifmaker/vendor-apng/UPNG.js?v={{ build_v }}"></script>
+  <script type="module" src="/tools/gifmaker/gifmaker.js?v={{ build_v }}"></script>
 </body>
 </html>

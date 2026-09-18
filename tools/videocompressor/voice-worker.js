@@ -36,7 +36,6 @@
 //   { type: 'progress', id, frames, estimate }
 //   { type: 'error', id, message } | { type: 'cancelled', id }
 import * as ort from './vendor/onnxruntime/ort.wasm.min.js';
-import { parseSentencePieceModel, createTokenizer } from './voice-tokenizer.js';
 
 // The WASM binary is far too big to vendor, so it comes from jsDelivr, pinned
 // to the exact build the vendored JS came from. Threads need cross-origin
@@ -130,6 +129,11 @@ async function load(bundle, post) {
   const meta = JSON.parse(new TextDecoder().decode(metaBytes));
 
   const tokBytes = await fetchCached(`${base}${meta.tokenizer_file}`, post, 'tokenizer');
+  // voice-ui.js starts this worker with ?v=<commit> on its URL; a static import
+  // would resolve without that query and could pick up a cached tokenizer from
+  // an older release, so pass the version on explicitly.
+  const { parseSentencePieceModel, createTokenizer } =
+    await import('./voice-tokenizer.js' + self.location.search);
   const tokenizer = createTokenizer(parseSentencePieceModel(tokBytes));
 
   // The model's own start-of-voice embedding, a .npy. Only the header needs

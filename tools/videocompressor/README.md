@@ -201,7 +201,7 @@ reached, so trims near the start of a long video finish quickly.
 
 | Path | What it is |
 |------|------------|
-| `index.html` | The page. No Jekyll front matter, so the JS is served verbatim. Loads MP4Box as a global `<script>`, then the module. |
+| `index.html` | The page. Templated by Jekyll (`layout: null`) only to stamp `?v=<commit>` on every asset URL and to emit the cache-busting import map; it holds no inline JS, and the `.js` files beside it stay front-matter-free and are served verbatim. Loads MP4Box as a global `<script>`, then the module. |
 | `compressor.js` | ES module: streaming demux, preview/trim, transcode, mux, and all UI wiring. |
 | `breath.js` | ES module: breath detection (gap + level + noise-like + rises out of the floor) and region ducking with ramps. Pure `Float32Array` maths, tested by `breath.test.mjs`. |
 | `breath.test.mjs` | Node test for the above. `node breath.test.mjs`. |

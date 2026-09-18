@@ -23,3 +23,25 @@ $font-size-base:          18px !default;
 img {
     max-width: 100%;
 }
+
+/* Which build of the site you are looking at — short commit hash + build time.
+   Rendered by _includes/version.html at the bottom of every Jekyll page. */
+.build-version {
+    text-align: center;
+    margin-top: 40px;
+    padding-top: 12px;
+    border-top: 1px solid $hr-border;
+    color: $text-muted;
+    font-size: 0.75em;
+}
+
+.build-version code {
+    background: transparent;
+    padding: 0;
+    color: inherit;
+}
+
+.build-version a,
+.build-version a:hover {
+    color: inherit;
+}

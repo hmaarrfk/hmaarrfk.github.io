@@ -1,0 +1,15 @@
+{%- comment -%}
+The footer line that says which build of the site you are looking at: the short
+commit hash (linked to that commit on GitHub) and the time the site was built.
+Used by the Jekyll layouts via footer.html, and by the standalone tool pages.
+{%- endcomment -%}
+{%- assign build_rev = site.github.build_revision | default: "" -%}
+{%- assign repo_url = site.github.repository_url | default: "https://github.com/hmaarrfk/hmaarrfk.github.io" -%}
+<p class="build-version">
+  {%- if build_rev != "" %}
+  <a href="{{ repo_url }}/commit/{{ build_rev }}" title="{{ build_rev }}" rel="noopener"><code>{{ build_rev | slice: 0, 7 }}</code></a>
+  {%- else %}
+  <code>dev</code>
+  {%- endif %}
+  &middot; built <time datetime="{{ site.time | date_to_xmlschema }}">{{ site.time | date: "%Y-%m-%d %H:%M %Z" }}</time>
+</p>

@@ -1,0 +1,12 @@
+{%- comment -%}
+The build version, as a bare 7-character token, for cache-busting query strings:
+
+    href="/css/style.css?v={% include v.html %}"
+
+`site.github.build_revision` is the commit GitHub Pages built from (supplied by
+jekyll-github-metadata, which falls back to `git rev-parse HEAD` locally). It
+changes on every push even when a file's bytes do not, which is the point: a
+release is forced to re-fetch every asset rather than trusting a cached copy.
+Outside a git checkout it degrades to "dev".
+{%- endcomment -%}
+{{- site.github.build_revision | default: "dev" | slice: 0, 7 -}}
