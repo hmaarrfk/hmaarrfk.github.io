@@ -57,9 +57,15 @@ export function createCaptions(ctx) {
   let cachedModels = {};   // preset key -> weights already in Cache Storage
 
   // ---- model presets -------------------------------------------------------
+  // Probe the adapter transformers.js will actually run on: it pins ONNX
+  // Runtime's WebGPU backend to `powerPreference: 'high-performance'`, so
+  // asking here without one can answer for a different GPU. On a laptop or a
+  // desktop with both an integrated and a discrete card that matters — the
+  // integrated one may lack `shader-f16`, which would drop turbo to the
+  // 760 MB q4-encoder preset on a machine whose discrete card runs fp16.
   async function detectDevice() {
     try {
-      const adapter = navigator.gpu && await navigator.gpu.requestAdapter();
+      const adapter = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
       if (adapter) asrEnv = { device: 'webgpu', f16: adapter.features.has('shader-f16') };
     } catch (_) { /* no WebGPU: the CPU (WASM) it is */ }
     refreshCached();       // the device picks the dtype, and so the files to look for
