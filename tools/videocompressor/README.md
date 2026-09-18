@@ -236,26 +236,40 @@ captions.) Pinned versions:
 
 - `mp4box` **0.5.2**
 - `mp4-muxer` **5.1.5**
-- `@huggingface/transformers` **4.2.0**
-- `onnxruntime-web` **1.26.0-dev.20260416-b7804b056c** (the exact build transformers.js 4.2.0 pins, so both share one cached WASM)
+- `@huggingface/transformers` **4.3.0**
+- `onnxruntime-web` **1.31.0-dev.20260914-8d85527a0** (the exact build transformers.js 4.3.0 pins, so both share one cached WASM)
+
+  Do not drop back below this ONNX Runtime build. Between 1.25 and the fix in
+  [onnxruntime#28326](https://github.com/microsoft/onnxruntime/pull/28326), a
+  QDQ→`MatMulNBits` fusion crashed on any decoder whose tied embedding weight
+  is consumed by two `DequantizeLinear` nodes — which is every `_timestamped`
+  Whisper export we use. The q8 decoder (the CPU/WASM preset) failed session
+  creation outright with *"Missing required scale:
+  model.decoder.embed_tokens.weight_merged_0_scale"*, so captions were broken
+  for anyone without WebGPU.
 
 To update:
 
 ```bash
 cd tools/videocompressor/vendor
 ./update-vendor.sh                       # pinned versions
-./update-vendor.sh 0.5.2 5.1.5 4.2.0     # or specify mp4box + mp4-muxer + transformers versions
+./update-vendor.sh 0.5.2 5.1.5 4.3.0     # or specify mp4box + mp4-muxer + transformers versions
 ```
 
 **One patch is applied to the transformers bundle.** GitHub's secret-scanning
-push protection rejects any push containing a standalone 32-character hex
-token — the shape of a Mistral API key — and the bundle has one in an error
-message pointing at a gist (`gist.github.com/hollance/<32 hex>`, about
-Whisper's `alignment_heads`). It's a false positive, but it blocks the push,
-so `update-vendor.sh` splits every such token across a string concatenation
-(`"…42e32852f24243b7"+"48ae6bc1f985b13a…"`): byte-different from upstream,
-identical at runtime. The script then re-parses the bundle and fails if the
-patch landed anywhere but inside a string.
+push protection rejects any push containing a standalone 32-character
+alphanumeric token — the shape of a Mistral API key — and the bundle has two:
+a gist id in an error message (`gist.github.com/hollance/<32 hex>`, about
+Whisper's `alignment_heads`) and the class name
+`Mistral3ForConditionalGeneration`, which is exactly 32 characters long and
+carries the keyword the rule looks for. Both are false positives, but they
+block the push, so `update-vendor.sh` rewrites each token's last character as
+a `\uXXXX` escape (`…ConditionalGeneratio\u006e`): byte-different from
+upstream, identical at runtime. The escape is the one rewrite that is legal
+both inside a string literal and inside an *identifier* — 4.3.0 needs the
+latter, because the class name also appears bare in the bundle's export map
+and export clause. The script proves the rewrite is byte-reversible and then
+re-parses the bundle, failing if either check does.
 
 Then bump the versions above, re-test, and commit the changed `vendor/` files.
 

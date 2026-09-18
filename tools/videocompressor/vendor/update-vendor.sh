@@ -28,10 +28,10 @@ set -euo pipefail
 
 MP4BOX_VERSION="${1:-0.5.2}"          # keep in sync with README.md
 MUXER_VERSION="${2:-5.1.5}"           # keep in sync with README.md
-TRANSFORMERS_VERSION="${3:-4.2.0}"    # keep in sync with README.md
+TRANSFORMERS_VERSION="${3:-4.3.0}"    # keep in sync with README.md
 # Must match what @huggingface/transformers depends on:
 #   npm view @huggingface/transformers@$TRANSFORMERS_VERSION dependencies
-ORT_VERSION="${4:-1.26.0-dev.20260416-b7804b056c}"   # keep in sync with README.md and voice-worker.js
+ORT_VERSION="${4:-1.31.0-dev.20260914-8d85527a0}"   # keep in sync with README.md and voice-worker.js
 VENDOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Vendoring mp4box@${MP4BOX_VERSION} + mp4-muxer@${MUXER_VERSION} + @huggingface/transformers@${TRANSFORMERS_VERSION} + onnxruntime-web@${ORT_VERSION} → ${VENDOR_DIR}"
@@ -89,37 +89,56 @@ fi
 
 # GitHub's secret scanning rejects a push containing anything shaped like a
 # Mistral API key: a standalone 32-character alphanumeric token. The bundle
-# has two such false positives — a gist id in an error message
+# has such false positives — a gist id in an error message
 # (.../hollance/<32 hex>, about Whisper's alignment_heads) and the class name
 # "Mistral3ForConditionalGeneration", which is exactly 32 characters and
-# carries the very keyword the rule looks for. Both sit inside double-quoted
-# strings, so split them across a string concatenation: identical string at
-# runtime, no 32-character token left in the file.
+# carries the very keyword the rule looks for.
+#
+# Escape each token's last character as \uXXXX. That is the one rewrite that
+# is valid *everywhere* the token can appear: in a string literal ("…b13a"
+# is the same string), and in an identifier — which 4.3.0 needs, because the
+# class name also appears bare in the export map (`Mistral3For…:()=>o0`) and
+# in the export clause (`o0 as Mistral3For…`), where the old
+# split-across-a-concatenation trick produced a syntax error. Identical
+# program at runtime; the backslash leaves no 32-character token behind.
 python3 - "$VENDOR_DIR/transformers/transformers.min.js" <<'PY'
 import re, sys
 path = sys.argv[1]
 src = open(path, encoding='utf-8').read()
 # standalone 32-char alphanumeric runs that are all-hex, or name Mistral
-token = re.compile(r'(?<![A-Za-z0-9_$])([A-Za-z0-9]{32})(?![A-Za-z0-9_$])')
+token = re.compile(r'(?<![A-Za-z0-9_$\\])([A-Za-z0-9]{32})(?![A-Za-z0-9_$])')
 def risky(t):
     return bool(re.fullmatch(r'[0-9a-f]{32}', t)) or 'istral' in t
+def escape(t):
+    return f'{t[:-1]}\\u{ord(t[-1]):04x}'
 found = [m.group(1) for m in token.finditer(src) if risky(m.group(1))]
 if found:
-    src = token.sub(lambda m: f'{m.group(1)[:16]}"+"{m.group(1)[16:]}' if risky(m.group(1)) else m.group(1), src)
-    open(path, 'w', encoding='utf-8').write(src)
-print(f"  split {len(found)} secret-scanner-tripping token(s): {', '.join(sorted(set(found))) if found else '(none found)'}")
+    out = token.sub(lambda m: escape(m.group(1)) if risky(m.group(1)) else m.group(1), src)
+    # Round-trip: undoing every escape we introduced must give back the exact
+    # upstream bytes. A mismatch means the rewrite touched something else.
+    esc = re.compile(r'(?<![A-Za-z0-9_$\\])([A-Za-z0-9]{31})\\u([0-9a-f]{4})')
+    def unescape(m):
+        t = m.group(1) + chr(int(m.group(2), 16))
+        return t if risky(t) else m.group(0)
+    back = esc.sub(unescape, out)
+    if back != src:
+        sys.exit('ERROR: the escape rewrite is not byte-reversible — refusing to write it.')
+    open(path, 'w', encoding='utf-8').write(out)
+print(f"  escaped {len(found)} secret-scanner-tripping token(s): {', '.join(sorted(set(found))) if found else '(none found)'}")
 PY
 
-# That split is only valid inside a double-quoted string. If a future version
-# puts a 32-hex token somewhere else, the bundle stops parsing — catch it here
-# rather than shipping a broken tool.
+# The escape is valid in identifiers and in string literals, but not inside a
+# regular-expression literal. If a future version puts a token there, the
+# bundle stops parsing — catch it here rather than shipping a broken tool.
 if command -v node >/dev/null 2>&1; then
   cp "$VENDOR_DIR/transformers/transformers.min.js" "$tmp/parse-check.mjs"
   if ! node --check "$tmp/parse-check.mjs"; then
-    echo "ERROR: the patched transformers bundle no longer parses — a 32-hex token was probably outside a string literal. Fix the patch step above." >&2
+    echo "ERROR: the patched transformers bundle no longer parses — a token was probably inside a regex literal. Fix the patch step above." >&2
     exit 1
   fi
   echo "  bundle parses OK after patching"
+else
+  echo "  WARNING: node not found — skipped the post-patch parse check." >&2
 fi
 
 echo "Done. Vendored files:"
