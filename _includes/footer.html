@@ -3,11 +3,12 @@
   <a href="https://www.linkedin.com/pub/mark-harfouche/39/429/a07" title="LinkeIn"><i class="fa fa-linkedin-square fa-4x"></i></a>
   <!--<a href="https://gitlab.com/u/markharfouche" title="Gitlab"><i class="fa fa-gitlab fa-4x"></i></a>-->
   </p>
+  {% include version.html %}
 </div>
 
 <!-- jQuery (necessary for Bootstrap's JavaScript plugins) -->
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
 <!-- Include all compiled plugins (below), or include individual files as needed -->
-<script src="{{ "/js/bootstrap.min.js" | prepend: site.baseurl }}"></script>
+<script src="{{ "/js/bootstrap.min.js" | prepend: site.baseurl }}?v={% include v.html %}"></script>
 </body>
 </html>

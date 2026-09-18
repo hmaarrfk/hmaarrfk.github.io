@@ -1,3 +1,9 @@
+---
+# Front matter (even empty) is what makes Jekyll run Liquid over this file, which
+# is how the asset URLs below pick up ?v=<commit>. `layout: null` overrides the
+# site-wide default layout so the page stays standalone.
+layout: null
+---
 <!DOCTYPE html>
 <!--
   PDF Signer — stamp a signature image and text onto a PDF, entirely offline.
@@ -13,8 +19,12 @@
   placement, so stamping the same signature on forty pages costs one copy of
   the image.
 
-  This page deliberately carries no Jekyll front matter so its JavaScript is
-  copied verbatim and never processed by Liquid.
+  This page holds no inline JavaScript: every script lives in a .js file beside
+  it, and those files carry no Jekyll front matter, so they are copied verbatim
+  and never processed by Liquid. The page itself is templated, purely so each
+  asset URL can carry ?v=<short commit hash>. signer.js is this tool's only own
+  module — everything else it pulls in is a pinned vendored library — so the
+  query on the entry point covers the whole graph and no import map is needed.
 -->
 <html lang="en">
 <head>
@@ -23,7 +33,10 @@
   <title>PDF Signer — sign a PDF in your browser</title>
   <meta name="description" content="Place a signature image and text anywhere on a PDF, on as many pages as you like, and save it — entirely in your browser. Nothing is uploaded.">
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/tools/assets/tools.css">
+  {%- capture build_v %}{% include v.html %}{% endcapture %}
+  <meta name="build-revision" content="{{ site.github.build_revision | default: 'dev' }}">
+  <meta name="build-date" content="{{ site.time | date_to_xmlschema }}">
+  <link rel="stylesheet" href="/tools/assets/tools.css?v={{ build_v }}">
   <style>
     /* ---------------------------------------------------------------
        This tool is an editor, not a wizard: it takes over the viewport
@@ -279,6 +292,8 @@
         <a href="https://github.com/hmaarrfk/hmaarrfk.github.io/tree/master/tools/pdfsigner" target="_blank" rel="noopener">Open source on GitHub</a>.
       </p>
     </details>
+
+    {% include version.html %}
   </div>
 
   <!-- ================= EDITOR ================= -->
@@ -468,6 +483,6 @@
     </main>
   </div>
 
-  <script type="module" src="/tools/pdfsigner/signer.js"></script>
+  <script type="module" src="/tools/pdfsigner/signer.js?v={{ build_v }}"></script>
 </body>
 </html>

@@ -1,3 +1,9 @@
+---
+# Front matter (even empty) is what makes Jekyll run Liquid over this file, which
+# is how the asset URLs below pick up ?v=<commit>. `layout: null` overrides the
+# site-wide default layout so the page stays standalone.
+layout: null
+---
 <!DOCTYPE html>
 <!--
   Video Compressor — shrink a video entirely in your browser.
@@ -17,8 +23,10 @@
   auto-detected from the voice band) decodes and re-encodes just the audio
   track instead.
 
-  This page deliberately carries no Jekyll front matter so its JavaScript is
-  copied verbatim and never processed by Liquid.
+  This page holds no inline JavaScript: every script lives in a .js file beside
+  it, and those files carry no Jekyll front matter, so they are copied verbatim
+  and never processed by Liquid. The page itself is templated, purely so each
+  asset URL can carry ?v=<short commit hash> (see the import map below).
 -->
 <html lang="en">
 <head>
@@ -27,10 +35,32 @@
   <title>Video Compressor — hardware-accelerated, in your browser</title>
   <meta name="description" content="Compress a video to a target size or bitrate entirely in your browser, using your machine's hardware video encoder via WebCodecs. Nothing is uploaded.">
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/tools/assets/tools.css">
+  {%- capture build_v %}{% include v.html %}{% endcapture %}
+  <meta name="build-revision" content="{{ site.github.build_revision | default: 'dev' }}">
+  <meta name="build-date" content="{{ site.time | date_to_xmlschema }}">
+  <link rel="stylesheet" href="/tools/assets/tools.css?v={{ build_v }}">
+
+  <!-- Cache-busting import map. Every one of this tool's own modules resolves to
+       a URL carrying ?v=<short commit hash>, so a release re-fetches the whole
+       module graph and not just the entry point — even where a file's bytes are
+       unchanged. It works because a relative import inside a module ('./voice.js')
+       resolves without the importer's query string, so it lands on these bare
+       keys and gets rewritten. Vendored third-party libraries are pinned copies
+       that only change by being replaced, so they are left alone.
+       Workers are absent on purpose: import maps do not apply to `new Worker`,
+       so captions-ui.js / voice-ui.js append the version themselves. -->
+  {%- assign own_modules = "audio-boost,breath,captions,captions-ui,compressor,speed,voice,voice-ui" | split: "," %}
+  <script type="importmap">
+  { "imports": {
+  {% for m in own_modules -%}
+    "/tools/videocompressor/{{ m }}.js": "/tools/videocompressor/{{ m }}.js?v={{ build_v }}"{% unless forloop.last %},{% endunless %}
+  {% endfor -%}
+  } }
+  </script>
+
   <!-- MP4Box (UMD) attaches window.MP4Box; loaded before the module so
        compressor.js can read it. Vendored locally — no CDN, works offline. -->
-  <script src="/tools/videocompressor/vendor/mp4box/mp4box.all.min.js"></script>
+  <script src="/tools/videocompressor/vendor/mp4box/mp4box.all.min.js?v={{ build_v }}"></script>
 </head>
 <body>
   <div class="topbar">
@@ -608,8 +638,10 @@
       </p>
     </details>
 
+    {% include version.html %}
+
   </div>
 
-  <script type="module" src="/tools/videocompressor/compressor.js"></script>
+  <script type="module" src="/tools/videocompressor/compressor.js?v={{ build_v }}"></script>
 </body>
 </html>

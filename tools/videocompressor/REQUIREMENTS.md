@@ -140,10 +140,27 @@ encoder via WebCodecs — entirely client-side — and optionally add
    a string concatenation, because GitHub push protection reads that shape as
    a Mistral API key and rejects the push. Runtime behaviour is unchanged and
    the script re-parses the bundle to prove the patch is safe.
-4. **No Jekyll processing.** `index.html` and the JS carry no front matter.
+4. **No Liquid anywhere near the JavaScript.** The `.js` files carry no front
+   matter, so Jekyll copies them verbatim. `index.html` holds no inline script
+   and *does* carry front matter (`layout: null`), purely so every asset URL in
+   it can be stamped with `?v=<short commit hash>` — see "Versioning" below.
 5. **Licenses.** mp4box (BSD-3), mp4-muxer (MIT), transformers.js
    (Apache-2.0), Whisper weights (MIT) — credited in the page's "How this
    works" panel.
+
+## Versioning (cache busting)
+
+Site-wide mechanism, documented in the repository root `README.md`: each build
+stamps `?v=<short commit hash>` onto every stylesheet and script, and the page
+footer shows that hash plus the build time. Because this page's JavaScript is a
+graph of ES modules, the `?v=` on `compressor.js` alone would not reach
+`voice.js`, `captions.js` and friends — a relative import resolves without the
+importer's query string. The page emits an import map that points each of this
+tool's own modules at its versioned URL instead. Import maps do not apply to
+`new Worker`, so `captions-ui.js` and `voice-ui.js` copy their own `?v=` onto
+the worker URL, and `voice-worker.js` imports `voice-tokenizer.js` dynamically
+with `self.location.search` appended. Vendored libraries (MP4Box, mp4-muxer,
+transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 
 ## Files
 

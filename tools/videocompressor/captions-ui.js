@@ -264,7 +264,12 @@ export function createCaptions(ctx) {
   // ---- the worker ----------------------------------------------------------
   function ensureWorker() {
     if (worker) return worker;
-    worker = new Worker(new URL('./captions-worker.js', import.meta.url), { type: 'module' });
+    // Import maps do not reach `new Worker`, so carry this module's own
+    // ?v=<commit> across by hand: without it a release could pair a freshly
+    // fetched captions-ui.js with a cached captions-worker.js.
+    const workerUrl = new URL('./captions-worker.js', import.meta.url);
+    workerUrl.search = new URL(import.meta.url).search;
+    worker = new Worker(workerUrl, { type: 'module' });
     worker.onmessage = (e) => { if (job && e.data.id === job.id) onMessage(job, e.data); };
     worker.onerror = (e) => {
       if (job && job.reject) job.reject(new Error(e.message || 'The captions worker failed to start.'));

@@ -549,6 +549,12 @@ details.about h3 { font-size: .95rem; }
 .small { font-size: .85rem; }
 footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; }
 
+/* Which build of the site you are looking at — short commit hash + build time.
+   Rendered by _includes/version.html at the bottom of each tool page. */
+.build-version { color: #7a8590; font-size: .75rem; margin: 28px 0 0; padding-top: 12px; border-top: 1px solid var(--border); text-align: center; }
+.build-version code { font-size: inherit; }
+.build-version a, .build-version a:hover { color: inherit; }
+
 /* ---- Wide-screen two-column editor (desktops / 1280×720 target) ----
    Optimised for a 1080p Windows screen at 150% scaling (≈1280×720 CSS px) and
    plain 1920×1080. The preview stage sits beside the active step controls so the
@@ -564,6 +570,7 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .steps,
   .vibe,
   details.about,
+  .build-version,
   footer.legal { max-width: var(--maxw); margin-inline: auto; }
 
   .editor {

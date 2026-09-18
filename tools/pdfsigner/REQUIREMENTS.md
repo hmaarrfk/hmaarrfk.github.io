@@ -25,8 +25,15 @@ distinction should stay visible in any future revision.
 | No server, no upload, no network at run time | The documents people sign are contracts, offers, medical forms. They must never leave the machine. Everything is vendored; the page works with the network off. |
 | No tracking, no analytics | Same reason. There is no third-party script of any kind on this page. |
 | No build step | The site is plain Jekyll on GitHub Pages. Source files are served as authored. |
-| No Jekyll front matter in `index.html` | Keeps Liquid away from the JavaScript, matching `gifmaker` and `videocompressor`. |
+| No inline JavaScript in `index.html`; no front matter on the `.js` files | Keeps Liquid away from the JavaScript, matching `gifmaker` and `videocompressor`. The page itself is templated (`layout: null`) so its asset URLs carry `?v=<commit>`. |
 | The original PDF bytes are never mutated in place | Every save re-loads the pristine bytes, so saving twice produces the same file rather than double-stamping. |
+
+Versioning (cache busting) is the site-wide mechanism documented in the
+repository root `README.md`: each build stamps `?v=<short commit hash>` onto
+every stylesheet and script, and the page footer shows that hash plus the build
+time. `signer.js` is this tool's only own module — everything else it pulls in
+is a pinned vendored library — so the query on the entry point covers the whole
+graph and no import map is needed here.
 
 ## 3. Files
 

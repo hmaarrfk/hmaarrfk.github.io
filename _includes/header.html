@@ -8,8 +8,14 @@
   <title>{% if page.title %}{{ page.title }} - Mark Harfouche{% else %}{{ site.title }}{% endif %}</title>
 
   <meta name="description" content="{{ site.description }}">
-  <link href="{{ "/css/style.css" | prepend: site.baseurl }}" rel="stylesheet" media="screen">
-  <link href="{{ "/css/syntax.css" | prepend: site.baseurl }}" rel="stylesheet" media="screen">
+
+  <!-- Every stylesheet and script carries ?v=<short commit hash> so a new build
+       is fetched fresh even when the file's bytes are unchanged. See _includes/v.html. -->
+  {%- capture build_v %}{% include v.html %}{% endcapture %}
+  <meta name="build-revision" content="{{ site.github.build_revision | default: 'dev' }}">
+  <meta name="build-date" content="{{ site.time | date_to_xmlschema }}">
+  <link href="{{ "/css/style.css" | prepend: site.baseurl }}?v={{ build_v }}" rel="stylesheet" media="screen">
+  <link href="{{ "/css/syntax.css" | prepend: site.baseurl }}?v={{ build_v }}" rel="stylesheet" media="screen">
 
   <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.6.2/css/font-awesome.min.css">
 

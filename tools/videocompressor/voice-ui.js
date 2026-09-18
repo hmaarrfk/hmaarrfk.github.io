@@ -78,7 +78,12 @@ export function createVoice(ctx) {
 
   function ensureWorker() {
     if (worker) return worker;
-    worker = new Worker(new URL('./voice-worker.js', import.meta.url), { type: 'module' });
+    // Import maps do not reach `new Worker`, so carry this module's own
+    // ?v=<commit> across by hand: without it a release could pair a freshly
+    // fetched voice-ui.js with a cached voice-worker.js.
+    const workerUrl = new URL('./voice-worker.js', import.meta.url);
+    workerUrl.search = new URL(import.meta.url).search;
+    worker = new Worker(workerUrl, { type: 'module' });
     return worker;
   }
 
