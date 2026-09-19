@@ -1,126 +1,50 @@
-// Overdub — the pure helpers behind respeaking a line in your own voice.
+// Overdub — the pure helpers behind respeaking a whole narration in your own
+// voice.
 //
 // No DOM, no model, no WebCodecs: choosing a reference clip to clone from,
-// working out which transcript lines changed, deciding where a replacement
-// may start and stop, fitting the generated speech into the hole it has to
-// fill, and matching its level to the voice around it. The model itself
-// (a zero-shot cloning TTS) runs in voice-worker.js; voice-ui.js joins the
-// two to the page. Like captions.js and breath.js, everything here runs
-// under Node, which is where it is actually tested.
+// turning a transcript into an editable script, aligning a rewritten script
+// back onto the recording it came from, deciding how the picture has to be
+// re-timed so it still matches what is now being said, and finishing the
+// generated narration so it sits in the room the recording was made in. The
+// model itself (a zero-shot cloning TTS) runs in voice-worker.js; voice-ui.js
+// joins the two to the page. Like captions.js and breath.js, everything here
+// runs under Node, which is where it is actually tested.
 //
-// The path an overdub takes:
+// Why the whole script, and not a line at a time
+// ----------------------------------------------
+// The first version of this respoke one transcript phrase at a time, each into
+// the hole its recorded phrase left. It worked, and it sounded wrong: every
+// phrase was a separate generation with its own prosody, squeezed by its own
+// WSOLA rate into a slot whose length was decided by how fast you happened to
+// have said it the first time, with the recording's pauses between. The result
+// was a sequence of correct sentences that did not sound like anybody talking.
 //
-//   transcript line edited ─► changedLines   ─► what to respeak
-//   word timings           ─► snapSpan       ─► where it may start/stop
-//   word timings           ─► pickReference  ─► 6-15 s to clone from
-//                             (the TTS model)
-//   generated mono PCM     ─► fitToDuration  ─► WSOLA to the exact hole
-//                          ─► matchVoiceLevel─► as loud as the recording
-//                          ─► shapeEnds      ─► no click at the seam
-//                          ─► toInterleaved  ─► what the encoder takes
+// So the direction is inverted. The narration is generated as one continuous
+// script — sentence after sentence, in order, with the pauses coming from the
+// punctuation rather than from the old recording — and it becomes the spine of
+// the output. The *picture* is then re-timed to it: each stretch of video runs
+// a little faster or a little slower, or is cut, so that what is on screen
+// still matches what is being said. A screencast tolerates that easily; a
+// chopped-up voice track does not.
 //
-// Two things make this work at all on a screencast. The span is snapped
-// *into the surrounding pauses* rather than to the words, so the seam lands
-// in room tone where a few ms of fade is inaudible and no part of the old
-// line survives at the edges; and the reference clip comes out of the same
-// recording, so the cloned voice arrives with the same microphone and the
-// same room already on it.
+// The path a respoken script takes:
+//
+//   transcript cues        ─► scriptFromCues  ─► an editable paragraph script
+//   the script             ─► splitScript     ─► sentences + their pauses
+//   sentences + old words  ─► alignScript     ─► where each sentence was said
+//                             (the TTS model, one call, in order)
+//   generated mono PCM     ─► finishNarration ─► tone, level, room, one bed
+//   sentence timings       ─► planTimeline    ─► the video's new rates & cuts
+//   sentences              ─► narrationWords  ─► captions for what is now said
+//
+// Two things make this work at all on a screencast. The alignment is done on
+// *words*, by a patience diff against the transcript, so an edited script
+// still lands on the seconds it describes even when whole sentences were
+// rewritten; and the reference clip comes out of the same recording, so the
+// cloned voice arrives with the same microphone and the same room already on
+// it.
 
-import { createTimeStretcher } from './speed.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
-
-// How far a dub may be squeezed to fit its slot before it sounds processed.
-// Measured on WSOLA at 40 ms windows: past about a third the consonants smear.
-// This is a last resort, not the first move: when a respoken line runs long,
-// stretching the *picture* by a few percent is invisible where squeezing the
-// speech is audible the moment it does any real work. planFit() therefore
-// spends the picture's budget first and only squeezes what is left over.
-//
-// Note the floor is 1, not its mirror image: a dub is never *stretched*. If
-// the new line is shorter than the old one, slowing it down to fill the gap
-// makes it drawl, when the honest thing — and what the recording would have
-// sounded like had you said less — is to speak at your normal pace and leave
-// the rest of the pause alone.
-export const FIT_MIN_RATE = 1.0;    // dub is short: keep its pace, pad the rest
-export const FIT_MAX_RATE = 1.38;   // dub is long: squeeze it in, up to this
-
-// ---------------------------------------------------------------------------
-// What changed
-// ---------------------------------------------------------------------------
-// A cue carries `orig` — the text the model transcribed — alongside the
-// `text` the user may have retyped. A line is worth respeaking when those
-// differ by more than whitespace and case-only punctuation drift, because
-// re-synthesising a line that only gained a comma would swap real recorded
-// speech for generated speech and gain nothing.
-
-const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-
-/** Lines whose text no longer matches what was transcribed. */
-export function changedLines(cues) {
-  const out = [];
-  for (const c of cues || []) {
-    if (typeof c.orig !== 'string') continue;   // never transcribed: nothing to diff
-    if (norm(c.text) !== norm(c.orig)) out.push(c);
-  }
-  return out;
-}
-
-/** True when this line has been edited away from the transcript. */
-export function isChanged(cue) {
-  return !!cue && typeof cue.orig === 'string' && norm(cue.text) !== norm(cue.orig);
-}
-
-// ---------------------------------------------------------------------------
-// Where a replacement may start and stop
-// ---------------------------------------------------------------------------
-// A cue's own start and end sit on the first and last word, which is the
-// worst place to cut: the seam lands on a consonant, and any level or
-// timbre mismatch is fully exposed. The pauses on either side are the right
-// place, so each edge moves out into its neighbouring gap.
-//
-// How far it may move matters more than it looks. The edge it starts from is
-// a *word timestamp*, and Whisper's word timestamps are an alignment, not a
-// measurement: they routinely land some tens of milliseconds late on an onset
-// and early on a release. Leaving the edge exactly there leaves the attack of
-// the word being replaced in the recording — and since the replacement starts
-// right after it, you hear the original say the first syllable and then the
-// clone say the whole line ("I— I'm here today to…"). The only way to be rid
-// of that is to start the replacement *before* the word can possibly have
-// begun, i.e. inside the pause.
-//
-// So: reach out by half the gap (two respoken lines either side of one pause
-// then meet in the middle instead of overlapping), and never by more than
-// `maxSnapS` — a long reach into a long pause is pointless, and on a dense
-// line the "gap" may be 20 ms of stop closure, where any reach at all would
-// swallow a real word. What it gives back is `lead` and `tail`: the silence
-// borrowed at each end, which finishDub() keeps silent so the respoken line
-// still begins where the recorded one did.
-
-export function snapSpan(start, end, words, { maxSnapS = 0.25, minGapS = 0.04 } = {}) {
-  const ws = (words || []).filter((w) => isFinite(w.start) && isFinite(w.end));
-  if (!ws.length) return { start, end, snapped: false, lead: 0, tail: 0 };
-
-  // The word that ends last before `start`, and the one that starts first
-  // after `end`. Words inside the span are irrelevant — they are the ones
-  // being replaced.
-  let before = null, after = null;
-  for (const w of ws) {
-    if (w.end <= start + 1e-3 && (!before || w.end > before.end)) before = w;
-    if (w.start >= end - 1e-3 && (!after || w.start < after.start)) after = w;
-  }
-
-  // How far an edge may move into a pause of `gap` seconds.
-  const reach = (gap) => (gap > minGapS ? Math.min(gap / 2, maxSnapS) : 0);
-
-  const s2 = before ? start - reach(start - before.end) : start;
-  const e2 = after ? end + reach(after.start - end) : end;
-  const s3 = Math.min(s2, end - 1e-3);
-  const e3 = Math.max(e2, s3 + 1e-3);
-  return {
-    start: s3, end: e3, snapped: s3 !== start || e3 !== end,
-    lead: Math.max(0, start - s3), tail: Math.max(0, e3 - end),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // What to clone from
@@ -183,106 +107,11 @@ export function pickReference(words, {
   return { start: best.start, end: best.end, text: best.text, density: best.density };
 }
 
+
 // ---------------------------------------------------------------------------
-// Fitting the generated speech into the hole
+// The room
 // ---------------------------------------------------------------------------
-// The model says the line at its own pace, which is never exactly the pace
-// of the recording it is replacing. WSOLA (speed.js — the same stretcher the
-// sped-up sections use) changes the duration while keeping the pitch, so the
-// cloned voice stays the cloned voice.
-//
-// Returns the rate it actually used and whether it ran out of room, because
-// "it did not fit" is a UI decision, not something to paper over: a dub
-// clamped at the limit is padded or trimmed, and the caller should offer to
-// let the section change length instead.
 
-export function fitToDuration(mono, sampleRate, targetSamples, {
-  minRate = FIT_MIN_RATE, maxRate = FIT_MAX_RATE, padFadeMs = 25, roomTone = null,
-  leadSamples = 0,
-} = {}) {
-  const src = mono || new Float32Array(0);
-  if (!src.length || !(targetSamples > 0)) {
-    return { pcm: new Float32Array(Math.max(0, targetSamples | 0)), rate: 1, clamped: false, wanted: 1, spoken: 0, lead: 0 };
-  }
-  const wanted = src.length / targetSamples;        // >1: too long, squeeze
-  const rate = Math.min(maxRate, Math.max(minRate, wanted));
-  const clamped = Math.abs(rate - wanted) > 1e-6;
-
-  let out;
-  if (Math.abs(rate - 1) < 1e-3) {
-    out = src;
-  } else {
-    const st = createTimeStretcher({ sampleRate, channels: 1, speed: rate });
-    const a = st.process(src), b = st.flush();
-    out = new Float32Array(a.length + b.length);
-    out.set(a, 0);
-    out.set(b, a.length);
-  }
-
-  // Land on the exact sample count either way: WSOLA emits whole windows, so
-  // it overshoots or undershoots by up to one. The video expects a span to be
-  // its own length to the sample.
-  const fit = new Float32Array(targetSamples);
-  // The span reaches back into the pause before the line (see snapSpan), and
-  // that borrowed silence has to stay silent: the generation goes in *after*
-  // it, so the respoken line still starts where the recorded one did instead
-  // of arriving a quarter of a second early. Only genuinely spare room is
-  // spent on it — a line that needs the whole hole keeps the whole hole.
-  const spare = Math.max(0, targetSamples - out.length);
-  const lead = Math.min(Math.max(0, Math.round(leadSamples) || 0), spare);
-  const spoken = Math.min(out.length, targetSamples - lead);
-  fit.set(out.subarray(0, spoken), lead);
-
-  const fadeN = Math.max(0, Math.round((padFadeMs / 1000) * sampleRate));
-  // A line that is genuinely shorter than the hole it replaces leaves a pause
-  // at the end, which is right — but the pause has to sound like the room, not
-  // like the file ended. Ramp the speech down, then fill the rest with room
-  // tone rather than zeros. The lead gets the same treatment in reverse.
-  const spokenEnd = lead + spoken;
-  if (lead > 0) {
-    const n = Math.min(spoken, fadeN);
-    for (let i = 0; i < n; i++) fit[lead + i] *= i / n;
-  }
-  if (spokenEnd < targetSamples) {
-    const n = Math.min(spoken, fadeN);
-    for (let i = 0; i < n; i++) fit[spokenEnd - 1 - i] *= i / n;
-  }
-  // The recording's own room tone is the right filler when it's available
-  // (layRoomTone lays it under the whole span, lead included); reconstructing
-  // one from the generation's quiet moments is the fallback for a recording
-  // that never stops long enough to sample.
-  if (!(roomTone && roomTone.length) && spoken > 0) {
-    if (spokenEnd < targetSamples) {
-      fillWithRoomTone(fit, spokenEnd, sampleRate, { learnFrom: lead, learnTo: spokenEnd });
-    }
-    if (lead > 0) {
-      fillWithRoomTone(fit, 0, sampleRate, { to: lead, learnFrom: lead, learnTo: spokenEnd });
-    }
-  }
-  return { pcm: fit, rate, clamped, wanted, spoken, lead };
-}
-
-/**
- * Fill `out[from..]` with room tone taken from the signal itself.
- *
- * Digital silence is not what a pause in a recording sounds like: a real one
- * still has the room and the microphone in it, twenty-odd dB under the voice
- * but very much there. Dropping to −120 dB for a second and a half in the
- * middle of a sentence reads as a dropout, which is exactly the kind of seam
- * this whole module exists to avoid. (Measured on a real export: a 5.3 s line
- * respoken in 3.7 s left 1.56 s of absolute silence, and it was obvious.)
- *
- * The tone is lifted from the generation rather than the recording because the
- * clone already carries the room — it was cloned from this microphone, in this
- * room, and its own pauses sound like the right pauses. The quietest stretch
- * of the line is therefore the right filler, and it needs nothing passed in.
- *
- * It is tiled alternately forwards and backwards so the joins are continuous
- * and the ear can't hear a loop. The window is short (120 ms) because it has
- * to fit *inside* a pause to be room tone at all — the gaps between phrases in
- * a generated line run about 200-400 ms, and a longer window would keep
- * catching the words on either side and disqualify itself.
- */
 /**
  * Find the recording's own room tone — the longest quiet stretch in it.
  *
@@ -363,6 +192,27 @@ export function layRoomTone(mono, tone, { from = 0 } = {}) {
   return out;
 }
 
+/**
+ * Fill `out[from..]` with room tone taken from the signal itself.
+ *
+ * Digital silence is not what a pause in a recording sounds like: a real one
+ * still has the room and the microphone in it, twenty-odd dB under the voice
+ * but very much there. Dropping to −120 dB for a second and a half in the
+ * middle of a sentence reads as a dropout, which is exactly the kind of seam
+ * this whole module exists to avoid. (Measured on a real export: a 5.3 s line
+ * respoken in 3.7 s left 1.56 s of absolute silence, and it was obvious.)
+ *
+ * The tone is lifted from the generation rather than the recording because the
+ * clone already carries the room — it was cloned from this microphone, in this
+ * room, and its own pauses sound like the right pauses. The quietest stretch
+ * of the line is therefore the right filler, and it needs nothing passed in.
+ *
+ * It is tiled alternately forwards and backwards so the joins are continuous
+ * and the ear can't hear a loop. The window is short (120 ms) because it has
+ * to fit *inside* a pause to be room tone at all — the gaps between phrases in
+ * a generated line run about 200-400 ms, and a longer window would keep
+ * catching the words on either side and disqualify itself.
+ */
 // `to` bounds the stretch being filled (the default runs to the end of the
 // buffer), and `learnFrom`/`learnTo` say where the spoken part is — which is
 // not always before `from`: the silence borrowed at the head of a span is
@@ -636,205 +486,508 @@ export function toMono(interleaved, channels) {
   return out;
 }
 
+
 // ---------------------------------------------------------------------------
-// The whole finish, in one call
+// The script
 // ---------------------------------------------------------------------------
-// Given raw model output and the slot it has to fill, produce the exact
-// interleaved samples the export will emit for that span.
+// The transcript is a list of phrases with timestamps; a script is prose. The
+// two have to convert cleanly both ways, because the transcript is what the
+// tool knows and prose is what a person can actually rewrite.
 //
-// `neighbourRms` is measured from the real audio just outside the span; pass
-// null to leave the level alone (the model's own level is usually close,
-// since it cloned a voice from this very recording).
+// Going out, the only structure worth inventing is the paragraph: a silence
+// long enough to be a beat in the delivery is where one ends. Coming back,
+// the sentence is the unit — it is what the model speaks in one breath, what
+// carries one prosodic arc, and what the alignment anchors on.
+
+/** The transcript as an editable script: phrases joined, paragraphs at pauses. */
+export function scriptFromCues(cues, { paragraphGapS = 1.5 } = {}) {
+  const paras = [];
+  let cur = [];
+  let prevEnd = null;
+  for (const c of cues || []) {
+    const t = String(c.text || '').trim();
+    if (!t) continue;
+    if (prevEnd != null && c.start - prevEnd > paragraphGapS && cur.length) {
+      paras.push(cur.join(' '));
+      cur = [];
+    }
+    cur.push(t);
+    prevEnd = prevEnd == null ? c.end : Math.max(prevEnd, c.end);
+  }
+  if (cur.length) paras.push(cur.join(' '));
+  return paras.join('\n\n');
+}
+
+// Full stops that are not the end of a sentence. Without these, "Fig. 3 shows"
+// and "e.g. the buffer" each become two parts, the model says them as two
+// sentences, and a pause appears in the middle of a phrase.
+const ABBREV = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'vs', 'etc', 'eg', 'ie', 'fig', 'figs',
+  'no', 'approx', 'al', 'inc', 'ltd', 'jr', 'sr', 'vol', 'ch', 'sec', 'min',
+  'max', 'cf', 'ca', 'pp', 'ref', 'refs', 'eq', 'eqs',
+]);
+
+/** One paragraph into sentences, leaving abbreviations and decimals alone. */
+export function splitSentences(para) {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i < para.length; i++) {
+    if (!'.!?…'.includes(para[i])) continue;
+    // Swallow a run of terminators and any closing quote or bracket after it.
+    let j = i;
+    while (j + 1 < para.length && '.!?…"\')]”’'.includes(para[j + 1])) j++;
+    const after = para.slice(j + 1);
+    if (after && !/^\s/.test(after)) { i = j; continue; }      // 3.5, e.g., U.S.A
+    const next = after.replace(/^\s+/, '');
+    if (!next) break;                                          // the last sentence
+    const word = /([\p{L}]+)[.!?…]*$/u.exec(para.slice(start, i + 1));
+    const raw = word ? word[1] : '';
+    // A lone *capital* before a full stop is an initial — "Dr. J. Smith" —
+    // where a lone lower-case letter is far more likely the tail of a unit or
+    // a model number: "the 20x." really is the end of a sentence.
+    const initial = raw.length === 1 && raw === raw.toUpperCase() && raw !== raw.toLowerCase();
+    if (para[i] === '.' && (ABBREV.has(raw.toLowerCase()) || initial)) { i = j; continue; }
+    // A sentence really does start with a capital, a digit or a quote.
+    if (!/^["'(\[“‘]?[\p{Lu}\p{N}]/u.test(next)) { i = j; continue; }
+    out.push(para.slice(start, j + 1).trim());
+    start = j + 1;
+    i = j;
+  }
+  const tail = para.slice(start).trim();
+  if (tail) out.push(tail);
+  return out.length ? out : [para.trim()].filter(Boolean);
+}
 
 /**
- * Blend a finished dub into the recording at its own edges.
+ * The script, ready to speak: sentences in order, each with the pause that
+ * follows it.
  *
- * Fading a replacement in from silence and out to silence — which is what this
- * did first — leaves a dip at each boundary: the recording stops dead, then
- * the new line arrives from nothing. An equal-power crossfade with the audio
- * that was there instead means the background never stops, and since the span
- * was already snapped so its edges sit in pauses, what is being crossfaded is
- * room tone into room tone. That is the join you cannot hear.
- *
- * `orig` is the recording for this span, interleaved and same channel count.
- * Its *last* frames are used for the tail even when the span has been
- * re-timed, because those are the ones the next span continues from.
+ * This is where "the pauses follow the punctuation" actually happens. The
+ * model says one sentence at a time and stops; left alone, the sentences would
+ * run together with no breath between them, which is the other way to sound
+ * unnatural. So the gap is chosen from what the sentence ends with — a full
+ * stop is a beat, a paragraph break is a longer one, a comma or a colon barely
+ * a hesitation — rather than from however long you happened to pause when you
+ * recorded it.
  */
-export function crossfadeEdges(dub, orig, { channels = 1, sampleRate = 48000, fadeMs = 30 } = {}) {
-  if (!dub || !dub.length || !orig || !orig.length) return dub;
-  const frames = Math.floor(dub.length / channels);
-  const origFrames = Math.floor(orig.length / channels);
-  const n = Math.min(Math.floor(frames / 3), origFrames, Math.round((fadeMs / 1000) * sampleRate));
-  if (n <= 1) return dub;
-  const out = Float32Array.from(dub);
+export function splitScript(text, {
+  sentencePauseS = 0.36, paragraphPauseS = 0.78, clausePauseS = 0.2,
+} = {}) {
+  const paras = String(text || '')
+    .split(/\n\s*\n+/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const parts = [];
+  paras.forEach((para, pi) => {
+    const sentences = splitSentences(para);
+    sentences.forEach((s, si) => {
+      const lastHere = si === sentences.length - 1;
+      const lastOfAll = lastHere && pi === paras.length - 1;
+      const pauseAfterS = lastOfAll ? 0
+        : lastHere ? paragraphPauseS
+        : /[,;:]["')\]”’]*$/.test(s) ? clausePauseS
+        : sentencePauseS;
+      parts.push({ text: s, pauseAfterS, paragraph: pi });
+    });
+  });
+  return parts;
+}
 
-  for (let i = 0; i < n; i++) {
-    // Equal power: the two halves sum to constant energy, so a noise floor
-    // crossfaded with itself keeps its level instead of dipping in the middle.
-    const t = (i + 1) / (n + 1);
-    const fadeIn = Math.sin(t * Math.PI / 2), fadeOut = Math.cos(t * Math.PI / 2);
-    for (let c = 0; c < channels; c++) {
-      const head = i * channels + c;
-      out[head] = out[head] * fadeIn + orig[head] * fadeOut;
-      const tailDub = (frames - n + i) * channels + c;
-      const tailOrig = (origFrames - n + i) * channels + c;
-      out[tailDub] = out[tailDub] * fadeOut + orig[tailOrig] * fadeIn;
+// ---------------------------------------------------------------------------
+// Where the rewritten script was said
+// ---------------------------------------------------------------------------
+// The transcript's words carry timestamps; the script's words do not. Matching
+// them is what lets a rewritten sentence keep its place on the screen
+// recording, and it has to survive real editing: a fixed spelling here, a
+// clause dropped there, an introduction replaced wholesale.
+//
+// A patience diff does this well and cheaply. Words that appear exactly once
+// in both texts are unambiguous anchors; the longest increasing run of them
+// pins the two sequences together, and each stretch between two anchors is
+// matched the same way recursively. Unlike a full LCS it needs no O(n*m)
+// table — a half-hour transcript is several thousand words — and unlike a
+// nearest-timestamp guess it cannot be fooled by a sentence moving.
+
+/** A word reduced to what it is worth comparing: letters and digits. */
+export const normWord = (s) => String(s || '')
+  .toLowerCase()
+  .replace(/[‘’]/g, "'")
+  .replace(/[^\p{L}\p{N}']/gu, '')
+  .replace(/^'+|'+$/g, '');
+
+/** Every word of a script, tagged with the part it belongs to. */
+export function scriptWords(parts) {
+  const out = [];
+  (parts || []).forEach((p, i) => {
+    for (const w of String(p.text || '').split(/\s+/)) {
+      const n = normWord(w);
+      if (n) out.push({ text: w, norm: n, part: i });
     }
+  });
+  return out;
+}
+
+/**
+ * Patience diff: pairs of indices `[i, j]` where `a[i]` and `b[j]` are the
+ * same word and the pairing is consistent with the order of both.
+ */
+export function matchWords(a, b, { maxDepth = 200 } = {}) {
+  const out = [];
+  walk(0, a.length, 0, b.length, 0);
+  return out;
+
+  function walk(lo1, hi1, lo2, hi2, depth) {
+    while (lo1 < hi1 && lo2 < hi2 && a[lo1] === b[lo2]) out.push([lo1++, lo2++]);
+    const tail = [];
+    while (lo1 < hi1 && lo2 < hi2 && a[hi1 - 1] === b[hi2 - 1]) tail.push([--hi1, --hi2]);
+    if (lo1 < hi1 && lo2 < hi2 && depth < maxDepth) {
+      const anchors = unique(lo1, hi1, lo2, hi2);
+      let p1 = lo1, p2 = lo2;
+      for (const [i, j] of anchors) {
+        walk(p1, i, p2, j, depth + 1);
+        out.push([i, j]);
+        p1 = i + 1; p2 = j + 1;
+      }
+      if (anchors.length) walk(p1, hi1, p2, hi2, depth + 1);
+    }
+    for (let k = tail.length - 1; k >= 0; k--) out.push(tail[k]);
+  }
+
+  // Words appearing exactly once on each side, paired, then thinned to the
+  // longest run that moves forward in both — the patience sort.
+  function unique(lo1, hi1, lo2, hi2) {
+    const ca = new Map(), cb = new Map();
+    for (let i = lo1; i < hi1; i++) {
+      const e = ca.get(a[i]);
+      if (e) e.n++; else ca.set(a[i], { n: 1, at: i });
+    }
+    for (let j = lo2; j < hi2; j++) {
+      const e = cb.get(b[j]);
+      if (e) e.n++; else cb.set(b[j], { n: 1, at: j });
+    }
+    const pairs = [];
+    for (const [k, va] of ca) {
+      if (va.n !== 1) continue;
+      const vb = cb.get(k);
+      if (vb && vb.n === 1) pairs.push([va.at, vb.at]);
+    }
+    if (pairs.length < 2) return pairs;
+    pairs.sort((p, q) => p[0] - q[0]);
+
+    // Longest increasing subsequence on the second coordinate.
+    const piles = [], back = new Array(pairs.length).fill(-1), top = [];
+    for (let i = 0; i < pairs.length; i++) {
+      const v = pairs[i][1];
+      let lo = 0, hi = piles.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (pairs[piles[mid]][1] < v) lo = mid + 1; else hi = mid; }
+      if (lo > 0) back[i] = piles[lo - 1];
+      piles[lo] = i;
+      top[lo] = i;
+    }
+    const seq = [];
+    for (let i = piles.length ? piles[piles.length - 1] : -1; i >= 0; i = back[i]) seq.push(pairs[i]);
+    seq.reverse();
+    return seq;
+  }
+}
+
+/**
+ * Give every sentence of the script the seconds of recording it describes.
+ *
+ * `words` are the transcript's words, in whatever timeline the caller is
+ * planning in (this module never sees the difference between source time and
+ * the trimmed timeline; voice-ui.js passes the latter). Every part comes back
+ * with `srcStart` / `srcEnd`, and `anchored` saying whether that came from a
+ * real word match or from sharing out the room between two that did.
+ *
+ * A wholly rewritten passage — the intro nobody keeps on the first take — has
+ * no matches at all, so it is placed between its neighbours in proportion to
+ * how much of it there is to say. That is a guess, but it is a guess bounded
+ * on both sides by something that was measured.
+ */
+export function alignScript(parts, words, { startS = 0, endS = null } = {}) {
+  const ws = (words || []).filter((w) => Number.isFinite(w.start) && Number.isFinite(w.end) && normWord(w.text));
+  const total = endS != null ? endS : (ws.length ? ws[ws.length - 1].end : startS);
+  const out = (parts || []).map((p) => ({ ...p, srcStart: null, srcEnd: null, anchored: false, matched: 0 }));
+  if (!out.length) return out;
+
+  const sw = scriptWords(out);
+  if (ws.length && sw.length) {
+    const pairs = matchWords(ws.map((w) => normWord(w.text)), sw.map((w) => w.norm));
+    for (const [i, j] of pairs) {
+      const o = out[sw[j].part];
+      if (!o.anchored) { o.srcStart = ws[i].start; o.srcEnd = ws[i].end; o.anchored = true; }
+      else { o.srcStart = Math.min(o.srcStart, ws[i].start); o.srcEnd = Math.max(o.srcEnd, ws[i].end); }
+      o.matched++;
+    }
+  }
+
+  // Anchors have to march forward. One badly paired repeated word would
+  // otherwise fold the timeline back on itself, and a negative-length section
+  // is not something the rest of the tool can be asked to render.
+  let floor = startS;
+  for (const o of out) {
+    if (!o.anchored) continue;
+    o.srcStart = Math.max(o.srcStart, floor);
+    o.srcEnd = Math.max(o.srcEnd, o.srcStart);
+    floor = o.srcEnd;
+  }
+  let ceil = total;
+  for (let i = out.length - 1; i >= 0; i--) {
+    const o = out[i];
+    if (!o.anchored) continue;
+    o.srcEnd = Math.min(o.srcEnd, ceil);
+    o.srcStart = Math.min(o.srcStart, o.srcEnd);
+    ceil = o.srcStart;
+  }
+
+  // Runs with nothing matched share out the gap between the anchors around
+  // them, by how much there is to say.
+  const weight = (p) => Math.max(1, String(p.text || '').length);
+  let i = 0;
+  while (i < out.length) {
+    if (out[i].anchored) { i++; continue; }
+    let j = i;
+    while (j < out.length && !out[j].anchored) j++;
+    const from = i > 0 ? out[i - 1].srcEnd : startS;
+    const to = j < out.length ? out[j].srcStart : total;
+    const span = Math.max(0, to - from);
+    let sum = 0;
+    for (let k = i; k < j; k++) sum += weight(out[k]);
+    let at = from;
+    for (let k = i; k < j; k++) {
+      const d = sum > 0 ? (span * weight(out[k])) / sum : 0;
+      out[k].srcStart = at;
+      out[k].srcEnd = at + d;
+      at += d;
+    }
+    i = j;
   }
   return out;
 }
 
-export function finishDub(modelPcm, {
-  modelRate, outRate, channels, targetSamples, targetDbfs = null,
-  resample = null, fadeMs = 12, minRate = FIT_MIN_RATE, maxRate = FIT_MAX_RATE,
-  roomTone = null, toneReference = null, leadSamples = 0,
-}) {
-  let mono = modelPcm || new Float32Array(0);
-  if (modelRate !== outRate) {
-    if (!resample) throw new Error('finishDub needs a resample() when the model rate differs');
-    mono = resample(mono, modelRate, outRate);
+// ---------------------------------------------------------------------------
+// Re-timing the picture to the narration
+// ---------------------------------------------------------------------------
+// After the script has been spoken there are two timelines that have to be
+// made to agree: the recording, where each sentence *was* said, and the new
+// narration, where each sentence *is* said. Every pair of (recording time,
+// narration time) is an anchor, and the stretch between two anchors is a
+// section of video that has to occupy exactly its share of the narration —
+// which is to say, it has a rate, which is a thing `state.edits` already
+// understands.
+//
+// Taken literally that gives one rate per sentence, and some of them absurd:
+// a sentence you now say in three seconds where you once took eight wants the
+// picture at 2.7x. The fix is that a screencast does not need sentence-level
+// sync. Dropping an anchor merges two sections into one with a gentler rate,
+// and the only thing lost is that the picture inside the merged section drifts
+// a little against the words. So anchors are dropped, worst offender first,
+// until every remaining section is inside the band the user allowed.
+//
+// What that cannot fix is a section where the recording is simply much longer
+// than the words that now describe it — the paragraph you deleted. There the
+// picture is run at the fastest rate allowed and the remainder is *cut*, which
+// is the honest answer: the script no longer covers that footage.
+//
+// The opposite case — many more words than picture — has no such lever, since
+// there is no more footage to show. That section runs slower than asked and
+// `planTimeline` says so, rather than quietly desynchronising.
+
+export function planTimeline(parts, {
+  keptS, narrationS, minRate = 0.7, maxRate = 1.5, minCutS = 0.35,
+  smoothRatio = 1.15,
+} = {}) {
+  const raw = [{ src: 0, out: 0 }];
+  for (const p of parts || []) {
+    raw.push({ src: p.srcStart, out: p.outStart });
+    raw.push({ src: p.srcEnd, out: p.outEnd });
   }
+  // Only anchors that move both clocks forward are anchors at all.
+  const anchors = [raw[0]];
+  for (let i = 1; i < raw.length; i++) {
+    const last = anchors[anchors.length - 1];
+    if (raw[i].src > last.src + 1e-3 && raw[i].out > last.out + 1e-3
+        && raw[i].src < keptS - 1e-3 && raw[i].out < narrationS - 1e-3) {
+      anchors.push(raw[i]);
+    }
+  }
+  anchors.push({ src: keptS, out: narrationS });
+
+  const rateOf = (i) => {
+    const dout = anchors[i + 1].out - anchors[i].out;
+    return dout > 1e-6 ? (anchors[i + 1].src - anchors[i].src) / dout : 1;
+  };
+
+  // How badly a section breaks the band, weighted by how long it is on screen:
+  // a two-second lurch matters more than a tenth-of-a-second one.
+  const cost = (i, j) => {
+    const ds = anchors[j].src - anchors[i].src;
+    const dout = anchors[j].out - anchors[i].out;
+    if (!(dout > 1e-6)) return 0;
+    const r = Math.max(1e-6, ds / dout);
+    return dout * (Math.max(0, Math.log(r / maxRate)) + Math.max(0, Math.log(minRate / r)));
+  };
+
+  let merged = 0;
+  for (;;) {
+    let broken = false;
+    for (let i = 0; i < anchors.length - 1 && !broken; i++) if (cost(i, i + 1) > 1e-9) broken = true;
+    if (!broken || anchors.length <= 2) break;
+    // Removing an anchor only changes the two sections it separates, so the
+    // gain is local and the whole sweep is linear.
+    let bestK = -1, bestDelta = -1e-9;
+    for (let k = 1; k < anchors.length - 1; k++) {
+      const d = cost(k - 1, k + 1) - cost(k - 1, k) - cost(k, k + 1);
+      if (d < bestDelta) { bestDelta = d; bestK = k; }
+    }
+    if (bestK < 0) break;
+    anchors.splice(bestK, 1);
+    merged++;
+  }
+
+  // Then a cosmetic pass: neighbouring sections whose rates are already close
+  // are joined. Nothing is wrong with them, but every rate change is a change
+  // of playback speed, and a screencast with a moving cursor shows one every
+  // second as jerkiness. Merging two sections at 1.11x and 1.15x costs a few
+  // tenths of a second of drift inside the pair and removes a visible step.
+  for (;;) {
+    let bestK = -1, bestRatio = smoothRatio;
+    for (let k = 1; k < anchors.length - 1; k++) {
+      if (cost(k - 1, k) > 1e-9 || cost(k, k + 1) > 1e-9) continue;   // needs the anchor
+      if (cost(k - 1, k + 1) > 1e-9) continue;                        // merging would break the band
+      const a = rateOf(k - 1), b = rateOf(k);
+      const ratio = Math.max(a / b, b / a);
+      if (ratio < bestRatio) { bestRatio = ratio; bestK = k; }
+    }
+    if (bestK < 0) break;
+    anchors.splice(bestK, 1);
+    merged++;
+  }
+
+  const spans = [], cuts = [];
+  let cutS = 0, fastest = 1, slowest = 1, tooSlow = 0;
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const o0 = anchors[i].out, o1 = anchors[i + 1].out;
+    const outDur = o1 - o0;
+    let s0 = anchors[i].src, s1 = anchors[i + 1].src;
+    if (!(outDur > 1e-6)) continue;
+    let srcDur = s1 - s0;
+    let rate = srcDur / outDur;
+    if (rate > maxRate) {
+      const drop = srcDur - maxRate * outDur;
+      // Cut from the end of the section: the picture stays with the start of
+      // what is being said and jumps forward just before the next sentence.
+      // Below a third of a second a cut is more visible than the speed-up it
+      // saves, so the section just runs a shade faster instead.
+      if (drop >= minCutS) {
+        cuts.push({ start: s1 - drop, end: s1 });
+        cutS += drop;
+        s1 -= drop;
+        srcDur = s1 - s0;
+        rate = maxRate;
+      }
+    }
+    if (rate < minRate - 1e-6) tooSlow++;
+    fastest = Math.max(fastest, rate);
+    slowest = Math.min(slowest, rate);
+    spans.push({ srcStart: s0, srcEnd: s1, outStart: o0, outEnd: o1, rate });
+  }
+  return { spans, cuts, stats: { sections: spans.length, merged, cutS, fastest, slowest, tooSlow } };
+}
+
+// ---------------------------------------------------------------------------
+// Captions for what is now being said
+// ---------------------------------------------------------------------------
+// The burned-in captions have to follow the *new* narration, and they can:
+// every sentence's audio span is known exactly, because the model was asked
+// for the sentences one at a time. Inside a sentence the words are spread by
+// how long they take to say — letters plus a beat, which is crude but is only
+// ever interpolating across a couple of seconds between two exact edges.
+//
+// These go through the same `wordsToCues` the transcript does, so a long
+// sentence breaks into two lines in the same places and by the same rules.
+
+export function narrationWords(parts) {
+  const out = [];
+  for (const p of parts || []) {
+    const words = String(p.text || '').split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    const from = p.outStart || 0;
+    const dur = Math.max(0, (p.outEnd || 0) - from);
+    const w = words.map((t) => normWord(t).length + 1);
+    let sum = 0;
+    for (const x of w) sum += x;
+    let at = from;
+    words.forEach((t, i) => {
+      const d = sum > 0 ? (dur * w[i]) / sum : 0;
+      // A leading space is how captions.js knows a word starts, which is what
+      // stops a cue ever breaking inside one.
+      out.push({ text: ' ' + t, start: at, end: at + d });
+      at += d;
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Finishing the narration
+// ---------------------------------------------------------------------------
+// One pass over the whole thing, not one per sentence — and that is the point.
+// Tone matching, level matching and the room tone are all measurements, and a
+// measurement made separately on each sentence gives each sentence a slightly
+// different answer. You hear that as the voice shifting under you from line to
+// line, which is exactly the fault the per-line version had. Measured once
+// over the whole narration, the delivery is as consistent as one take.
+
+export function finishNarration(mono, {
+  modelRate, outRate, resample = null, targetDbfs = null,
+  toneReference = null, roomTone = null, pauses = [], fadeMs = 30,
+}) {
+  let out = mono || new Float32Array(0);
+  if (!out.length) return { pcm: out, gainDb: 0, gainsDb: null };
+  if (modelRate !== outRate) {
+    if (!resample) throw new Error('finishNarration needs a resample() when the model rate differs');
+    out = resample(out, modelRate, outRate);
+  }
+
   // Tone before level: correcting the balance moves the energy, so the level
   // has to be measured after it or the two fight each other.
   let gainsDb = null;
   if (toneReference && toneReference.length) {
-    const t = matchTone(mono, toneReference, outRate);
-    mono = t.pcm;
+    const t = matchTone(out, toneReference, outRate);
+    out = t.pcm;
     gainsDb = t.gainsDb;
   }
-
   let gainDb = 0;
   if (targetDbfs != null) {
-    const m = matchVoiceLevel(mono, outRate, targetDbfs);
-    mono = m.pcm;
+    const m = matchVoiceLevel(out, outRate, targetDbfs);
+    out = m.pcm;
     gainDb = m.gainDb;
   }
+  out = shapeEnds(out, outRate, { fadeMs });
 
-  const fitted = fitToDuration(mono, outRate, targetSamples, {
-    minRate, maxRate, roomTone, leadSamples,
-  });
-
-  // The room goes under the whole line, not just the pause at the end: it is
-  // what makes the background continuous across the splice, and it carries the
-  // air above 12 kHz that the model cannot produce at all.
-  const withRoom = roomTone && roomTone.length ? layRoomTone(fitted.pcm, roomTone) : fitted.pcm;
-
-  // Only shape the ends when there is no recording to cross into. With one,
-  // crossfadeEdges() does a better job at export time and a fade to silence
-  // here would only punch a hole for it to fill.
-  const shaped = roomTone && roomTone.length ? withRoom : shapeEnds(withRoom, outRate, { fadeMs });
-  return {
-    pcm: toInterleaved(shaped, channels),
-    frames: targetSamples,
-    rate: fitted.rate,
-    clamped: fitted.clamped,
-    wanted: fitted.wanted,
-    gainDb,
-    gainsDb,
-    spoken: fitted.spoken,
-    lead: fitted.lead,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Letting the section change length instead
-// ---------------------------------------------------------------------------
-// When a rewritten line is much longer or shorter than the one it replaces,
-// squeezing it is the wrong answer. The edit model already has a way to say
-// "this source span occupies a different amount of output time": its rate.
-// A dub that wants `dubS` seconds out of a `srcS`-second span is exactly a
-// span at rate `srcS / dubS` — the video slows a little or hurries a little
-// through that section, and every downstream consumer (frame spacing, the
-// timeline, caption times) already understands it.
-
-export function naturalRate(srcS, dubS, { minRate = 0.5, maxRate = 2 } = {}) {
-  if (!(srcS > 0) || !(dubS > 0)) return 1;
-  return Math.min(maxRate, Math.max(minRate, srcS / dubS));
-}
-
-/**
- * Which mode to suggest for a dub: fit it to the hole, or let the section
- * breathe.
- *
- * The two directions are not symmetric, and treating them as if they were is
- * wrong in a way you only hear once you try it. A line that comes out *short*
- * needs no help from the picture: it can simply be followed by the rest of the
- * pause it was sitting in, which is what the recording would have sounded like
- * if you had said less. Speeding the video up to close that gap — a 1.9x
- * lurch, in the case that prompted this — is a drastic edit to make on behalf
- * of a sentence that merely got briefer.
- *
- * A line that comes out *long* is different: the words genuinely need more
- * seconds than the hole has. Squeeze it while that stays inaudible, and past
- * that, give it the time and let the section slow down.
- */
-/**
- * Work out what a respoken span should occupy: whether the picture stays put,
- * how fast it runs if not, and how much pause is left at the end.
- *
- * `deadAirS` is the answer to "how long a pause will you tolerate". Anything
- * beyond it is trimmed by running the section faster, so the setting means
- * exactly what it says — keep at most this much silence — rather than being a
- * threshold that then removes *all* of it.
- *
- *   trimDeadAir off → the pause stays, whatever its length
- *   pause <= deadAirS → nothing to do, the picture is left alone
- *   pause >  deadAirS → the span runs at srcS / (dubS + deadAirS)
- *
- * `borrowedS` is the silence snapSpan() reached into on either side so the
- * seam would land in a pause. It is part of the span but it is not pause the
- * user asked to be rid of — it is pause that was already there, on both sides
- * of the line, and trimming it would speed the picture up over a change the
- * tool made for its own reasons. So it is added to the allowance.
- *
- * Returns `{ mode, rate, outS, padS }`. `mode` is 'fit' (rate 1, the picture
- * untouched) or 'natural' (the rate absorbs the difference). `padS` is what
- * will still be pause, which is worth telling the user about when the rate
- * bound stops it reaching zero.
- */
-export function planFit(srcS, dubS, {
-  trimDeadAir = true, deadAirS = 0.15, borrowedS = 0,
-  maxVideoRate = 1.15, minVideoRate = 0.87,
-  maxSqueeze = FIT_MAX_RATE,
-} = {}) {
-  if (!(srcS > 0) || !(dubS > 0)) {
-    return { mode: 'fit', rate: 1, outS: srcS || 0, padS: 0, squeeze: 1, short: 0 };
-  }
-
-  // ---- The line came out LONGER than the one it replaces -----------------
-  // Here the picture can simply take its time, and that is the better tool:
-  // stretching the video by a few percent is invisible, where squeezing the
-  // speech to fit is audible as soon as it is doing any real work. So the
-  // order is: slow the picture first, and only squeeze what the picture
-  // cannot absorb.
-  if (dubS > srcS) {
-    const want = srcS / dubS;                       // <1: the picture slows
-    if (want >= minVideoRate) {
-      return { mode: 'natural', rate: want, outS: dubS, padS: 0, squeeze: 1, short: 0 };
+  if (roomTone && roomTone.length) {
+    out = layRoomTone(out, roomTone);
+  } else if (pauses && pauses.length) {
+    // No sample of the room to lay under it, so the pauses between sentences
+    // are digital silence — which reads as a dropout, not a pause. Rebuild one
+    // from the narration either side of each gap. Learning from a few seconds
+    // around it rather than the whole track keeps this linear in the length of
+    // the narration instead of quadratic.
+    out = Float32Array.from(out);
+    const near = Math.round(3 * outRate);
+    for (const p of pauses) {
+      const from = Math.round(p.from * outRate);
+      const to = Math.min(out.length, Math.round(p.to * outRate));
+      if (to - from < Math.round(0.05 * outRate)) continue;
+      let learnFrom = Math.max(0, from - near), learnTo = from;
+      if (learnTo - learnFrom < Math.round(0.3 * outRate)) {
+        learnFrom = to;
+        learnTo = Math.min(out.length, to + near);
+      }
+      fillWithRoomTone(out, from, outRate, { to, learnFrom, learnTo });
     }
-    // Past the gentle limit: slow as far as allowed, squeeze the remainder.
-    const rate = minVideoRate;
-    const outS = srcS / rate;
-    const squeeze = Math.min(maxSqueeze, dubS / outS);
-    // What still will not fit — the caller warns, and fitToDuration clamps.
-    const short = Math.max(0, dubS / squeeze - outS);
-    return { mode: 'natural', rate, outS, padS: 0, squeeze, short };
   }
-
-  // ---- The line came out SHORTER -----------------------------------------
-  // The time it no longer fills has to go somewhere, and there are only three
-  // places: leave it as pause, run the picture faster through it, or cut. This
-  // spends it on the picture, but only as far as `maxVideoRate` — a gentle
-  // change everywhere beats a lurch in one place — and reports whatever pause
-  // is left rather than forcing it out.
-  const allowed = trimDeadAir ? dubS + Math.max(0, deadAirS) + Math.max(0, borrowedS) : srcS;
-  if (srcS <= allowed + 1e-6) {
-    return { mode: 'fit', rate: 1, outS: srcS, padS: srcS - dubS, squeeze: 1, short: 0 };
-  }
-  const rate = Math.min(maxVideoRate, srcS / allowed);
-  const outS = srcS / rate;
-  return {
-    mode: rate > 1 + 1e-6 ? 'natural' : 'fit',
-    rate, outS, padS: Math.max(0, outS - dubS), squeeze: 1, short: 0,
-  };
+  return { pcm: out, gainDb, gainsDb };
 }
