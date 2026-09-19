@@ -19,9 +19,9 @@ layout: null
     mux    : mp4-muxer         (vendored, ./vendor/mp4-muxer/)
 
   Audio (AAC) is copied through untouched — remuxed, never re-encoded — so it
-  costs no quality and little time. Turning on a volume boost (manual, or
-  auto-detected from the voice band) decodes and re-encodes just the audio
-  track instead.
+  costs no quality and little time. Anything that changes the samples — a
+  volume boost, a speed change, a respoken narration — decodes and re-encodes
+  just the audio track instead.
 
   This page holds no inline JavaScript: every script lives in a .js file beside
   it, and those files carry no Jekyll front matter, so they are copied verbatim
@@ -283,21 +283,46 @@ layout: null
       </div>
 
       <div class="field-group" id="voice-group" style="margin-top:16px">
-        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Respeak a line (overdub)</label>
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Respeak the narration (overdub)</label>
         <p class="small muted" style="margin:6px 0 0">
-          Edit a line above and press <strong>Respeak</strong>: the words you
-          typed are spoken back in your own voice and dropped into the gap the
-          old line left, so the picture never moves. The voice is cloned from
-          the clearest few seconds of this very recording — no sample to
-          record, and the same microphone and room come with it. The model
-          (<a href="https://huggingface.co/kyutai/pocket-tts" target="_blank" rel="noopener">Kyutai Pocket TTS</a>)
-          downloads once and runs on your device; your audio never leaves this page.
+          The transcript above becomes a <strong>script</strong> you can rewrite
+          freely. Press <strong>Respeak the whole script</strong> and the whole
+          narration is delivered again in your own voice, in one take, with the
+          pauses coming from your punctuation instead of from the old
+          recording. The tool then works out where each sentence was said the
+          first time and <strong>re-times the picture</strong> to the new
+          narration — speeding a section up a little, easing another one down,
+          cutting footage the script no longer covers — so what is on screen
+          still matches what you are saying. The voice is cloned from the
+          clearest few seconds of this very recording
+          (<a href="https://huggingface.co/kyutai/pocket-tts" target="_blank" rel="noopener">Kyutai Pocket TTS</a>),
+          so there is no sample to record and the same microphone and room come
+          with it. The model downloads once and runs on your device; your audio
+          never leaves this page.
         </p>
         <p class="small" style="margin:8px 0 0;color:var(--muted)">
           <strong>Only clone a voice you have the right to use.</strong> This is
           built for respeaking your own narration.
         </p>
-        <div class="controls" style="margin-top:10px">
+
+        <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:12px;align-items:center">
+          <label for="script-text" style="font-size:.85rem;color:var(--muted);font-weight:600;margin-right:auto">Script</label>
+          <span class="small muted" id="script-info"></span>
+          <button class="btn" id="btn-script-fill" type="button" style="padding:6px 12px;font-size:.85rem;background:var(--panel-2)">Use the transcript</button>
+        </div>
+        <textarea id="script-text" rows="10" spellcheck="true"
+                  placeholder="Write what the video should say. One paragraph per section; blank lines are longer pauses."
+                  style="width:100%;margin-top:6px;padding:10px 12px;font:inherit;font-size:.92rem;line-height:1.6;
+                         background:var(--bg);color:var(--text);border:1px solid var(--border);
+                         border-radius:var(--radius);resize:vertical"></textarea>
+        <p class="small muted" style="margin:6px 0 0">
+          Sentences are the unit: each one is spoken as one phrase, and each is
+          matched back to the words you originally said around it, so a
+          rewritten introduction still lands on the right footage. A blank line
+          starts a new paragraph and a longer pause.
+        </p>
+
+        <div class="controls" style="margin-top:12px">
           <div class="field">
             <label for="in-voice-lang">Voice model language</label>
             <select id="in-voice-lang"></select>
@@ -306,44 +331,42 @@ layout: null
           <div class="field">
             <label for="in-voice-track">Preview plays</label>
             <select id="in-voice-track">
-              <option value="respoken" selected>Respoken lines</option>
+              <option value="respoken" selected>Respoken narration</option>
               <option value="original">Original recording</option>
             </select>
             <span class="hint">What you hear when you play the preview. The
-              export always uses the respoken lines.</span>
+              export always uses the respoken narration.</span>
           </div>
           <div class="field">
-            <label for="in-voice-stretch">Video may stretch</label>
-            <input type="number" id="in-voice-stretch" value="50" min="0" max="100" step="5">
-            <span class="hint">Percent the picture may speed up or slow down to
-              fit a respoken line. A longer line only ever uses what it needs —
-              usually a few percent — so lower this only if you would rather
-              have a pause than a faster picture. 0 never touches the picture.</span>
+            <label for="in-voice-pause">Pause between sentences <span class="lu">(s)</span></label>
+            <input type="number" id="in-voice-pause" value="0.36" min="0" max="2" step="0.02">
+            <span class="hint">How long a beat is. A paragraph break gets about
+              twice this, a comma or a colon rather less. It is baked into the
+              audio, so changing it needs a new take.</span>
           </div>
           <div class="field">
-            <label for="in-voice-deadair">Dead air threshold</label>
-            <input type="number" id="in-voice-deadair" value="0.15" min="0" max="3" step="0.05">
-            <span class="hint">Seconds of pause to keep when a respoken line is
-              shorter than the one it replaces. Anything past this is trimmed by
-              running that section faster.</span>
+            <label for="in-voice-stretch">Video may stretch <span class="lu">(%)</span></label>
+            <input type="number" id="in-voice-stretch" value="50" min="0" max="200" step="5">
+            <span class="hint">How far the picture may speed up or slow down to
+              keep pace with the new narration. Where speeding up is not enough
+              — a paragraph you deleted — the footage it no longer covers is
+              cut instead. Changing this re-times a narration you have already
+              respoken, without generating it again.</span>
           </div>
         </div>
-        <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px;align-items:center">
-          <label style="display:flex;gap:6px;align-items:center;font-size:.9rem">
-            <input type="checkbox" id="in-voice-trim" checked>
-            Trim dead air
-          </label>
+
+        <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:12px;align-items:center">
           <button class="btn" id="btn-voice-all" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Respeak the whole script</button>
           <button class="btn" id="btn-voice-all-cancel" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--danger)">Stop</button>
+          <button class="btn" id="btn-voice-undo" type="button" hidden style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Back to the recording</button>
           <button class="btn" id="btn-voice-ref" type="button" style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Use a different reference clip</button>
         </div>
         <p class="small muted" style="margin:6px 0 0">
-          Respeaking every line delivers the whole narration again in your
-          voice, each line staying at its own timestamp so the picture still
-          matches. It also blends better than replacing one line does: there is
-          no join between generated speech and the recording left anywhere,
-          because none of the recording remains.
+          Respeaking replaces any speed-ups you set by hand — the plan decides
+          how fast the picture runs now — but the sections you removed stay
+          removed, and the narration is written around them.
         </p>
+        <p class="small muted" id="voice-plan" style="margin:8px 0 0"></p>
         <p class="small muted" id="voice-ref" style="margin:8px 0 0"></p>
         <p class="small muted" id="hint-voice-audio" style="margin:8px 0 0"></p>
         <div class="progress" id="voice-progress"><div></div></div>
@@ -358,6 +381,8 @@ layout: null
     <!-- STEP 3 · SETTINGS -->
     <section class="panel step-pane" data-pane="settings" id="pane-settings" hidden>
       <h2 style="margin-top:0">Compression settings</h2>
+      <p class="small muted" id="source-summary" style="margin:-4px 0 4px"></p>
+      <p class="small muted" id="output-summary" style="margin:0 0 4px"></p>
 
       <!-- Final-track preview is relocated here while on this step -->
       <div id="host-settings" style="margin-bottom:16px"></div>
@@ -620,7 +645,7 @@ layout: null
         so they show in every player and on every site.
       </p>
       <p>
-        <strong>Respeaking a line</strong> uses
+        <strong>Respeaking the narration</strong> uses
         <a href="https://github.com/kyutai-labs/pocket-tts" target="_blank" rel="noopener">Kyutai&rsquo;s Pocket TTS</a>
         &mdash; a small speech model whose weights are licensed
         <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC&nbsp;BY&nbsp;4.0</a>
@@ -632,7 +657,10 @@ layout: null
         the clearest stretch of <em>your own recording</em> as its reference &mdash;
         nothing to record, and the same microphone and room come with it. The
         model downloads once (146&nbsp;MB) and then runs entirely on your CPU;
-        as with captions, only the model comes <em>in</em>. Kyutai&rsquo;s terms
+        as with captions, only the model comes <em>in</em>. The whole script is
+        spoken in one pass, sentence after sentence, and the picture is then
+        re-timed to it &mdash; so there is no join anywhere between generated
+        speech and the recording. Kyutai&rsquo;s terms
         prohibit cloning a voice without explicit and lawful consent, which is
         why this is built for respeaking narration you recorded yourself.
       </p>

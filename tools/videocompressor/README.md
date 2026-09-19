@@ -62,7 +62,7 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
 - **Audio** — AAC audio is **copied through unchanged** via
   `addAudioChunkRaw` (remuxed, never re-encoded) by default. Non-AAC audio is
   dropped, and the UI says so. When something *does* change the samples — a
-  boost, a speed change, a ducked breath, a respoken line — the track has to be
+  boost, a speed change, a ducked breath, a respoken narration — the track has to be
   re-encoded, and `pickAudioEncoder()` decides how: AAC when the browser can
   encode it (macOS, Windows), otherwise **Opus**, which is valid in MP4 and
   which Chrome can encode everywhere. Chrome on Linux has no AAC encoder at
@@ -179,6 +179,73 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     boost). A soft, switchable subtitle track isn't offered: mp4-muxer can't
     write text tracks.
 
+- **Respeak the narration** (optional) — rewrite what the video says and have
+  the whole thing delivered again in your own voice, with the picture re-timed
+  to match:
+
+  ```
+  transcript ─► script (prose) ─► sentences ─► Pocket TTS (one pass) ─► narration
+                     │                                                      │
+                     └──── patience diff ────► where each sentence was ─────┤
+                                                                            ▼
+                                        rates & cuts per section  ◄── planTimeline
+                                                                            │
+                                            captions for what is now said ◄─┘
+  ```
+
+  - **Why the whole script.** The first version of this respoke one transcript
+    phrase at a time into the hole its recorded phrase left. It worked and it
+    sounded wrong: every phrase was a separate generation with its own prosody,
+    time-stretched by its own amount into a slot whose length came from how
+    fast you happened to say it the first time, with the old recording's pauses
+    between. Correct sentences that did not sound like anybody talking. So the
+    narration is now the spine and the picture is re-timed to it — a screencast
+    tolerates that easily; a chopped-up voice track does not.
+  - **The script** is the transcript as prose (a silence over 1.5 s starts a
+    paragraph), in a textarea you can rewrite freely. It keeps following the
+    transcript until you type in it, so a scientific word fixed in the line
+    list above is fixed in what gets spoken.
+  - **Pauses follow the punctuation.** `splitScript` cuts the script into
+    sentences — leaving "Fig. 3", "Dr. J. Smith" and "0.5 mm" alone — and gives
+    each one the gap its own ending asks for, from one `Pause between
+    sentences` setting (a paragraph break gets about twice it, a comma rather
+    less). The worker speaks the sentences back to back and decodes all of them
+    in **one streamed pass**, so the mimi decoder's state carries across every
+    join: there is no splice between sentences to hear.
+  - **Where each sentence goes** comes from a **patience diff** of the script's
+    words against the transcript's. Words appearing exactly once on each side
+    are unambiguous anchors; the longest increasing run of them pins the two
+    texts together, and the stretches between are matched recursively. A
+    rewritten introduction still lands on the right footage, because the
+    sentences around it did. A passage that matched nothing at all is placed
+    between its neighbours in proportion to how much there is to say.
+  - **Re-timing the picture.** Every (recording time, narration time) pair is
+    an anchor, and the stretch between two anchors is a section that must
+    occupy exactly its share of the narration — i.e. it has a *rate*, which
+    `state.edits` already understands. One rate per sentence gives some absurd
+    ones, so `planTimeline` drops anchors — worst offender first — merging two
+    sections into one gentler rate until everything is inside the band `Video
+    may stretch` allows. Where even the fastest allowed rate cannot fit a
+    section (the paragraph you deleted), the surplus footage is **cut**. Where
+    there are more words than picture, the section runs slower than asked and
+    the status line says so, because there is no more footage to show.
+  - **One measurement for the whole narration.** Tone matching, level matching
+    and the room tone laid under it are all measured once, over all of it.
+    Per-sentence measurements give each sentence a slightly different answer,
+    heard as the voice shifting under you from line to line. The export then
+    takes *contiguous windows* of that one buffer, one per section, so
+    consecutive sections are continuous audio and nothing has to be crossfaded.
+  - **The captions follow the new narration**, rebuilt from the sentence
+    timings and mapped back through the plan, so what is burned in is what is
+    now being said. The sections you cut by hand survive a respeak (the plan is
+    made in *kept* time and written around them); speed-ups you set by hand do
+    not, because the plan decides the speed now.
+  - The voice is cloned zero-shot from the clearest 6&ndash;15 s of the
+    recording itself, so there is no sample to record and the same microphone
+    and room come with it. **Only clone a voice you have the right to use** —
+    the model's terms require lawful consent, and this is built for respeaking
+    your own narration.
+
 ## Large files (multi-GB)
 
 A single `ArrayBuffer` in Chrome is capped near 2 GB, so the whole file is never
@@ -212,12 +279,12 @@ reached, so trims near the start of a long video finish quickly.
 | `captions.js` | ES module: the pure caption logic — 16 kHz resampler, `detectSpeech`/`compactSpeech`/`mapCompactSpan`, window planning, `mergeChunkWords`, words → cues, `cueAt`, and `drawCaption` (used by both the preview overlay and the encoder). No DOM/model, so it runs under Node too. |
 | `captions-ui.js` | ES module: the interactive half — model presets and the WebGPU probe, the transcription job and its worker, the editable cue list, the preview overlay, and caption persistence. Gets the DOM, the state and a few timeline/audio helpers from `compressor.js` through one `ctx` object. |
 | `captions-worker.js` | Module Web Worker: loads Whisper through transformers.js, detects the language, transcribes chunk by chunk and posts words (with timestamps) back as it goes. Jobs are id-tagged and serialized so a cancelled one can't interleave with a new one. |
-| `voice.js` | ES module: the pure overdub logic — which transcript lines changed, where a replacement may start and stop (`snapSpan`), which few seconds to clone from (`pickReference`), and fitting a generation into its slot (`fitToDuration`, `matchLevel`, `shapeEnds`, `finishDub`). No DOM or model, so it runs under Node, which is where `voice.test.mjs` tests it. |
+| `voice.js` | ES module: the pure overdub logic — turning a transcript into a script and a script into sentences (`scriptFromCues`, `splitScript`), aligning a rewritten script back onto the recording (`matchWords`, `alignScript`), re-timing the picture to it (`planTimeline`), captions for what is now said (`narrationWords`), which few seconds to clone from (`pickReference`), and finishing the narration (`finishNarration`, `matchTone`, `matchVoiceLevel`, `findRoomTone`). No DOM or model, so it runs under Node, which is where `voice.test.mjs` tests it. |
 | `voice.test.mjs` | Node test for the above. `node voice.test.mjs`. |
 | `voice-tokenizer.js` | ES module: a minimal SentencePiece reader (protobuf) and unigram Viterbi segmenter with byte fallback, so the voice model's `tokenizer.model` can be used directly rather than vendoring a converted copy per language. |
 | `voice-tokenizer.test.mjs` | Node test for the above, against models built in the test. `node voice-tokenizer.test.mjs`. |
-| `voice-ui.js` | ES module: the interactive half of overdub — the model download and its cache probe, choosing and decoding the reference clip, respeaking a line, and handing the encoder finished samples through `pcmFor()`. Gets its DOM/state/timeline through one `ctx`, like `captions-ui.js`. |
-| `voice-worker.js` | Module Web Worker: runs the five Pocket TTS ONNX graphs on onnxruntime-web. A port of the reference Python driver, including the hand-threaded KV cache that *is* the cloned voice. |
+| `voice-ui.js` | ES module: the interactive half of overdub — the model download and its cache probe, choosing and decoding the reference clip, the script box, respeaking the script and applying the timeline it implies, and handing the encoder slices of the finished narration through `pcmFor()`. Gets its DOM/state/timeline through one `ctx`, like `captions-ui.js`. |
+| `voice-worker.js` | Module Web Worker: runs the five Pocket TTS ONNX graphs on onnxruntime-web. A port of the reference Python driver, including the hand-threaded KV cache that *is* the cloned voice. Takes a whole script as `parts` and speaks them back to back, decoding all of them in one streamed pass so the joins between sentences are continuous audio. |
 | `voice-bench.html` | Development harness, not linked from the tool: clone from a WAV and speak a line, to check the port against the Python reference. |
 | `REQUIREMENTS.md` | Living spec / design notes — update with every change. |
 | `vendor/mp4box/` | Vendored MP4Box.js UMD bundle + license. |

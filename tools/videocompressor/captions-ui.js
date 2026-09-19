@@ -326,7 +326,8 @@ export function createCaptions(ctx) {
     const toSource = (o) => timeline.fromOutputTime(o, j.segs);
     state.captions = {
       // `orig` is what the model said; `text` is what the user may have
-      // retyped. Overdub respeaks a line exactly when the two differ.
+      // retyped — a scientific word the model spelled its own way. Keeping
+      // both is what lets a line be put back.
       cues: wordsToCues(onOutput).map((c) => ({ start: toSource(c.start), end: toSource(c.end), text: c.text, orig: c.text })),
       // The word timings are kept, not just the cues they get merged into. A
       // cue spans a whole phrase *including its pauses* — consecutive cues are
@@ -334,8 +335,8 @@ export function createCaptions(ctx) {
       // about where speech actually stops. Word spans do, and that's what the
       // breath detector needs to know where the gaps are.
       // The text rides along too: overdub picks its cloning reference out of
-      // these, and showing which words it is about to imitate is the
-      // difference between a trustworthy button and a magic one.
+      // these, and a respoken script is aligned back onto the recording by
+      // matching its words against them.
       words: onOutput.map((w) => ({ start: toSource(w.start), end: toSource(w.end), text: w.text })),
       language: j.language, model: j.preset.key, segs: j.segs,
     };
@@ -346,6 +347,11 @@ export function createCaptions(ctx) {
   async function generate() {
     const state = getState();
     if (!state || !state.isAac || job) return;
+    // A respoken script's timeline and captions are derived from the old
+    // transcript. Re-transcribing replaces that transcript, so the derivation
+    // has to go first — otherwise the picture keeps a plan built from words
+    // that are no longer there.
+    if (voice && voice.isRespoken()) voice.revertScript();
     const st = state;
     const p = preset(els.inCapModel.value);
     const j = job = {
@@ -415,6 +421,9 @@ export function createCaptions(ctx) {
           : outcome === 'cancelled' ? (j.words.length ? `Stopped — kept the ${n} captions transcribed so far.` : 'Stopped.')
           : `Captions failed: ${errMsg}${p.key !== 'base' ? ' A smaller model may work better on this device.' : ''}`);
         save();
+        // The script box starts as the transcript: it is the draft nobody
+        // should have to retype.
+        if (voice) voice.fillScriptFromTranscript();
         renderList();
         updateUI();
         onChanged();
@@ -440,6 +449,7 @@ export function createCaptions(ctx) {
   function clear() {
     const state = getState();
     if (!state || job) return;
+    if (voice && voice.isRespoken()) voice.revertScript();
     state.captions = null;
     save();
     renderList();
@@ -475,6 +485,11 @@ export function createCaptions(ctx) {
   function rowActions(start, end) {
     const wrap = document.createElement('span');
     wrap.style.cssText = 'display:flex;gap:4px;flex:0 0 auto';
+    // Once a script has been respoken, the picture's speed is the plan's to
+    // decide — offering per-line speed-ups here would fight it and desync the
+    // narration. Cutting is still meaningful, but it would cut words out of
+    // the middle of a sentence, so the whole column steps back.
+    if (voice && voice.isRespoken()) return wrap;
     const edit = ctx.edits.at(start + 0.01);
     const covers = edit && edit.start <= start + 0.05 && edit.end >= end - 0.05;
     if (covers) {
@@ -513,7 +528,7 @@ export function createCaptions(ctx) {
     }
     if (state.durationS - prevEnd > GAP_MIN) gaps.push({ start: prevEnd, end: state.durationS });
 
-    if (gaps.length) {
+    if (gaps.length && !(voice && voice.isRespoken())) {
       const bar = document.createElement('div');
       bar.style.cssText = 'display:flex;gap:6px;align-items:center;padding:4px 0 8px;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap';
       const label = document.createElement('span');
@@ -528,6 +543,15 @@ export function createCaptions(ctx) {
         actionButton('cut all', 'Remove every one of those silences',
           () => { for (const g of gaps) ctx.edits.apply(g.start, g.end, 0); }, 'danger'));
       frag.appendChild(bar);
+    }
+
+    if (voice && voice.isRespoken()) {
+      const note = document.createElement('p');
+      note.className = 'small muted';
+      note.style.cssText = 'margin:0 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)';
+      note.textContent = 'These lines follow the respoken narration, not the recording. '
+        + 'Editing one changes the subtitle only — to change what is said, edit the script and respeak.';
+      frag.appendChild(note);
     }
 
     const gapRow = (start, end) => {
@@ -552,16 +576,19 @@ export function createCaptions(ctx) {
       return row;
     };
 
+    const showGaps = !(voice && voice.isRespoken());
     let last = 0;
     for (const c of caps.cues) {
-      if (c.start - last > GAP_MIN) frag.appendChild(gapRow(last, c.start));
+      if (showGaps && c.start - last > GAP_MIN) frag.appendChild(gapRow(last, c.start));
       last = Math.max(last, c.end);
 
       const os = timeline.toOutputTime(c.start), oe = timeline.toOutputTime(c.end);
-      const edit = ctx.edits.at(c.start + 0.01);
-      const cut = !!edit && !(edit.rate > 0);
+      // "Is this line still in the video?" is a question about output time:
+      // a line that occupies none of it is gone, however its source seconds
+      // happen to line up with the sections that were removed.
+      const cut = oe - os <= 0.02;
       const row = document.createElement('div');
-      row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${cut || oe - os <= 0.02 ? 'opacity:.45' : ''}`;
+      row.style.cssText = `display:flex;gap:8px;align-items:center;padding:3px 0;${cut ? 'opacity:.45' : ''}`;
       const time = document.createElement('button');
       time.type = 'button';
       time.textContent = cut ? 'cut' : fmt.fmtTime(os);
@@ -572,11 +599,16 @@ export function createCaptions(ctx) {
       input.type = 'text';
       input.value = c.text;
       input.style.cssText = 'flex:1;min-width:0';
-      input.oninput = () => { c.text = input.value; renderOverlay(); queueSave(); refreshDub(); };
-      // Respeaking is offered on every line, not only edited ones. Changing
-      // the words is one reason to respeak; disliking how you said them is
-      // just as good a one, and the transcript can be perfectly correct while
-      // the delivery is not.
+      input.oninput = () => {
+        c.text = input.value;
+        renderOverlay();
+        queueSave();
+        refreshUndo();
+        // The script follows the transcript until somebody edits it, so a
+        // spelling fixed here is a spelling fixed in what will be spoken.
+        if (voice) voice.fillScriptFromTranscript();
+      };
+
       const smallBtn = (bg) => {
         const b = document.createElement('button');
         b.type = 'button';
@@ -584,78 +616,35 @@ export function createCaptions(ctx) {
           + `border:1px solid var(--border);background:${bg};color:inherit;cursor:pointer`;
         return b;
       };
-      const undoBtn = smallBtn('var(--panel-2)');   // put the transcript text back
-      const dubBtn = smallBtn('var(--panel-2)');    // respeak / undo respeak
 
       // Hear just this line, as it will be in the export — sped up if it's in
-      // a fast section, respoken if it's been respoken. A second button
-      // appears once there's a dub, so the two can be compared back to back.
+      // a fast section, and respoken if the script has been.
       const playBtn = smallBtn('var(--panel-2)');
       playBtn.textContent = '▶';
       playBtn.title = 'Play this line';
       playBtn.onclick = () => ctx.playLine(c.start, c.end, { dubs: true });
-      const playOrigBtn = smallBtn('var(--panel-2)');
-      playOrigBtn.textContent = '▶ orig';
-      playOrigBtn.title = 'Play the original recording of this line';
-      playOrigBtn.onclick = () => ctx.playLine(c.start, c.end, { dubs: false });
 
-      const refreshDub = () => {
-        playOrigBtn.hidden = !c.dub;      // nothing to compare against otherwise
-        if (!voice) { dubBtn.hidden = true; undoBtn.hidden = true; return; }
-        const edited = voice.isChanged(c);
-
-        // Restoring the transcript means going back to the recording, so it
-        // drops the respoken audio with it — otherwise you'd be left with a
-        // generated line claiming to be what the model heard.
-        undoBtn.hidden = !edited;
-        undoBtn.textContent = 'restore text';
-        undoBtn.title = 'Put the transcribed wording back' + (c.dub ? ' (and drop the respoken audio)' : '');
-        undoBtn.onclick = () => {
-          c.text = c.orig;
-          input.value = c.orig;
-          if (c.dub) voice.revert(c);
-          renderOverlay();
-          queueSave();
-          renderList();
-        };
-
-        dubBtn.hidden = false;
-        const state = voice.jobState(c);
-        if (state) {
-          // Clicking a second line while the first is generating queues it.
-          // Saying so on the row is the whole point — the version that
-          // silently refused looked like a hung page.
-          dubBtn.disabled = true;
-          dubBtn.textContent = state === 'running' ? 'respeaking…' : 'queued';
-          dubBtn.title = state === 'running'
-            ? 'Generating this line now'
-            : 'Waiting for the lines ahead of it';
-          dubBtn.onclick = null;
-        } else if (c.dub) {
-          dubBtn.disabled = false;
-          dubBtn.textContent = 'undo respeak';
-          dubBtn.title = 'Put the original recording back for this line';
-          dubBtn.onclick = () => { voice.revert(c); renderList(); };
-        } else {
-          dubBtn.disabled = false;
-          dubBtn.textContent = 'respeak';
-          dubBtn.title = edited
-            ? 'Say this line as you typed it, in your voice'
-            : 'Say this line again in your voice — for when the words are right but the delivery wasn’t';
-          dubBtn.onclick = () => {
-            // Not awaited: the queue owns the ordering, and the list repaints
-            // from voice-ui's onChanged as each line starts and finishes.
-            voice.respeak(c).catch((e) => {
-              if (e && e.message !== 'cancelled') voice.setStatus(e.message);
-            });
-          };
-        }
+      // Fixing a scientific word in the transcript is the common edit here, so
+      // there is one way back from it.
+      const undoBtn = smallBtn('var(--panel-2)');
+      undoBtn.textContent = 'restore text';
+      undoBtn.title = 'Put the transcribed wording back';
+      undoBtn.onclick = () => {
+        c.text = c.orig;
+        input.value = c.orig;
+        renderOverlay();
+        queueSave();
+        renderList();
       };
-      refreshDub();
-      row.append(time, input, playBtn, playOrigBtn, undoBtn, dubBtn, rowActions(c.start, c.end));
+      const refreshUndo = () => {
+        undoBtn.hidden = typeof c.orig !== 'string'
+          || c.orig.replace(/\s+/g, ' ').trim() === String(c.text || '').replace(/\s+/g, ' ').trim();
+      };
+      refreshUndo();
+      row.append(time, input, playBtn, undoBtn, rowActions(c.start, c.end));
       frag.appendChild(row);
     }
-    if (state.durationS - last > GAP_MIN) frag.appendChild(gapRow(last, state.durationS));
+    if (showGaps && state.durationS - last > GAP_MIN) frag.appendChild(gapRow(last, state.durationS));
 
     list.appendChild(frag);
     list.hidden = false;
@@ -697,11 +686,15 @@ export function createCaptions(ctx) {
     const state = getState();
     const out = [];
     for (const c of state.captions.cues) {
-      // A silent time-lapse has nothing to say: flashing its transcript past at
-      // 8× would be unreadable noise over footage nobody can hear.
-      const edit = ctx.edits.at(c.start + 0.01);
-      if (edit && edit.rate !== 1 && edit.audio !== 'keep') continue;
       const start = timeline.toOutputTime(c.start), end = timeline.toOutputTime(c.end);
+      // A silent time-lapse has nothing to say: flashing its transcript past at
+      // 8× would be unreadable noise over footage nobody can hear. Which
+      // section a cue belongs to is asked at the middle of the time it is
+      // actually on screen, not at its first source second: a respoken line
+      // routinely starts exactly where a removed section does, and asking
+      // there would drop the caption for a line that is still spoken.
+      const edit = ctx.edits.at(timeline.fromOutputTime((start + end) / 2));
+      if (edit && edit.rate !== 1 && edit.audio !== 'keep') continue;
       const text = c.text.trim();
       if (end - start > 0.05 && text) out.push({ start, end, text });
     }
@@ -717,7 +710,10 @@ export function createCaptions(ctx) {
     try {
       if (state.captions && state.captions.cues.length) {
         const f = state.file;
-        localStorage.setItem(LS_CAP_KEY, JSON.stringify({ v: 1, file: { name: f.name, size: f.size, lastModified: f.lastModified }, ...state.captions }));
+        const { beforeRespeak, ...caps } = state.captions;
+        localStorage.setItem(LS_CAP_KEY, JSON.stringify({
+          v: 1, file: { name: f.name, size: f.size, lastModified: f.lastModified }, ...caps,
+        }));
       } else {
         localStorage.removeItem(LS_CAP_KEY);
       }

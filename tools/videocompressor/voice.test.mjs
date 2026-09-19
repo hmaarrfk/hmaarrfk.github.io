@@ -1,16 +1,17 @@
 // node voice.test.mjs — the pure overdub logic, without a model or a browser.
 //
-// Everything here is synthetic and checkable by hand: word timings with
-// known pauses, tones of known length and level. What is being tested is
-// that a generated line lands in exactly the hole it was meant to fill, at
-// the level of the voice around it, with its seams in the pauses rather
-// than on the words.
+// Everything here is synthetic and checkable by hand: word timings with known
+// pauses, scripts whose sentences are obvious, tones of known length and
+// level. What is being tested is that a rewritten script lands on the seconds
+// it describes, that the picture is re-timed to it inside the limits it was
+// given, and that the narration comes back at the level of the voice around
+// it with the room still under it.
 import assert from 'node:assert/strict';
 import {
-  changedLines, isChanged, snapSpan, pickReference, fitToDuration, rms,
-  matchLevel, shapeEnds, toInterleaved, toMono, finishDub, naturalRate,
-  planFit, fillWithRoomTone, matchVoiceLevel, findRoomTone, layRoomTone,
-  crossfadeEdges, matchTone, FIT_MIN_RATE, FIT_MAX_RATE,
+  pickReference, rms, matchLevel, shapeEnds, toInterleaved, toMono,
+  fillWithRoomTone, matchVoiceLevel, findRoomTone, layRoomTone, matchTone,
+  scriptFromCues, splitSentences, splitScript, normWord, scriptWords,
+  matchWords, alignScript, planTimeline, narrationWords, finishNarration,
 } from './voice.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
 
@@ -21,124 +22,13 @@ const test = (name, fn) => {
 };
 
 const SR = 48000;
-// A steady tone is enough for level and length work; WSOLA keeps its pitch,
-// which is the property being checked.
+// A steady tone is enough for level and length work.
 const tone = (seconds, { freq = 200, amp = 0.2, sampleRate = SR } = {}) => {
   const n = Math.round(seconds * sampleRate);
   const a = new Float32Array(n);
   for (let i = 0; i < n; i++) a[i] = amp * Math.sin((2 * Math.PI * freq * i) / sampleRate);
   return a;
 };
-
-// ---------------------------------------------------------------------------
-console.log('\nwhat changed');
-
-test('an untouched line is not a change', () => {
-  assert.equal(isChanged({ text: 'hello there', orig: 'hello there' }), false);
-});
-
-test('whitespace alone is not a change', () => {
-  assert.equal(isChanged({ text: '  hello   there ', orig: 'hello there' }), false);
-});
-
-test('a real edit is a change', () => {
-  assert.equal(isChanged({ text: 'hello world', orig: 'hello there' }), true);
-});
-
-test('a line that was never transcribed is never a change', () => {
-  assert.equal(isChanged({ text: 'typed by hand' }), false);
-});
-
-test('changedLines returns only the edited ones', () => {
-  const cues = [
-    { text: 'one', orig: 'one' },
-    { text: 'two but different', orig: 'two' },
-    { text: 'three', orig: 'three' },
-    { text: 'four changed', orig: 'four' },
-  ];
-  assert.deepEqual(changedLines(cues).map((c) => c.text), ['two but different', 'four changed']);
-});
-
-// ---------------------------------------------------------------------------
-console.log('\nwhere the seam goes');
-
-test('edges move to the middle of the surrounding pauses', () => {
-  // ... word ends 1.0 | pause | line 1.4-2.6 | pause | word starts 3.0 ...
-  const words = [
-    { start: 0.5, end: 1.0, text: 'before' },
-    { start: 1.4, end: 2.0, text: 'the' },
-    { start: 2.1, end: 2.6, text: 'line' },
-    { start: 3.0, end: 3.5, text: 'after' },
-  ];
-  const s = snapSpan(1.4, 2.6, words);
-  assert.ok(Math.abs(s.start - 1.2) < 1e-6, `start ${s.start}`);
-  assert.ok(Math.abs(s.end - 2.8) < 1e-6, `end ${s.end}`);
-  assert.equal(s.snapped, true);
-});
-
-test('a long pause is reached into, but only as far as allowed', () => {
-  const words = [
-    { start: 0, end: 1.0, text: 'before' },
-    { start: 5.0, end: 6.0, text: 'line' },
-    { start: 9.0, end: 10.0, text: 'after' },
-  ];
-  const s = snapSpan(5.0, 6.0, words, { maxSnapS: 0.25 });
-  // The middle of a 4 s gap is 2 s away and pointless; a quarter of a second
-  // of it is all that's needed to get the seam off the word.
-  assert.ok(Math.abs(s.start - 4.75) < 1e-6, `start ${s.start}`);
-  assert.ok(Math.abs(s.end - 6.25) < 1e-6, `end ${s.end}`);
-  assert.ok(Math.abs(s.lead - 0.25) < 1e-6, `lead ${s.lead}`);
-  assert.ok(Math.abs(s.tail - 0.25) < 1e-6, `tail ${s.tail}`);
-});
-
-test('the seam never lands on the word it is replacing', () => {
-  // This is the whole point: a word timestamp is an alignment, so the real
-  // onset may be a little before it. Start the replacement on the timestamp
-  // and the original says the first syllable before the clone says the line.
-  const words = [
-    { start: 0.0, end: 0.8, text: 'before' },
-    { start: 1.6, end: 2.4, text: 'line' },
-    { start: 2.7, end: 3.4, text: 'after' },
-  ];
-  for (const maxSnapS of [0.1, 0.25, 0.5]) {
-    const s = snapSpan(1.6, 2.4, words, { maxSnapS });
-    assert.ok(s.start < 1.6 - 1e-6, `start ${s.start} must be inside the pause`);
-    assert.ok(s.start > 0.8, `start ${s.start} must not reach the word before`);
-    assert.ok(s.end > 2.4 + 1e-6, `end ${s.end} must be inside the pause`);
-    assert.ok(s.end < 2.7, `end ${s.end} must not reach the word after`);
-  }
-});
-
-test('two respoken lines either side of one pause meet without overlapping', () => {
-  const words = [
-    { start: 0.0, end: 1.0, text: 'one' },
-    { start: 1.3, end: 2.0, text: 'two' },
-  ];
-  const first = snapSpan(0.0, 1.0, words);
-  const second = snapSpan(1.3, 2.0, words);
-  assert.ok(Math.abs(first.end - second.start) < 1e-6,
-    `${first.end} vs ${second.start}: no recording may be left between them, and none shared`);
-});
-
-test('a stop closure is too small a gap to snap into', () => {
-  const words = [
-    { start: 0, end: 1.0 },
-    { start: 1.02, end: 2.0 },      // 20 ms: not a pause, just a consonant
-    { start: 2.02, end: 3.0 },
-  ];
-  const s = snapSpan(1.02, 2.0, words, { minGapS: 0.04 });
-  assert.equal(s.start, 1.02);
-  assert.equal(s.end, 2.0);
-});
-
-test('a line at the very start or end keeps its own edge', () => {
-  const words = [{ start: 0, end: 1.0 }, { start: 1.5, end: 2.0 }];
-  const first = snapSpan(0, 1.0, words);
-  assert.equal(first.start, 0, 'nothing before it to snap to');
-  assert.ok(first.end > 1.0, 'but the end still moves into the pause');
-  const last = snapSpan(1.5, 2.0, words);
-  assert.equal(last.end, 2.0, 'nothing after it to snap to');
-});
 
 // ---------------------------------------------------------------------------
 console.log('\nwhat to clone from');
@@ -177,90 +67,6 @@ test('a reference is only taken from kept audio', () => {
   assert.ok(ref.start >= 18, `picked ${ref.start}, which is in a removed section`);
 });
 
-// ---------------------------------------------------------------------------
-console.log('\nfitting it to the hole');
-
-test('a dub that is too long is squeezed to exactly the slot', () => {
-  const dub = tone(1.3);
-  const target = Math.round(1.0 * SR);
-  const r = fitToDuration(dub, SR, target);
-  assert.equal(r.pcm.length, target, 'exact sample count');
-  assert.ok(Math.abs(r.rate - 1.3) < 0.01, `rate ${r.rate}`);
-  assert.equal(r.clamped, false);
-});
-
-test('a dub that is short keeps its own pace and leaves the pause', () => {
-  const dub = tone(0.8);
-  const target = Math.round(1.0 * SR);
-  const r = fitToDuration(dub, SR, target);
-  assert.equal(r.pcm.length, target, 'still exactly the slot');
-  assert.equal(r.rate, 1, 'not slowed down to fill the gap');
-  assert.ok(Math.abs(r.spoken - dub.length) < 2, 'all of it is spoken');
-  // The tail is the pause it was always sitting in — quiet, but not a dropout.
-  const tail = rms(r.pcm, Math.round(0.85 * SR), target);
-  assert.ok(tail < rms(dub) / 4, 'the tail is far quieter than the speech');
-});
-
-test('the pad is faded into, so a short dub cannot click', () => {
-  const dub = tone(0.5, { amp: 0.3 });
-  const r = fitToDuration(dub, SR, Math.round(1.0 * SR));
-  // The very last spoken sample should be on its way to zero, not full level.
-  assert.ok(Math.abs(r.pcm[r.spoken - 1]) < 0.02, `ends at ${r.pcm[r.spoken - 1]}`);
-  // A single sample of a sine can sit on a zero crossing, so measure a window.
-  assert.ok(rms(r.pcm, Math.round(0.2 * SR), Math.round(0.3 * SR)) > 0.1, 'but the middle is untouched');
-});
-
-test('squeezing keeps the level (WSOLA overlap-add sums to one)', () => {
-  const dub = tone(1.2, { amp: 0.25 });
-  const r = fitToDuration(dub, SR, Math.round(1.0 * SR));
-  const before = rms(dub), after = rms(r.pcm, SR * 0.1, SR * 0.9);
-  const db = 20 * Math.log10(after / before);
-  assert.ok(Math.abs(db) < 1.5, `level moved ${db.toFixed(2)} dB`);
-});
-
-test('an impossible fit is clamped and says so', () => {
-  const dub = tone(3.0);                    // three times too long
-  const target = Math.round(1.0 * SR);
-  const r = fitToDuration(dub, SR, target);
-  assert.equal(r.clamped, true, 'the caller has to know it did not fit');
-  assert.ok(Math.abs(r.rate - FIT_MAX_RATE) < 1e-6, `clamped to ${r.rate}`);
-  assert.equal(r.pcm.length, target, 'still exactly the slot length');
-  assert.ok(Math.abs(r.wanted - 3.0) < 0.01, 'and reports what it would have needed');
-});
-
-test('an empty generation still fills its slot with silence', () => {
-  const r = fitToDuration(new Float32Array(0), SR, 4800);
-  assert.equal(r.pcm.length, 4800);
-  assert.equal(rms(r.pcm), 0);
-});
-
-test('the borrowed pause at the head stays pause, and the line keeps its cue', () => {
-  const dub = tone(0.6, { amp: 0.25 });
-  const target = Math.round(1.0 * SR);
-  const lead = Math.round(0.2 * SR);
-  const r = fitToDuration(dub, SR, target, { leadSamples: lead });
-  assert.equal(r.pcm.length, target, 'still exactly the slot');
-  assert.equal(r.lead, lead, 'the whole lead was spare');
-  assert.ok(rms(r.pcm, 0, lead - 100) < rms(dub) / 8, 'the head is quiet');
-  assert.ok(rms(r.pcm, lead + 2000, lead + dub.length - 2000) > rms(dub) / 2,
-    'and the speech is sitting after it');
-});
-
-test('a line that needs the whole hole does not get a lead', () => {
-  const dub = tone(1.4);                    // longer than the slot already
-  const target = Math.round(1.0 * SR);
-  const r = fitToDuration(dub, SR, target, { leadSamples: Math.round(0.2 * SR) });
-  assert.equal(r.lead, 0, 'silence is only spent on room that was going spare');
-  assert.equal(r.pcm.length, target);
-  assert.ok(rms(r.pcm, 0, 2000) > 0.05, 'the speech starts at the top of the span');
-});
-
-test('the lead is faded into as well, so it cannot click either', () => {
-  const dub = tone(0.5, { amp: 0.3 });
-  const lead = Math.round(0.2 * SR);
-  const r = fitToDuration(dub, SR, Math.round(1.0 * SR), { leadSamples: lead });
-  assert.ok(Math.abs(r.pcm[lead]) < 0.02, `starts at ${r.pcm[lead]}`);
-});
 
 
 // ---------------------------------------------------------------------------
@@ -530,47 +336,6 @@ test('room tone shorter than the line does not loop audibly', () => {
   assert.ok(same < tone.length * 0.6, 'the tone repeats itself exactly');
 });
 
-test('a crossfade starts from the recording, not from silence', () => {
-  const rec = recording();
-  const dub = new Float32Array(SR).fill(0.1);
-  const out = crossfadeEdges(dub, rec.subarray(0, SR), { channels: 1, sampleRate: SR, fadeMs: 30 });
-  assert.ok(Math.abs(out[0] - rec[0]) < 0.02, 'the first sample is the recording');
-  const mid = Math.round(SR * 0.5);
-  assert.ok(Math.abs(out[mid] - 0.1) < 1e-6, 'the middle is untouched dub');
-});
-
-test('a crossfade ends on the recording so the next span continues it', () => {
-  const rec = recording();
-  const dub = new Float32Array(SR).fill(0.1);
-  const orig = rec.subarray(0, SR);
-  const out = crossfadeEdges(dub, orig, { channels: 1, sampleRate: SR, fadeMs: 30 });
-  assert.ok(Math.abs(out[out.length - 1] - orig[orig.length - 1]) < 0.02, 'the last sample is the recording');
-});
-
-test('an equal-power crossfade of two room tones keeps the level steady', () => {
-  // Equal power rather than linear, because the two sides of the join are
-  // different noise: uncorrelated signals sum in power, so a linear fade would
-  // dip ~3 dB in the middle and the dip in the room tone is exactly the
-  // artefact being chased. (Crossfading a signal with *itself* would instead
-  // gain 3 dB — that case is correlated, and isn't what happens at a seam.)
-  const tone = findRoomTone(recording(), SR);
-  const half = Math.floor(tone.length / 2);
-  const dub = Float32Array.from(tone.subarray(0, half));
-  const orig = Float32Array.from(tone.subarray(half, half * 2));
-  const out = crossfadeEdges(dub, orig, { channels: 1, sampleRate: SR, fadeMs: 20 });
-  const n = Math.round(0.02 * SR);
-  const outside = rms(dub, n * 2, n * 4);
-  const inside = rms(out, 0, n);
-  assert.ok(Math.abs(20 * Math.log10(inside / outside)) < 2, `level moved ${(20 * Math.log10(inside / outside)).toFixed(2)} dB across the join`);
-});
-
-test('a crossfade survives stereo without swapping channels', () => {
-  const dub = new Float32Array(400);
-  const orig = new Float32Array(400);
-  for (let i = 0; i < 200; i++) { dub[i * 2] = 1; dub[i * 2 + 1] = -1; orig[i * 2] = 0.5; orig[i * 2 + 1] = -0.5; }
-  const out = crossfadeEdges(dub, orig, { channels: 2, sampleRate: SR, fadeMs: 1 });
-  for (let i = 0; i < 200; i++) assert.ok(out[i * 2] > 0 && out[i * 2 + 1] < 0, `channels crossed at frame ${i}`);
-});
 
 test('tone matching moves a dull line toward the recording', () => {
   const bright = recording(2, { gap: [9, 9] });
@@ -591,176 +356,248 @@ test('tone matching is bounded, and declines to act on nothing', () => {
   if (big.gainsDb) for (const g of big.gainsDb) assert.ok(Math.abs(g) <= 6 + 1e-6, `gain ${g} exceeded the limit`);
 });
 
-// ---------------------------------------------------------------------------
-console.log('\nthe whole finish');
 
-test('finishDub produces exactly the frames the span expects, in stereo', () => {
-  const model = tone(1.15, { freq: 180, amp: 0.05, sampleRate: 24000 });
-  const targetSamples = Math.round(1.0 * SR);
-  const out = finishDub(model, {
-    modelRate: 24000, outRate: SR, channels: 2, targetSamples,
-    targetDbfs: -20,
-    resample: linearResample,
-  });
-  assert.equal(out.frames, targetSamples);
-  assert.equal(out.pcm.length, targetSamples * 2, 'interleaved stereo');
-  assert.ok(out.gainDb > 0, 'the quiet generation was brought up');
-  const mono = toMono(out.pcm, 2);
-  assert.equal(mono[0], 0, 'still faded at the seam');
-});
-
-test('finishDub refuses to guess when it has no resampler', () => {
-  assert.throws(() => finishDub(tone(1, { sampleRate: 24000 }), {
-    modelRate: 24000, outRate: SR, channels: 1, targetSamples: 4800,
-  }), /resample/);
-});
-
-test('finishDub at a matching rate needs no resampler at all', () => {
-  const out = finishDub(tone(1.0), { modelRate: SR, outRate: SR, channels: 1, targetSamples: SR });
-  assert.equal(out.frames, SR);
-});
-
-// ---------------------------------------------------------------------------
-console.log('\nletting the section breathe instead');
-
-test('a longer line slows the picture rather than squeezing the speech', () => {
-  // The order matters and is the whole point: a few percent of picture is
-  // invisible, where squeezing speech is audible as soon as it does real work.
-  const p = planFit(3.0, 3.3, { maxVideoRate: 1.15, minVideoRate: 1 / 1.15 });
-  assert.equal(p.squeeze, 1, 'the speech was not touched');
-  assert.ok(p.rate < 1, 'the picture eased off instead');
-  assert.ok(Math.abs(p.outS - 3.3) < 1e-9, 'and the whole line fits');
-  assert.equal(p.padS, 0);
-});
-
-test('the picture only stretches as far as it is allowed', () => {
-  const p = planFit(3.0, 6.0, { maxVideoRate: 1.15, minVideoRate: 1 / 1.15 });
-  assert.ok(Math.abs(p.rate - 1 / 1.15) < 1e-9, `rate ${p.rate} exceeded the limit`);
-  assert.ok(p.squeeze > 1, 'the rest is taken out of the speech');
-});
-
-test('a line far too long to fit says how much did not fit', () => {
-  const p = planFit(3.0, 12.0, { maxVideoRate: 1.15, minVideoRate: 1 / 1.15 });
-  assert.ok(p.squeeze <= FIT_MAX_RATE + 1e-9, 'the squeeze is still bounded');
-  assert.ok(p.short > 0, 'and the shortfall is reported rather than hidden');
-});
-
-test('zero stretch leaves the picture completely alone', () => {
-  const p = planFit(3.0, 3.3, { maxVideoRate: 1, minVideoRate: 1 });
-  assert.equal(p.rate, 1, 'the picture never moves');
-  assert.ok(p.squeeze > 1, 'so the speech has to absorb all of it');
-});
-
-test('the dead-air threshold is a tolerance, not a trigger', () => {
-  // "Keep at most this much pause" — so what is left over is the threshold,
-  // not zero and not the whole gap. (Given enough stretch allowance to do it.)
-  const p = planFit(8.8, 4.6, { deadAirS: 0.15, maxVideoRate: 2 });
-  assert.equal(p.mode, 'natural');
-  assert.ok(Math.abs(p.outS - (4.6 + 0.15)) < 1e-6, `section runs ${p.outS}s, wanted 4.75s`);
-  assert.ok(Math.abs(p.padS - 0.15) < 1e-6, `left ${p.padS}s of pause`);
-});
-
-test('a gentle stretch limit trades dead air for a calm picture', () => {
-  // The conservation problem, stated as a test: a much shorter line cannot be
-  // both gentle on the picture and free of pause. With the limit at 15% the
-  // picture stays calm and the leftover shows up as pause, honestly reported.
-  const p = planFit(8.8, 4.6, { deadAirS: 0.15, maxVideoRate: 1.15 });
-  assert.ok(Math.abs(p.rate - 1.15) < 1e-9, `rate ${p.rate}`);
-  assert.ok(p.padS > 2, `expected real leftover pause, got ${p.padS.toFixed(2)}s`);
-  assert.ok(Math.abs(p.outS - 8.8 / 1.15) < 1e-9);
-});
-
-test('a pause already under the threshold is left alone', () => {
-  const p = planFit(3.0, 2.9, { deadAirS: 0.15 });
-  assert.equal(p.mode, 'fit');
-  assert.equal(p.rate, 1, 'the picture does not move');
-  assert.ok(Math.abs(p.padS - 0.1) < 1e-6);
-});
-
-test('a zero threshold removes the pause entirely, given the room to do it', () => {
-  const p = planFit(8.8, 4.6, { deadAirS: 0, maxVideoRate: 2 });
-  assert.ok(Math.abs(p.outS - 4.6) < 1e-6, `section runs ${p.outS}s`);
-  assert.ok(p.padS < 1e-6, 'no pause left');
-});
-
-test('the stretch limit wins over the dead-air threshold', () => {
-  // Two settings pulling opposite ways, and the picture's limit is the one
-  // that holds: asking for no pause cannot force a lurch.
-  const p = planFit(8.8, 4.6, { deadAirS: 0, maxVideoRate: 1.15 });
-  assert.ok(Math.abs(p.rate - 1.15) < 1e-9, `rate ${p.rate} broke the limit`);
-  assert.ok(p.padS > 0, 'the pause the limit could not remove is kept, not forced out');
-});
-
-test('the pause borrowed for the seam is not counted as dead air', () => {
-  // snapSpan reaches into the pause on either side so the seam lands in
-  // silence. That silence is part of the span but it was never the line's own
-  // dead air, and speeding the picture up to squeeze it out would be the tool
-  // reacting to its own edit.
-  const bare = planFit(3.0, 2.5, { deadAirS: 0.15, maxVideoRate: 1.5 });
-  assert.ok(bare.rate > 1, 'without the allowance this line trims');
-  const p = planFit(3.0, 2.5, { deadAirS: 0.15, maxVideoRate: 1.5, borrowedS: 0.4 });
-  assert.equal(p.mode, 'fit');
-  assert.equal(p.rate, 1, 'the picture is left alone');
-});
-
-test('turning trimming off keeps the whole pause', () => {
-  const p = planFit(8.8, 4.6, { trimDeadAir: false });
-  assert.equal(p.mode, 'fit');
-  assert.equal(p.rate, 1);
-  assert.ok(Math.abs(p.padS - 4.2) < 1e-6);
-});
-
-test('the speed-up is bounded, and the leftover pause is reported', () => {
-  // Cutting nearly all of a long line: even at the bound there is pause left,
-  // and the caller has to be able to say so.
-  const p = planFit(10, 0.5, { deadAirS: 0.1, maxVideoRate: 2 });
-  assert.equal(p.rate, 2);
-  assert.ok(Math.abs(p.outS - 5) < 1e-6);
-  assert.ok(p.padS > 4, `expected real leftover pause, got ${p.padS}`);
-});
-
-test('the natural rate makes the span occupy the dub duration exactly', () => {
-  const srcS = 4.0, dubS = 5.0;
-  const r = naturalRate(srcS, dubS);
-  // editSpans() computes output duration as (end - start) / rate.
-  assert.ok(Math.abs(srcS / r - dubS) < 1e-9, `span would run ${srcS / r} s, wanted ${dubS}`);
-});
-
-test('planFit rates round-trip through the edit model', () => {
-  // The span's output length is (end - start) / rate, so a plan is only
-  // correct if that comes back as outS.
-  for (const [srcS, dubS, deadAirS] of [[8.8, 4.6, 0.15], [3, 2.5, 0.1], [3, 6, 0], [10, 0.5, 0.1]]) {
-    const p = planFit(srcS, dubS, { deadAirS, maxVideoRate: 1.5 });
-    assert.ok(Math.abs(srcS / p.rate - p.outS) < 1e-9, `${srcS}/${dubS}: ${srcS / p.rate} vs ${p.outS}`);
-  }
-});
-
-test('the natural rate is bounded so the picture cannot crawl', () => {
-  assert.ok(naturalRate(1, 100) >= 0.5);
-  assert.ok(naturalRate(100, 1) <= 2);
-});
-
-test('an impossible squeeze is still clamped and reported', () => {
-  const r = fitToDuration(tone(3.0), SR, Math.round(1.0 * SR));
-  assert.equal(r.clamped, true);
-  assert.ok(Math.abs(r.rate - FIT_MAX_RATE) < 1e-6);
-});
-
-// The tool's own definition of "how loud is the voice", for the tests above.
+// A voice-band level, the way the rest of the tool measures loudness.
 function analyze(x) {
   return analyzeVoiceLevel(x, SR).voiceDbfs;
 }
 
-// A stand-in for the browser's resampler, good enough to test the plumbing.
-function linearResample(a, from, to) {
-  const ratio = from / to;
-  const n = Math.round(a.length / ratio);
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = i * ratio, j = Math.floor(x), f = x - j;
-    out[i] = (a[j] || 0) + ((a[j + 1] || 0) - (a[j] || 0)) * f;
-  }
-  return out;
-}
+// ---------------------------------------------------------------------------
+console.log('\nthe transcript becomes a script');
 
-console.log(`\n${passed} passed${process.exitCode ? ' (with failures)' : ''}\n`);
+test('phrases join into prose, and a long pause starts a paragraph', () => {
+  const text = scriptFromCues([
+    { start: 0, end: 2, text: 'Here is the sample.' },
+    { start: 2.1, end: 4, text: 'It is a thin section.' },
+    { start: 9, end: 11, text: 'Now the microscope.' },
+  ]);
+  assert.equal(text, 'Here is the sample. It is a thin section.\n\nNow the microscope.');
+});
+
+test('a sentence is split at the full stop, not at the abbreviation', () => {
+  assert.deepEqual(splitSentences('Fig. 3 shows the stage. It moves 0.5 mm. Done.'),
+    ['Fig. 3 shows the stage.', 'It moves 0.5 mm.', 'Done.']);
+});
+
+test('initials and e.g. are not sentence ends either', () => {
+  assert.deepEqual(splitSentences('We use e.g. the 20x. Dr. J. Smith agreed.'),
+    ['We use e.g. the 20x.', 'Dr. J. Smith agreed.']);
+});
+
+test('a question or an exclamation ends a sentence, quotes and all', () => {
+  assert.deepEqual(splitSentences('"Is it flat?" she asked. Yes!'),
+    ['"Is it flat?" she asked.', 'Yes!']);
+});
+
+test('the pause follows the punctuation, and a paragraph break is longer', () => {
+  const parts = splitScript('One thing. Another thing.\n\nA new idea.',
+    { sentencePauseS: 0.3, paragraphPauseS: 0.9, clausePauseS: 0.1 });
+  assert.deepEqual(parts.map((p) => p.text), ['One thing.', 'Another thing.', 'A new idea.']);
+  assert.deepEqual(parts.map((p) => p.pauseAfterS), [0.3, 0.9, 0]);
+  assert.deepEqual(parts.map((p) => p.paragraph), [0, 0, 1]);
+});
+
+test('the last sentence has nothing after it to pause for', () => {
+  const parts = splitScript('Only this.');
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0].pauseAfterS, 0);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\naligning a rewritten script');
+
+// A transcript at one word a second, so a word's index is its timestamp.
+const transcriptOf = (sentence, from = 0) =>
+  sentence.split(' ').map((t, i) => ({ text: ' ' + t, start: from + i, end: from + i + 0.8 }));
+
+test('identical texts match word for word', () => {
+  const a = ['the', 'stage', 'moves', 'slowly'];
+  assert.deepEqual(matchWords(a, a), [[0, 0], [1, 1], [2, 2], [3, 3]]);
+});
+
+test('an inserted word does not shift the words after it', () => {
+  const pairs = matchWords(['the', 'stage', 'moves'], ['the', 'heavy', 'stage', 'moves']);
+  assert.deepEqual(pairs, [[0, 0], [1, 2], [2, 3]]);
+});
+
+test('a wholly rewritten middle still pins the ends', () => {
+  const pairs = matchWords(
+    ['calibrate', 'the', 'ancient', 'knob', 'carefully', 'afterwards'],
+    ['calibrate', 'the', 'digital', 'dial', 'afterwards']);
+  assert.deepEqual(pairs[0], [0, 0]);
+  assert.deepEqual(pairs[pairs.length - 1], [5, 4]);
+});
+
+test('a sentence keeps the seconds its own words were said in', () => {
+  const words = [...transcriptOf('we mount the sample', 0), ...transcriptOf('then we focus', 10)];
+  const parts = alignScript(splitScript('We mount the sample. Then we focus.'), words,
+    { startS: 0, endS: 20 });
+  assert.ok(parts[0].anchored && parts[1].anchored);
+  assert.ok(Math.abs(parts[0].srcStart - 0) < 0.01, `first started at ${parts[0].srcStart}`);
+  assert.ok(Math.abs(parts[1].srcStart - 10) < 0.01, `second started at ${parts[1].srcStart}`);
+});
+
+test('a rewritten sentence is placed between the two that were not', () => {
+  const words = [...transcriptOf('we mount the sample', 0),
+                 ...transcriptOf('um so anyway right', 10),
+                 ...transcriptOf('then we focus', 20)];
+  const parts = alignScript(
+    splitScript('We mount the sample. Everything is aligned first. Then we focus.'),
+    words, { startS: 0, endS: 30 });
+  assert.equal(parts[1].anchored, false, 'nothing of it survived the rewrite');
+  assert.ok(parts[1].srcStart >= parts[0].srcEnd - 1e-6, 'starts after the one before');
+  assert.ok(parts[1].srcEnd <= parts[2].srcStart + 1e-6, 'ends before the one after');
+});
+
+test('anchors never run backwards, whatever the diff paired', () => {
+  const words = [...transcriptOf('the the the the', 0), ...transcriptOf('the the the the', 10)];
+  const parts = alignScript(splitScript('The the the the. The the the the.'), words,
+    { startS: 0, endS: 20 });
+  let at = -1;
+  for (const p of parts) {
+    assert.ok(p.srcStart >= at - 1e-6, `${p.srcStart} came before ${at}`);
+    assert.ok(p.srcEnd >= p.srcStart - 1e-6, 'a section of negative length');
+    at = p.srcEnd;
+  }
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nre-timing the picture');
+
+// Sentences laid out by hand: where each was said, and where it is said now.
+const laid = (rows) => rows.map(([srcStart, srcEnd, outStart, outEnd]) =>
+  ({ text: 'x', srcStart, srcEnd, outStart, outEnd }));
+
+test('the sections tile the narration exactly', () => {
+  const { spans } = planTimeline(laid([[0, 5, 0, 4], [6, 10, 4.3, 9]]),
+    { keptS: 12, narrationS: 10 });
+  assert.ok(Math.abs(spans[0].outStart) < 1e-9, 'starts at the top of the narration');
+  for (let i = 1; i < spans.length; i++) {
+    assert.ok(Math.abs(spans[i].outStart - spans[i - 1].outEnd) < 1e-6, 'a hole between sections');
+  }
+  assert.ok(Math.abs(spans[spans.length - 1].outEnd - 10) < 1e-6, 'ends where the narration does');
+});
+
+test('a section that has to hurry does so within the limit', () => {
+  const { spans, stats } = planTimeline(laid([[0, 10, 0, 8]]),
+    { keptS: 10, narrationS: 8, minRate: 0.7, maxRate: 1.5 });
+  assert.equal(spans.length, 1);
+  assert.ok(spans[0].rate <= 1.5 + 1e-6, `ran at ${spans[0].rate}`);
+  assert.equal(stats.cutS, 0, 'nothing needed cutting');
+});
+
+test('footage the script no longer covers is cut, not sped up past the limit', () => {
+  // Twenty seconds of recording, four seconds of narration: 5x is far past
+  // any sane speed-up, so the surplus has to go.
+  const { spans, cuts, stats } = planTimeline(laid([[0, 20, 0, 4]]),
+    { keptS: 20, narrationS: 4, minRate: 0.7, maxRate: 1.5 });
+  assert.ok(cuts.length === 1, 'exactly one section removed');
+  assert.ok(stats.cutS > 13, `only cut ${stats.cutS.toFixed(1)} s`);
+  for (const sp of spans) assert.ok(sp.rate <= 1.5 + 1e-6, `ran at ${sp.rate}`);
+  // The cut plus what is kept still accounts for the whole recording.
+  const kept = spans.reduce((n, sp) => n + (sp.srcEnd - sp.srcStart), 0);
+  assert.ok(Math.abs(kept + stats.cutS - 20) < 1e-6, 'source seconds went missing');
+});
+
+test('anchors are dropped rather than lurching the picture per sentence', () => {
+  // Two sentences: one you now say much faster, one much slower. Taken one at
+  // a time that is 2x then 0.5x; merged, it is 1x.
+  const { spans, stats } = planTimeline(laid([[0, 8, 0, 4], [8, 12, 4, 12]]),
+    { keptS: 12, narrationS: 12, minRate: 0.8, maxRate: 1.25 });
+  assert.ok(stats.merged >= 1, 'nothing was merged');
+  assert.equal(spans.length, 1);
+  assert.ok(Math.abs(spans[0].rate - 1) < 1e-6, `ran at ${spans[0].rate}`);
+});
+
+test('zero stretch still produces a timeline, and says it could not comply', () => {
+  const { spans, stats } = planTimeline(laid([[0, 4, 0, 8]]),
+    { keptS: 4, narrationS: 8, minRate: 1, maxRate: 1 });
+  assert.equal(spans.length, 1);
+  assert.ok(stats.tooSlow >= 1, 'should have owned up to running slow');
+  assert.ok(Math.abs(spans[0].rate - 0.5) < 1e-6, 'the picture still covers the narration');
+});
+
+test('neighbouring sections at nearly the same rate are joined', () => {
+  // Four sentences that all want about 1.2x: one rate, not four.
+  const rows = [];
+  for (let i = 0; i < 4; i++) rows.push([i * 3, i * 3 + 3, i * 2.5, i * 2.5 + 2.5]);
+  const { spans } = planTimeline(laid(rows), { keptS: 12, narrationS: 10, minRate: 0.7, maxRate: 1.5 });
+  assert.equal(spans.length, 1, `left ${spans.length} speed changes where one would do`);
+});
+
+test('smoothing never drags a section outside the band', () => {
+  const { spans } = planTimeline(laid([[0, 2, 0, 2], [2, 8, 2, 4]]),
+    { keptS: 8, narrationS: 4, minRate: 0.7, maxRate: 1.5, smoothRatio: 99 });
+  for (const sp of spans) assert.ok(sp.rate <= 1.5 + 1e-6, `ran at ${sp.rate}`);
+});
+
+test('a plan with no sentences at all is still a plan', () => {
+  const { spans } = planTimeline([], { keptS: 6, narrationS: 6 });
+  assert.equal(spans.length, 1);
+  assert.ok(Math.abs(spans[0].rate - 1) < 1e-6);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\ncaptions for what is now said');
+
+test('words fill their own sentence and nothing else', () => {
+  const words = narrationWords([
+    { text: 'One two.', outStart: 0, outEnd: 1 },
+    { text: 'Three.', outStart: 2, outEnd: 2.5 },
+  ]);
+  assert.equal(words.length, 3);
+  assert.ok(Math.abs(words[0].start - 0) < 1e-9);
+  assert.ok(Math.abs(words[1].end - 1) < 1e-6, `first sentence ended at ${words[1].end}`);
+  assert.ok(Math.abs(words[2].start - 2) < 1e-9, 'the pause is not filled with words');
+});
+
+test('every word carries the leading space a cue break needs', () => {
+  for (const w of narrationWords([{ text: 'a bb ccc', outStart: 0, outEnd: 3 }])) {
+    assert.ok(w.text.startsWith(' '), `"${w.text}" would let a cue break mid-word`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nfinishing the narration');
+
+test('the narration is resampled, levelled and faded in one pass', () => {
+  const model = speechish(2, { amp: 0.05 });   // at SR here; pretend it is 24 kHz
+  const out = finishNarration(model, {
+    modelRate: SR, outRate: SR, targetDbfs: analyze(speechish(2, { amp: 0.2 })),
+  });
+  assert.equal(out.pcm.length, model.length);
+  assert.ok(out.gainDb > 6, `only moved ${out.gainDb.toFixed(1)} dB`);
+  assert.ok(Math.abs(out.pcm[0]) < 1e-6, 'the first sample is faded in');
+});
+
+test('finishing refuses to guess when it has no resampler', () => {
+  assert.throws(() => finishNarration(tone(0.1), { modelRate: 24000, outRate: SR }),
+    /resample/);
+});
+
+test('one measurement for the whole narration, not one per sentence', () => {
+  // A narration that is quiet at the front and loud at the back keeps that
+  // shape: the gain is a single number, so the two halves stay in proportion.
+  const quiet = speechish(2, { amp: 0.05 }), loud = speechish(2, { amp: 0.2 });
+  const both = new Float32Array(quiet.length + loud.length);
+  both.set(quiet, 0); both.set(loud, quiet.length);
+  const out = finishNarration(both, { modelRate: SR, outRate: SR, targetDbfs: -20 });
+  const a = rms(out.pcm, 0.2 * SR, 1.8 * SR);
+  const b = rms(out.pcm, quiet.length + 0.2 * SR, quiet.length + 1.8 * SR);
+  assert.ok(Math.abs(b / a - 4) < 0.3, `the halves drifted apart: ${(b / a).toFixed(2)}`);
+});
+
+test('the pauses between sentences get the room, not digital silence', () => {
+  const speech = speechish(4, { amp: 0.2, duty: false });
+  const withGap = Float32Array.from(speech);
+  const from = Math.round(1.5 * SR), to = Math.round(2.5 * SR);
+  withGap.fill(0, from, to);
+  const out = finishNarration(withGap, {
+    modelRate: SR, outRate: SR,
+    roomTone: tone(0.5, { freq: 60, amp: 0.004 }),
+    pauses: [{ from: 1.5, to: 2.5 }],
+  });
+  assert.ok(rms(out.pcm, from + 2400, to - 2400) > 1e-4, 'the pause is dead silence');
+});
+
+console.log(`\n${passed} passed`);

@@ -25,14 +25,16 @@
 // Messages in:
 //   { type: 'load', bundle }                       fetch + open the models
 //   { type: 'clone', id, audio: Float32Array }     reference at 24 kHz mono
-//   { type: 'speak', id, text, temperature, seed } generate, using the clone
+//   { type: 'speak', id, parts, temperature, seed } speak a script, sentence
+//                                                  by sentence, pauses between
+//                                                  ({ text } = a script of one)
 //   { type: 'cancel' }
 // Messages out:
 //   { type: 'load', file, loaded, total, status }  download progress
 //   { type: 'status', text }
 //   { type: 'ready' }                              models open
 //   { type: 'cloned', id }                         voice captured
-//   { type: 'audio', id, pcm: Float32Array, sampleRate }
+//   { type: 'audio', id, pcm, sampleRate, parts: [{ start, end }] }
 //   { type: 'progress', id, frames, estimate }
 //   { type: 'error', id, message } | { type: 'cancelled', id }
 import * as ort from './vendor/onnxruntime/ort.wasm.min.js';
@@ -61,7 +63,10 @@ self.onmessage = (e) => {
   if (msg.type === 'cancel') { activeId = 0; return; }
   activeId = msg.id || activeId;
   queue = queue.then(async () => {
-    const post = (m) => self.postMessage({ ...m, id: msg.id });
+    // The transfer list matters for the narration: a few minutes of it is
+    // tens of MB, and structured-cloning that instead of moving it is a copy
+    // nobody needs.
+    const post = (m, transfer) => self.postMessage({ ...m, id: msg.id }, transfer || []);
     try {
       if (msg.type === 'load') { await load(msg.bundle, post); post({ type: 'ready' }); }
       else if (msg.type === 'clone') { await clone(msg, post); }
@@ -345,30 +350,57 @@ function gaussian(rand, n, std) {
   return out;
 }
 
-async function speak({ id, text, temperature = 0.7, lsdSteps = 1, seed = 1234, debugLatents = false }, post) {
+async function speak({
+  id, text, parts, temperature = 0.7, lsdSteps = 1, seed = 1234, debugLatents = false,
+}, post) {
   if (!models) throw new Error('The voice model is not loaded yet.');
   if (!voiceState) throw new Error('No voice has been cloned yet.');
-  const { sessions, meta, tokenizer } = models;
+  const { meta, tokenizer } = models;
   const stopped = () => activeId !== id;
 
-  const latents = [];
-  const chunks = splitIntoChunks(text, meta, tokenizer);
-  const rand = mulberry32(seed);
+  // One sentence per part, each with the pause that follows it. A single
+  // `text` is just a script of one part with nothing after it — that is what
+  // voice-bench.html sends.
+  const script = (parts && parts.length ? parts : [{ text, pauseAfterS: 0 }])
+    .map((p) => ({ text: String(p.text || ''), pauseAfterS: Math.max(0, p.pauseAfterS || 0) }))
+    .filter((p) => p.text.trim());
+  if (!script.length) throw new Error('Nothing to say.');
 
-  for (const chunk of chunks) {
-    if (stopped()) { post({ type: 'cancelled' }); return; }
-    const { text: prepared, framesAfterEos: guess } = prepareText(chunk, meta);
-    const framesAfterEos = meta.model_recommended_frames_after_eos ?? (guess + 2);
-    const ids = tokenizer.encode(prepared);
-    const chunkLatents = await runChunk({
-      ids, framesAfterEos, temperature, lsdSteps, rand, post, id, stopped,
-      soFar: latents.length,
-    });
-    if (stopped()) { post({ type: 'cancelled' }); return; }
-    latents.push(...chunkLatents);
+  // Plan the whole script before speaking any of it, so the progress bar
+  // measures the job rather than the sentence.
+  const planned = script.map((p) => ({ ...p, chunks: splitIntoChunks(p.text, meta, tokenizer) }));
+  let estimate = 0;
+  for (const p of planned) {
+    for (const c of p.chunks) {
+      estimate += Math.ceil((tokenizer.encode(prepareText(c, meta).text).length / 3.0 + 2.0) * meta.frame_rate);
+    }
   }
 
-  if (!latents.length) { post({ type: 'audio', pcm: new Float32Array(0), sampleRate: SAMPLE_RATE }); return; }
+  const rand = mulberry32(seed);
+  const latents = [];
+  const bounds = [];                       // latent frames, per part
+
+  for (const p of planned) {
+    const from = latents.length;
+    for (const chunk of p.chunks) {
+      if (stopped()) { post({ type: 'cancelled' }); return; }
+      const { text: prepared, framesAfterEos: guess } = prepareText(chunk, meta);
+      const framesAfterEos = meta.model_recommended_frames_after_eos ?? (guess + 2);
+      const ids = tokenizer.encode(prepared);
+      const chunkLatents = await runChunk({
+        ids, framesAfterEos, temperature, lsdSteps, rand, post, id, stopped,
+        soFar: latents.length, estimate,
+      });
+      if (stopped()) { post({ type: 'cancelled' }); return; }
+      latents.push(...chunkLatents);
+    }
+    bounds.push({ from, to: latents.length, pauseAfterS: p.pauseAfterS });
+  }
+
+  if (!latents.length) {
+    post({ type: 'audio', pcm: new Float32Array(0), sampleRate: SAMPLE_RATE, parts: [] });
+    return;
+  }
 
   // The parity check (see REQUIREMENTS.md) compares these against the Python
   // reference: the first frame proves the wiring, since nothing has fed back
@@ -381,11 +413,45 @@ async function speak({ id, text, temperature = 0.7, lsdSteps = 1, seed = 1234, d
   }
 
   post({ type: 'status', text: 'Rendering the audio…' });
-  const pcm = await decodeLatents(latents);
-  post({ type: 'audio', pcm, sampleRate: SAMPLE_RATE }, [pcm.buffer]);
+  // Everything is decoded in one go, with the decoder's own state carrying
+  // across the joins, so the boundary between two sentences is continuous
+  // audio rather than a splice. The pauses are cut into it afterwards, at the
+  // frame boundaries the parts ended on.
+  const speech = await decodeLatents(latents);
+  const laid = withPauses(speech, bounds, speech.length / latents.length);
+  post({ type: 'audio', ...laid }, [laid.pcm.buffer]);
 }
 
-async function runChunk({ ids, framesAfterEos, temperature, lsdSteps, rand, post, id, stopped, soFar }) {
+/**
+ * Lay the spoken sentences out with their pauses between them, and say where
+ * each one landed.
+ *
+ * The pause is silence here, deliberately: voice.js lays the recording's own
+ * room tone under the whole narration afterwards, and it cannot do that if the
+ * gap has already been filled with something else.
+ */
+function withPauses(speech, bounds, perFrame) {
+  const at = (frame) => Math.min(speech.length, Math.round(frame * perFrame));
+  let total = 0;
+  const pieces = [];
+  for (const b of bounds) {
+    const from = at(b.from), to = at(b.to);
+    const pad = Math.round(b.pauseAfterS * SAMPLE_RATE);
+    pieces.push({ from, to, pad });
+    total += (to - from) + pad;
+  }
+  const pcm = new Float32Array(total);
+  const parts = [];
+  let out = 0;
+  for (const p of pieces) {
+    pcm.set(speech.subarray(p.from, p.to), out);
+    parts.push({ start: out / SAMPLE_RATE, end: (out + (p.to - p.from)) / SAMPLE_RATE });
+    out += (p.to - p.from) + p.pad;
+  }
+  return { pcm, sampleRate: SAMPLE_RATE, parts };
+}
+
+async function runChunk({ ids, framesAfterEos, temperature, lsdSteps, rand, post, id, stopped, soFar, estimate = 0 }) {
   const { sessions, meta } = models;
   const D = meta.latent_dim;
   const manifest = meta.flow_lm_state_manifest;
@@ -448,7 +514,7 @@ async function runChunk({ ids, framesAfterEos, temperature, lsdSteps, rand, post
     latents.push(x);
     curr = new ort.Tensor('float32', x, [1, 1, D]);
     if ((step & 7) === 0) {
-      post({ type: 'progress', frames: soFar + latents.length, estimate: maxFrames + soFar });
+      post({ type: 'progress', frames: soFar + latents.length, estimate: estimate || (maxFrames + soFar) });
     }
   }
   return latents;

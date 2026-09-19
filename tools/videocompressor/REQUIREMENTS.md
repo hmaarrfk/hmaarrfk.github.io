@@ -4,7 +4,38 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-17 (**Two overdub bugs, from the first person to
+_Last updated: 2026-09-19 (**Respeak the whole script, and re-time the picture
+to it.** Phrase-by-phrase overdub is gone. It worked and it sounded wrong:
+every phrase was its own generation with its own prosody, squeezed by its own
+WSOLA rate into a slot whose length was decided by how fast it happened to be
+said the first time, with the recording's pauses between — a sequence of
+correct sentences that did not sound like anybody talking. The transcript is
+now a **script** in a textarea (`scriptFromCues`; it keeps following the
+transcript until you type in it, so a scientific word fixed in the line list is
+fixed in what gets spoken). `splitScript` cuts it into sentences and gives each
+the pause its own punctuation asks for. The worker speaks the sentences back to
+back and decodes them in one streamed pass, so the decoder's state carries
+across every join and there is no splice between sentences at all. A patience
+diff (`matchWords` / `alignScript`) says where each sentence was said in the
+recording, and `planTimeline` turns the (recording time, narration time) pairs
+into an edit list: sections of picture that run a little faster or slower, with
+footage the script no longer covers *cut*. Anchors are dropped, worst offender
+first, until every section is inside the band `Video may stretch` allows —
+a screencast does not need sentence-level sync, so merging two sections into
+one gentler rate is free. Tone, level and room tone are measured **once** over
+the whole narration, and the export takes contiguous windows of that one
+buffer, so nothing is crossfaded and nothing drifts. Captions are rebuilt from
+the new sentence timings, so what is burned in follows what is now said. Also:
+`Video may stretch` re-times an already-spoken narration on the spot, so it is
+a dial you turn and hear. The page's bare-character shortcuts now stand down
+for `<textarea>` and `contenteditable` as well as `<input>`/`<select>`: the
+script box is the tool's first textarea, and without that every space in a
+rewritten script paused the video, every `c` marked a cut, and Home/End
+scrubbed instead of moving the caret. Settings opens with the source's resolution, frame
+rate, duration, size and bitrate, so a target size is a decision rather than a
+guess.)_
+
+_Earlier: 2026-09-17 (**Two overdub bugs, from the first person to
 use it.** (1) *You could hear yourself start the line the clone then said* —
 "I— I'm here today to…". `snapSpan` moved each edge of a replaced span to the
 *middle* of the neighbouring pause, but only if the middle was within 0.25 s;
@@ -179,11 +210,11 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 | `breath.test.mjs` | Node test for `breath.js` — `node breath.test.mjs` |
 | `audio-boost.test.mjs` | Node test for the leveller's non-speech hold |
 | `speed.test.mjs` | Node test for `speed.js` — `node speed.test.mjs` |
-| `voice.js` | Pure overdub logic: `changedLines`, `snapSpan`, `pickReference`, `fitToDuration`, `matchLevel`, `shapeEnds`, `finishDub`, `suggestMode`, `naturalRate` |
+| `voice.js` | Pure overdub logic: `scriptFromCues`, `splitScript`, `matchWords`, `alignScript`, `planTimeline`, `narrationWords`, `finishNarration`, `pickReference`, `findRoomTone`, `matchTone`, `matchVoiceLevel` |
 | `voice.test.mjs` | Node test for `voice.js` — `node voice.test.mjs` |
 | `voice-tokenizer.js` | SentencePiece protobuf reader + unigram Viterbi with byte fallback |
 | `voice-tokenizer.test.mjs` | Node test for the above — `node voice-tokenizer.test.mjs` |
-| `voice-ui.js` | Overdub UI + job orchestration: model cache, reference clip, respeak, `pcmFor()` for the encoder (given a `ctx` by `compressor.js`) |
+| `voice-ui.js` | Overdub UI: model cache, reference clip, the script box, respeaking the script and applying its plan, `pcmFor()` for the encoder (given a `ctx` by `compressor.js`) |
 | `voice-worker.js` | Module worker running Pocket TTS on onnxruntime-web |
 | `voice-bench.html` | Dev-only harness for the Python/JS parity check (not linked) |
 | `vendor/` | Vendored deps + `update-vendor.sh` |
@@ -230,27 +261,122 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
   shows on the timeline and can be clicked away. Ducking happens *before* the
   leveller, whose hold then keeps it down.
 
-- **Overdub (respeak a line).**
-  - **The whole script can be respoken at once**, which is both a feature in
-    its own right — rewrite the transcript, hear the narration delivered again
-    — and the best answer to blending there is. Every splice is a join between
-    generated speech and a recording, and those never match perfectly; respeak
-    everything and no such join remains anywhere. Each line still dubs into its
-    own span at its own timestamp, under the same dead-air rules, so the
-    picture is untouched and the timing holds.
-  - **Every line can be respoken**, not only edited ones. A cue keeps `orig`
-    (what Whisper said) beside `text` (what you typed), and `restore text`
-    appears when they differ — but the respeak button is always there, because
-    disliking how you said a line is as good a reason as changing the words,
-    and the transcript can be perfectly correct while the delivery is not.
-  - **You can hear it before exporting.** Every line and every silence has a
-    play button that seeks to it and plays just that line, as it will be in
-    the export (sped up if it's in a fast section, respoken if respoken); a
-    second button appears once a line has a dub, to play the original for
-    comparison. Through the preview, the `<video>` is muted inside a dubbed
-    span and the finished samples play in its place, through the same gain and
-    limiter nodes, so the preview keeps telling the truth. A `Preview plays`
-    setting switches the whole timeline between respoken and original.
+- **Overdub (respeak the whole narration).** The first version respoke one
+  transcript phrase at a time into the hole its recorded phrase left. It
+  worked, and it sounded wrong — which is the reason for everything below.
+  Each phrase was its own generation with its own prosody, squeezed by its own
+  WSOLA rate into a slot whose length was decided by how fast it happened to be
+  said the first time, with the *recording's* pauses between. The result was a
+  sequence of correct sentences that did not sound like anybody talking. So the
+  direction is inverted: the narration is the spine and the picture is re-timed
+  to it. Phrase-by-phrase respeaking, `snapSpan`, `fitToDuration`, `planFit`,
+  `naturalRate` and the per-line queue are gone.
+  - **Typing is not a shortcut.** Every keyboard shortcut on the page is a bare
+    character (Space plays, `C` marks a cut, Home/End jump to the selection
+    edges), so the `document.onkeydown` guard has to name everything you can
+    type into — `INPUT`, `TEXTAREA`, `SELECT` and `isContentEditable` — not
+    just `<input>`.
+  - **The script is prose, not a list.** `scriptFromCues` joins the transcript
+    into paragraphs (a silence over 1.5 s starts a new one) and drops it in a
+    textarea. It keeps following the transcript — so a scientific word fixed in
+    the line list is fixed in what gets spoken — until somebody types in the
+    box, after which only **Use the transcript** overwrites it.
+  - **The sentence is the unit.** `splitScript` cuts a paragraph into sentences
+    (`splitSentences` leaves abbreviations, initials and decimals alone: "Fig.
+    3", "Dr. J. Smith", "0.5 mm"; a lone *capital* before a full stop is an
+    initial, a lone lower-case letter is the tail of "the 20x."). Each sentence
+    is one phrase for the model and one anchor for the alignment. Its trailing
+    punctuation chooses the pause after it — **this is where "the pauses follow
+    the punctuation" happens** — from one `Pause between sentences` setting
+    (default 0.36 s; a paragraph break gets 2.2x it, a clause break 0.56x).
+  - **One generation, in order.** `voice-worker.js` takes `parts` and speaks
+    them back to back, keeping the latents for all of them and decoding them in
+    a single streamed pass so the mimi decoder's state carries across every
+    join. The pauses are cut into the decoded audio afterwards, at the frame
+    boundaries the sentences ended on, and the worker reports where each
+    sentence landed. There is no splice between sentences to hear.
+  - **Alignment is a word diff, not a guess.** `matchWords` is a patience diff:
+    words appearing exactly once on each side are unambiguous anchors, the
+    longest increasing run of them pins the two texts together, and each
+    stretch between two anchors is matched the same way recursively. No
+    O(n·m) table — a half-hour transcript is several thousand words — and a
+    rewritten introduction still lands on the right footage because the
+    sentences around it did. `alignScript` gives every sentence the seconds its
+    own words were said in, forces the anchors to march forward (one badly
+    paired repeated word would otherwise fold the timeline back on itself), and
+    shares out the gap between anchors for sentences that matched nothing.
+  - **The picture is re-timed, and that is the whole trick.** Each (recording
+    time, narration time) pair is an anchor; the stretch between two anchors is
+    a section of video that must occupy exactly its share of the narration —
+    i.e. it has a *rate*, which `state.edits` already understands. Taken
+    literally that gives one rate per sentence and some of them absurd, so
+    `planTimeline` drops anchors, worst offender first, merging two sections
+    into one with a gentler rate. All that is lost is sentence-level sync
+    inside the merged section, which a screencast does not need. The band comes
+    from `Video may stretch` (default 50%, so 0.67x–1.5x). A second, cosmetic
+    pass then joins neighbouring sections whose rates are already within 1.15x
+    of each other and stay in band merged: nothing is wrong with them, but
+    every rate change is a change of playback speed, and a screencast with a
+    moving cursor shows one a second as jerkiness.
+  - **`Video may stretch` is a dial you can hear.** Changing it calls
+    `replan()`, which re-times an already-spoken narration from the stored
+    sentence spans — no generation, only the sections' rates and the plan's
+    cuts move. `Pause between sentences` is deliberately *not* like this: it
+    is baked into the samples and needs a new take, and the hint says so.
+  - **Footage the script no longer covers is cut.** When even the fastest
+    allowed rate cannot fit a section into its share of the narration — the
+    paragraph you deleted — the surplus is removed (from the section's end, so
+    the picture stays with the start of what is being said and jumps forward
+    just before the next sentence). Below 0.35 s the section just runs a shade
+    faster: a cut that short is more visible than the speed-up it saves.
+  - **The opposite case has no lever, and says so.** More words than picture
+    means the section runs slower than asked; there is no more footage to show
+    and no freeze frame in the edit model. `planTimeline` reports `tooSlow` and
+    the status line names it rather than desynchronising quietly.
+  - **The lead-in and the tail keep their own time.** The silence before the
+    first word and after the last is preserved as silence of the same length,
+    so those sections start at rate 1 — the relaxation may still merge them
+    into a neighbouring sentence that needs to borrow picture, which is exactly
+    where the surplus should come from.
+  - **The user's cuts survive; their speed-ups do not.** `replaceRespeak` keeps
+    every rate-0 edit that is not the plan's own and replaces everything else.
+    Cuts are a judgement about the footage and the narration is planned around
+    them (the whole plan is made in **kept time** — source minus cuts —
+    via `keptTotal` / `sourceToKept` / `keptRangeToSource`). Speed is the
+    plan's to decide now. Respeaking again reverts the previous plan *first*,
+    so the alignment is never measured against a timeline that only exists
+    because of the last respeak.
+  - **A section is a window onto one buffer.** `state.dubs` maps an id to
+    `{ scriptId, atS }` — a position in the narration, not a clip. `pcmFor`
+    finishes the whole narration once per output sample rate and slices it by
+    absolute output position, so consecutive sections take consecutive windows
+    of continuous audio. Nothing is crossfaded at a section boundary because
+    there is no boundary; `crossfadeEdges` is gone with the per-line design.
+    A section that straddles a user's cut lands as two source spans with two
+    slices, taken by output position so they stay exactly contiguous however
+    the frame counts round.
+  - **Everything is measured once.** `finishNarration` resamples, tone-matches,
+    level-matches, fades and lays the room under the *whole* narration. Doing
+    any of that per sentence gives each sentence a slightly different answer,
+    which is heard as the voice shifting under you from line to line — the
+    original fault. The tonal reference is the reference clip **at the
+    recording's own sample rate**, not the 24 kHz copy the model was given:
+    the point of `matchTone` is to put back what the model has no bandwidth
+    for, and a resampled reference has thrown exactly that away.
+  - **Captions follow what is now said.** `narrationWords` spreads each
+    sentence's words across its own audio span (by letters, which only ever
+    interpolates a couple of seconds between two exact edges), `wordsToCues`
+    breaks them the same way it breaks a transcript, and the times are mapped
+    back through `fromOutputTime` — the plan was built so that output time *is*
+    narration time, so that inverse is all it takes. The old cues are kept in
+    `captions.beforeRespeak` for the way back; the *word* timings are not
+    replaced, because they still describe the recording, which is what the
+    reference clip and the breath detector read them for.
+  - **A cue is judged by output time, never by its first source second.** A
+    respoken line routinely starts exactly where a removed section does, so
+    asking `edits.at(c.start + 0.01)` labelled it `cut` in the list and — far
+    worse — dropped it from `exportCues`. Both now ask at the middle of the
+    time the cue is actually on screen.
   - **The reference clip comes out of the recording.** `pickReference` walks
     the word timings for runs with no pause longer than 0.45 s and scores the
     best 6-15 s window by *speech density* — the fraction actually covered by
@@ -258,110 +384,51 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
     not just the voice: a window full of room tone teaches it room tone. Ties
     break toward the middle of the file. "Use a different reference clip"
     cycles the next-best non-overlapping candidates.
-  - **The seam goes in the pause, not on the word.** `snapSpan` moves each
-    edge of the replaced span *into* the neighbouring gap — by half of it, so
-    two respoken lines either side of one pause meet rather than overlap, and
-    never by more than 0.25 s, and not at all if the gap is under 40 ms (a
-    20 ms stop closure is a consonant, not a pause). A few ms of fade over room
-    tone is inaudible; the same fade across a word is not. It has to *reach*,
-    not just aim for the middle: the edge starts from a Whisper word timestamp,
-    which is an alignment rather than a measurement and lands late on an onset,
-    so an edge left where the timestamp says leaves the attack of the old word
-    in the recording — and you hear yourself start the line the clone is about
-    to say. The silence it borrows at each end is reported as `lead`/`tail` and
-    stays silent: the generation goes in *after* the lead (`leadSamples`), so
-    the line keeps its own timestamp, and `planFit` counts the borrowed pause
-    as allowance rather than dead air to trim.
-  - **The picture moves before the speech does.** A respoken line that runs
-    long used to be squeezed by WSOLA first and only then given time; that was
-    backwards. A few percent of picture is invisible, where squeezing speech is
-    audible the moment it does real work — so `planFit` spends the picture's
-    budget first (`Video may stretch`, default 50%, applied as the span's rate)
-    and squeezes only what the picture could not absorb, up to 1.38x, then
-    reports the shortfall. At the default a line 5% long costs 4.8% of picture
-    and no audio processing at all. A dub is still never *stretched* to fill a
-    slot: slowing a short line down to fill it makes it drawl.
-  - **Three places the time can go, and only three.** A line respoken shorter
-    frees time that must become pause, a faster picture, or a cut — there is no
-    fourth option, and no setting can conjure one. `Video may stretch` and
-    `Dead air threshold` are the two ends of that trade, and the stretch limit
-    is the one that holds: asking for zero pause cannot force a lurch, it just
-    leaves the pause the limit could not remove, and says so.
-  - **Dead air is the user's call, not a built-in number.** `Trim dead air`
-    and a `Dead air threshold` in seconds (default 0.15) decide what happens
-    when a respoken line is shorter than the one it replaced. The threshold is
-    a *tolerance*, not a trigger: `planFit` keeps at most that much pause and
-    trims the rest by running the section at `srcS / (dubS + deadAirS)`,
-    bounded to 2x. Off, the whole pause stays. This went through two wrong
-    defaults first — never moving the picture (which left a second of dead air
-    in the middle of a screencast) and then a hard-coded 0.6 s (still too long
-    for the person using it) — which is the argument for it being a setting
-    rather than a better guess. Changing either control calls `replanAll()`,
-    which re-times every line already respoken without regenerating anything,
-    so the setting is something you turn and hear. When even the bounded rate
-    leaves real pause (cutting nearly all of a long line), the status says how
-    much and points at Cut, which is the honest answer there.
-  - **A dub is an ordinary edit.** `{ start, end, rate, audio: 'keep', dub }`,
-    where `dub` is an id into `state.dubs`. `applyEdit` stores a rate-1 edit
-    when — and only when — it carries a dub; `mergeEdits` never merges two,
-    since each owns its own audio. At export, `openSpan` asks
+  - **You can hear it before exporting.** Every line has a play button that
+    seeks to it and plays just that line as it will be in the export. Through
+    the preview the `<video>` is muted inside a respoken span and the finished
+    samples play in its place, through the same gain and limiter nodes, so the
+    preview keeps telling the truth. A `Preview plays` setting switches the
+    whole timeline between respoken and original.
+  - **A respoken section is an ordinary edit.** `{ start, end, rate,
+    audio: 'keep', dub, src: 'respeak' }`. At export, `openSpan` asks
     `voice.pcmFor(id, …)` for exactly `curTarget` frames and emits them, and
-    `feedSpan` drops the decoded source for those seconds. The gain stage and
-    the leveller are deliberately skipped: the level was matched to the
-    neighbouring speech at generation time and re-levelling would undo it.
-    Any dub forces the audio re-encode, like a speed change does.
-  - **The level is matched to the recording, and then boosted with it.** The
-    generation comes back at whatever level the model chose, which is not
-    yours. `matchVoiceLevel` measures it with `analyzeVoiceLevel` — the
+    `feedSpan` drops the decoded source for those seconds. It *does* go through
+    the gain stage, like the recording around it: skipping it meant that with a
+    boost on, every other second was lifted and the narration was not. An edit
+    can carry a dub id with no audio behind it — the timeline survives a reload
+    and the samples do not — and is then played as an ordinary section, so the
+    export always has sound, with the status saying why.
+  - **The level is matched to the recording, and then boosted with it.**
+    `matchVoiceLevel` measures the generation with `analyzeVoiceLevel` — the
     300-3400 Hz band *while somebody is talking* — and moves it to the track's
     own `voiceDbfs` (the number auto-boost already works from), falling back to
     the reference clip's level. Plain whole-buffer RMS is the wrong yardstick
-    and audibly so: it calls a line with a pause in it quiet and shoves it up,
-    so the amount of silence in a sentence would decide the volume of the
-    voice. Capped at ±18 dB — more than that is a bad generation, not a level
-    problem. The dub then goes through the export's **gain stage like
-    everything else**; skipping it (on the theory that the level was already
-    matched) meant that with a boost on, every other second was lifted and the
-    respoken line was not, which is exactly how it was first reported.
-  - **The splice is built the way dialogue is replaced, not by fading.** Three
-    things, all standard practice and all missing from the first version, which
-    is why it "just didn't blend":
-    1. **Room tone under the whole line.** `findRoomTone` takes the longest
-       quiet stretch of the recording during the load-time analysis pass (the
-       track is decoded exactly once, so it is free there) and `layRoomTone`
-       mixes it under the generation. The background then never stops at a
-       splice — the ear notices *that* far sooner than it notices a voice being
-       slightly off — and it carries everything above the 12 kHz a 24 kHz model
-       cannot produce at all, which is what made a bare dub sound like a hole
-       punched in the track. A recording that never pauses yields no tone
-       rather than a bad one: with no real gap the percentile floor lands
-       inside the speech, and taking it would lay the speaker's own voice under
-       every line.
-    2. **Equal-power crossfades into the recording at both edges**, using the
-       original audio for the span — which the export has decoded anyway and
-       used to throw away. Fading in from silence and out to silence leaves a
-       dip at each boundary; crossfading means the background runs straight
-       through. Equal power rather than linear because the two sides are
-       uncorrelated noise and sum in power. The span edges were already snapped
-       into pauses, so what is being crossfaded is room tone into room tone.
-    3. **Tonal matching** (`matchTone`, three bands, ±6 dB) against the
-       recording of the line being replaced — the ideal reference, being the
-       same speaker, microphone, room and words. Applied before the level
-       match, since moving the balance moves the energy.
-  - **The pause is room tone, and must not loop.** A short line leaves a pause,
-    filled from the *generation's own* quiet stretches — the clone carries the
-    room, so its pauses are the right pauses. Tiling one 120 ms window is not
-    enough: a 1.5 s pad is that fragment a dozen times and the ear hears the
-    period as a breath or hum that was never recorded (reported in use). Up to
-    8 non-overlapping quiet windows are taken, shuffled deterministically, and
-    equal-power crossfaded; each tile is randomly reversed and jittered ±1.5 dB
-    so that even a line with only *one* usable pause doesn't repeat. Digital
-    silence is the fallback when a line has no quiet stretch at all — filling
-    it with looping speech would be far worse.
-  - **The samples are not persisted.** localStorage keeps only the intent
-    (text, span, mode, seed) — a minute of narration is several MB of floats
-    against a ~5 MB budget shared with the captions, and a seeded generation
-    can be made again exactly. `regenerateAll()` rebuilds on demand.
+    and audibly so: it calls a passage with pauses in it quiet and shoves it
+    up. Capped at ±18 dB — more than that is a bad generation, not a level
+    problem.
+  - **Room tone under the whole narration.** `findRoomTone` takes the longest
+    quiet stretch of the recording during the load-time analysis pass (the
+    track is decoded exactly once, so it is free there) and `layRoomTone` mixes
+    it under everything, pauses included. The background then never stops — the
+    ear notices *that* far sooner than it notices a voice being slightly off —
+    and it carries everything above the 12 kHz a 24 kHz model cannot produce at
+    all, which is what made a bare dub sound like a hole punched in the track.
+    A recording that never pauses yields no tone rather than a bad one: with no
+    real gap the percentile floor lands inside the speech, and taking it would
+    lay the speaker's own voice under the narration.
+  - **Without a room sample, the pauses are rebuilt.** `fillWithRoomTone` fills
+    each inserted pause from the narration around it (learning from ~3 s beside
+    the gap, never the whole track, so this stays linear in the length of the
+    narration). Up to 8 non-overlapping quiet windows are taken, shuffled
+    deterministically and equal-power crossfaded, each tile randomly reversed
+    and jittered ±1.5 dB, because tiling one 120 ms window makes a 1.5 s pad
+    that the ear hears as a breath or hum that was never recorded.
+  - **The samples are not persisted.** localStorage keeps the script text and
+    the seed — a few minutes of narration is tens of MB of floats against a
+    ~5 MB budget shared with the captions. The *timeline* and the captions are
+    persisted as usual, so a reload comes back to the right edit and the right
+    words on screen, with one button to make the audio again.
   - **The model.** `KevinAHM/pocket-tts-onnx` (CC-BY-4.0 weights, MIT export
     code), `english_2026-04` plus French/German/Italian/Portuguese/Spanish,
     int8: `mimi_encoder` 21 MB, `text_conditioner` 16 MB, `flow_lm_main`
@@ -384,6 +451,14 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
   - **Consent.** The weights' terms forbid cloning a voice without lawful
     consent; the panel says so, and the feature is framed as respeaking your
     own narration.
+
+- **Settings says what you are starting from.** A target size is guesswork
+  without it: 100 MB is a big cut from 2 GB and no cut at all from 60 MB. The
+  Settings step opens with the source's resolution, frame rate, duration, file
+  size and overall bitrate (from the file, so container overhead is in it),
+  split into video and audio, and the output line beneath it. Both mode hints
+  compare with the source, and say "*larger* than the source" rather than
+  printing "0.4x smaller", which is not a thing.
 
 - **The leveller holds its gain where nobody is talking** (`holdRangeDb`, 18 dB
   under the loudest recent voice) and returns to the gain that speech needed.
@@ -490,9 +565,16 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
   once a second, with 2–6 s at 4× silent and 6–10 s at 2× voice: the export was
   exactly 7.00 s / 210 frames, the sped-silent second measured −91 dB, and the
   2× section kept all four beeps at half duration and 0.5 s spacing.
-- Overdub: `node voice.test.mjs` (what changed, seam snapping, reference
-  choice, fitting/padding/clamping, level matching, the whole finish, and the
-  asymmetric short/long policy) and `node voice-tokenizer.test.mjs` (protobuf
+- Overdub: `node voice.test.mjs` (sentence splitting around abbreviations and
+  initials, punctuation-driven pauses, the patience diff and the alignment it
+  feeds — including a wholly rewritten sentence placed between two that were
+  not, and anchors that can never run backwards — the re-timing plan (sections
+  tile the narration exactly, a hurry stays inside the band, surplus footage is
+  cut, anchors are merged rather than lurching, zero stretch still produces a
+  timeline and owns up to running slow, near-equal neighbours are smoothed
+  together and smoothing never drags a section out of band), caption words that fill their own
+  sentence and nothing else, reference choice, level matching, room tone, and
+  one measurement for the whole narration) and `node voice-tokenizer.test.mjs` (protobuf
   field skipping, Viterbi picking the best split, byte fallback, round trip).
   - **Tokenizer, against the real model.** The synthetic test can't prove the
     4000-piece model is read correctly, so that is checked by hand: tokenise a
@@ -517,11 +599,23 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
   - **Speed.** Single-threaded WASM, Chrome on an Apple Silicon Mac: models
     open in ~10 s from cache, cloning a 10 s reference ~2.1 s, generation
     ~2.2x real time.
-  - **End to end.** Checked 2026-09-16 on the 5:50 Nuclei Segmentation
-    walkthrough: transcript (81 lines, Whisper base) → edit line 2's version
-    number → `respeak` appeared on that line only → cloned from 5:04-5:19
-    (15.0 s, 98% speech) → "fitted into 8.8 s", picture untouched → export ran
-    to 5:50.82, the original duration.
+  - **End to end (superseded, phrase-by-phrase).** Checked 2026-09-16 on the
+    5:50 Nuclei Segmentation walkthrough: transcript (81 lines, Whisper base) →
+    edit line 2's version number → `respeak` appeared on that line only →
+    cloned from 5:04-5:19 (15.0 s, 98% speech) → "fitted into 8.8 s", picture
+    untouched → export ran to 5:50.82, the original duration. This is the
+    version that sounded chopped in use, which is why it is gone.
+  - **End to end (whole script).** The models are hundreds of MB, so the
+    timeline half is checked against a stubbed worker: Playwright seeds a
+    transcript into `videocompressor:captions:v1`, overrides `Worker` for
+    `voice-worker.js` to answer `speak` with a tone and plausible per-sentence
+    spans, then drives the real page. Checked 2026-09-19 on a 40 s 4K clip with
+    a 6-sentence transcript rewritten to 4 sentences: the plan came back as
+    5 sections at 1.00x–1.50x with 12.2 s cut, the sections tiled the narration
+    with no holes, the captions moved to output times, undo restored both the
+    edits and the transcript, and a real export (960×540, 15 fps) produced a
+    19.32 s file whose audio had 2 sample-to-sample jumps over the whole track
+    — i.e. no discontinuity at any of the five section seams.
 - Transcript flow: a 20 s clip with three spoken sentences transcribed whole,
   two silence rows detected (5.9 s and 6.5 s), "all 4× silent" took 20.18 s →
   10.93 s, and cutting one line took it to 9.25 s.
@@ -539,7 +633,14 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 
 ## Future ideas
 
-- Overdub: respeak a whole *run* of consecutive edited lines as one generation,
+- Overdub: re-transcribe the generated narration with Whisper instead of
+  spreading each sentence's words by letter count, for exact caption timings
+  inside a long sentence. The sentence *edges* are already exact, so this only
+  buys sub-cue accuracy — weigh it against a second model pass.
+- Overdub: offer a per-section choice for footage the script no longer covers
+  (cut from the end, the middle, or not at all). Cutting from the end is a
+  reasonable default, not obviously the right one for every screencast.
+- Overdub (superseded): respeak a whole *run* of consecutive edited lines as one generation,
   so prosody carries across the join instead of restarting per line.
 - Overdub: the dub starts on the next animation frame after the playhead
   enters its span, so it can be up to ~16 ms late in the preview (the export

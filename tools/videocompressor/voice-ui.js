@@ -1,27 +1,39 @@
 // Overdub, the interactive half: the voice model's download, the reference
-// clip taken out of your own recording, and the respoken lines themselves.
+// clip taken out of your own recording, and the respoken narration itself.
 //
-// voice.js holds the pure logic (what changed, where the seam goes, fitting a
-// generation into its slot); voice-worker.js runs the model; this module joins
-// them to the page, the way captions-ui.js does for Whisper. compressor.js
-// hands it everything it needs through `ctx` and asks it for one thing back:
-// `pcmFor(id, …)`, the samples the encoder should emit for a respoken span.
+// voice.js holds the pure logic (splitting a script, aligning it back onto the
+// recording, re-timing the picture to it); voice-worker.js runs the model;
+// this module joins them to the page, the way captions-ui.js does for Whisper.
+// compressor.js hands it everything it needs through `ctx` and asks it for one
+// thing back: `pcmFor(id, …)`, the samples the encoder should emit for a
+// respoken span.
+//
+// The whole script, in one take
+// -----------------------------
+// There is exactly one narration. It is generated in order, sentence after
+// sentence, and everything measured about it — its tonal balance, its level,
+// the room laid under it — is measured once, over all of it. The export then
+// asks for slices of that one buffer, so a "span" here is a window onto
+// continuous audio rather than an independent little generation. That is why
+// the seams cannot be heard: there are no seams.
 //
 // What is kept where, and why:
 //
-//   state.dubs      id -> { text, start, end, mode, seed, pcm }   (in memory)
-//   localStorage    the same minus `pcm`
+//   state.script    { text, seed, parts, pcm, … }        (in memory)
+//   state.dubs      id -> { scriptId, atS }              (in memory)
+//   state.edits     the re-timed picture, each span carrying a dub id
+//   localStorage    the script text and the settings, nothing else
 //
-// The audio is deliberately not persisted. A minute of respoken narration is
-// several MB of float samples, localStorage is a ~5 MB budget shared with the
-// captions, and the whole point of a seeded generation is that it can be made
-// again exactly. So a reload restores the *intent* — this line, this span,
-// this seed — and regenerates on demand.
+// The audio is deliberately not persisted. A few minutes of narration is tens
+// of MB of float samples and localStorage is a ~5 MB budget shared with the
+// captions. The edits and the captions *are* persisted by compressor.js, so a
+// reload comes back to the right timeline with the right words on screen and
+// one button to re-make the audio from the same script and the same seed.
 import {
-  changedLines, isChanged, snapSpan, pickReference, finishDub, naturalRate,
-  planFit, toMono, rms, FIT_MIN_RATE, FIT_MAX_RATE,
+  pickReference, splitScript, scriptFromCues, alignScript, planTimeline,
+  narrationWords, finishNarration, toInterleaved,
 } from './voice.js';
-import { createResampler } from './captions.js';
+import { createResampler, wordsToCues } from './captions.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
 
 // Only the int8 bundle is offered. The fp32 flow model is 302 MB against
@@ -40,9 +52,9 @@ const VOICE_LANGS = {
 const VOICE_MB = 146;              // the five graphs, int8
 const MODEL_SR = 24000;            // what the model speaks at
 const REF_MIN_S = 6, REF_MAX_S = 15;
-const LS_DUB_KEY = 'videocompressor:dubs:v1';
+const LS_SCRIPT_KEY = 'videocompressor:script:v1';
 
-// ctx: { els, getState, timeline, edits, audio, fmt, setProgress, onChanged }
+// ctx: { els, getState, timeline, edits, captions, audio, fmt, setProgress, onChanged }
 export function createVoice(ctx) {
   const { els, getState, timeline, audio: audioApi, fmt, setProgress, onChanged } = ctx;
 
@@ -50,10 +62,16 @@ export function createVoice(ctx) {
   let loaded = false;          // models open in the worker
   let clonedFor = null;        // the reference span the worker currently holds
   let reference = null;        // { start, end, text, density }
+  let refAudio = null;         // { model: 24 kHz mono, native, rate }
   let refRank = 0;             // which candidate is in use, for "try another"
   let referenceDbfs = null;    // the reference clip's voice level, as a fallback target
   let seq = 0;
-  const finished = new Map();  // cache: dubId|sr|ch|frames -> interleaved
+  let running = false;         // a generation is in flight
+  let scriptEdited = false;    // the script has been written, not just filled in
+  const finishedCache = new Map();   // sampleRate -> the whole narration, mono
+  const toneCache = new Map();       // sampleRate -> room tone
+  const refToneCache = new Map();    // sampleRate -> the reference clip
+  const previewBufs = new Map();
 
   // ---- the model cache ----------------------------------------------------
   // Same bargain as the captions: Cache Storage, keyed by Hub URL, per origin.
@@ -106,7 +124,7 @@ export function createVoice(ctx) {
     });
   }
 
-  function status(text) { if (els.voiceStatus) els.voiceStatus.textContent = text; }
+  function status(text) { if (els.voiceStatus) els.voiceStatus.textContent = text || ''; }
 
   async function ensureLoaded() {
     if (loaded) return;
@@ -150,30 +168,33 @@ export function createVoice(ctx) {
     return out;
   }
 
-  /** Decode the reference span out of the source file, at the model's rate. */
+  /**
+   * Decode the reference span out of the source file.
+   *
+   * Two copies come back. The model wants 24 kHz, which is all it can hear.
+   * Tonal matching wants the recording at its own rate: the point of it is to
+   * put back what the model is missing, and resampling the reference down to
+   * 24 kHz first would throw away exactly the top octave being matched.
+   */
   async function readReference(ref) {
     const state = getState();
-    const chunks = [];
-    let resampler = null, srcRate = 0;
+    const chunks = [];      // native rate
+    let srcRate = 0;
     status('Reading the reference clip…');
     await audioApi.decodeAudioTrack(state, (frame) => {
       const t = frame.timestamp / 1e6;
       const dur = frame.numberOfFrames / frame.sampleRate;
       if (t + dur < ref.start || t > ref.end) return;
-      if (!resampler) { srcRate = frame.sampleRate; resampler = createResampler(srcRate, MODEL_SR); }
+      srcRate = frame.sampleRate;
       const mono = audioApi.mixToMono(frame);
-      // Trim the frame to the part inside the span before resampling, so the
-      // clip starts and ends where it was asked to.
+      // Trim the frame to the part inside the span, so the clip starts and
+      // ends where it was asked to.
       const from = Math.max(0, Math.round((ref.start - t) * frame.sampleRate));
       const to = Math.min(mono.length, Math.round((ref.end - t) * frame.sampleRate));
-      if (to > from) chunks.push(resampler.push(mono.subarray(from, to)).slice());
+      if (to > from) chunks.push(mono.slice(from, to));
     }, { untilS: ref.end + 0.5 });
-    let total = 0;
-    for (const c of chunks) total += c.length;
-    const out = new Float32Array(total);
-    let at = 0;
-    for (const c of chunks) { out.set(c, at); at += c.length; }
-    return out;
+    const native = audioApi.concatFloat32(chunks);
+    return { native, rate: srcRate || MODEL_SR, model: resampleMono(native, srcRate || MODEL_SR, MODEL_SR) };
   }
 
   async function ensureCloned() {
@@ -181,22 +202,24 @@ export function createVoice(ctx) {
     if (!reference) {
       const list = candidates();
       if (!list.length) {
-        throw new Error('No transcript yet — generate one in step 2 first, so the tool can find clean speech to clone from.');
+        throw new Error('No transcript yet — generate one above first, so the tool can find clean speech to clone from.');
       }
       reference = list[Math.min(refRank, list.length - 1)];
     }
     const key = `${reference.start.toFixed(3)}-${reference.end.toFixed(3)}`;
     if (clonedFor === key) return;
-    const audio = await readReference(reference);
-    if (audio.length < REF_MIN_S * MODEL_SR * 0.8) {
+    refToneCache.clear();
+    refAudio = await readReference(reference);
+    if (refAudio.model.length < REF_MIN_S * MODEL_SR * 0.8) {
       throw new Error('The reference clip came back too short to clone from.');
     }
     // How loud this speaker actually is, measured before the audio is handed
-    // over — the generation has to come back at this level, not the model's.
+    // over — the narration has to come back at this level, not the model's.
     try {
-      const a = analyzeVoiceLevel(audio, MODEL_SR);
+      const a = analyzeVoiceLevel(refAudio.model, MODEL_SR);
       if (Number.isFinite(a.voiceDbfs) && a.voiceDbfs > -80) referenceDbfs = a.voiceDbfs;
     } catch (_) { referenceDbfs = null; }
+    const audio = refAudio.model.slice();
     await ask({ type: 'clone', audio, transfer: [audio.buffer] }, 'cloned',
       (m) => { if (m.type === 'status') status(m.text); });
     clonedFor = key;
@@ -213,35 +236,71 @@ export function createVoice(ctx) {
       + `“${reference.text.slice(0, 80)}${reference.text.length > 80 ? '…' : ''}”`;
   }
 
-  // ---- respeaking a line --------------------------------------------------
+  // ---- the script ---------------------------------------------------------
+  // The transcript is the first draft. It is dropped into a textarea as prose
+  // — paragraphs where the recording paused — and whatever comes back out is
+  // what gets spoken. Nothing here tries to be clever about *which* lines
+  // changed: the whole thing is respoken either way, and the alignment is what
+  // works out where the new words belong.
 
-  // The level a respoken line has to land at. The whole-track voice-band
+  function scriptText() { return els.scriptText ? els.scriptText.value : ''; }
+
+  /**
+   * Drop the transcript into the script box, as prose.
+   *
+   * It follows the transcript until somebody types in it, which is what makes
+   * fixing a scientific word in the line list worth doing: the correction is
+   * in the script too, and gets spoken. After the first keystroke here the
+   * script is the user's, and only the button overwrites it.
+   */
+  function fillScriptFromTranscript({ force = false } = {}) {
+    const state = getState();
+    const cues = state && state.captions && state.captions.cues;
+    if (!els.scriptText || !cues || !cues.length) return;
+    if (!force && scriptEdited) return;
+    const next = scriptFromCues(cues);
+    if (next === els.scriptText.value) return;
+    els.scriptText.value = next;
+    scriptEdited = false;
+    renderScriptInfo();
+    saveScript();
+  }
+
+  function renderScriptInfo() {
+    if (!els.scriptInfo) return;
+    const parts = splitScript(scriptText(), pauseOpts());
+    const words = scriptText().trim().split(/\s+/).filter(Boolean).length;
+    els.scriptInfo.textContent = words
+      ? `${words} word${words > 1 ? 's' : ''} · ${parts.length} sentence${parts.length > 1 ? 's' : ''}`
+      : '';
+  }
+
+  // How long the pauses between sentences are. One number, because "how long
+  // is a beat" is a matter of taste; a paragraph break gets a bit more than
+  // twice it, and a clause break rather less.
+  function pauseOpts() {
+    const raw = els.inVoicePause ? parseFloat(els.inVoicePause.value) : 0.36;
+    const s = Number.isFinite(raw) ? Math.max(0, Math.min(2, raw)) : 0.36;
+    return { sentencePauseS: s, paragraphPauseS: s * 2.2, clausePauseS: s * 0.56 };
+  }
+
+  // How far the picture may drift from real time, in either direction, to keep
+  // up with what is now being said.
+  function rateBand() {
+    const pct = els.inVoiceStretch ? parseFloat(els.inVoiceStretch.value) : 50;
+    const span = Number.isFinite(pct) ? Math.max(0, Math.min(200, pct)) / 100 : 0.5;
+    return { maxRate: 1 + span, minRate: 1 / (1 + span) };
+  }
+
+  // The level the narration has to land at. The whole-track voice-band
   // measurement is the best answer when it exists — it is the same number the
-  // auto-boost works from, so a dub and the recording end up on one scale.
-  // The reference clip is the fallback, since it is the same speaker on the
-  // same microphone and is always available by the time anything is generated.
+  // auto-boost works from. The reference clip is the fallback, since it is the
+  // same speaker on the same microphone.
   function targetDbfs() {
     const state = getState();
     const a = state && state.audioAnalysis;
     if (a && Number.isFinite(a.voiceDbfs) && a.voiceDbfs > -80) return a.voiceDbfs;
     return referenceDbfs;
-  }
-
-  // How much pause the user is willing to keep. Explicit, because "how long a
-  // silence is too long" is a matter of taste and no default was going to be
-  // right for everyone.
-  function fitOpts() {
-    const trimDeadAir = els.inVoiceTrim ? els.inVoiceTrim.checked : true;
-    const raw = els.inVoiceDeadAir ? parseFloat(els.inVoiceDeadAir.value) : 0.15;
-    const pct = els.inVoiceStretch ? parseFloat(els.inVoiceStretch.value) : 50;
-    const span = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) / 100 : 0.5;
-    return {
-      trimDeadAir,
-      deadAirS: Number.isFinite(raw) ? Math.max(0, raw) : 0.15,
-      // How far the picture may drift from real time, in either direction.
-      maxVideoRate: 1 + span,
-      minVideoRate: 1 / (1 + span),
-    };
   }
 
   function dubs() {
@@ -250,346 +309,367 @@ export function createVoice(ctx) {
     return state.dubs;
   }
 
+  // ---- respeaking the script ----------------------------------------------
+
   /**
-   * Respeak one cue. Returns the dub record. `mode` is 'fit' (squeeze the
-   * generation into the hole the old line left, picture untouched) or
-   * 'natural' (let the section run at its own length, the picture stretching
-   * or hurrying to match).
+   * Speak the whole script, re-time the picture to it, and re-caption it.
+   *
+   * The order matters and is not obvious. The alignment (where each sentence
+   * *was* said) is worked out before a word is spoken, because it needs only
+   * the transcript. The generation then says how long each sentence *is*.
+   * Only with both in hand can the picture be re-timed — and only once the
+   * picture has been re-timed does "output time" mean anything, which is what
+   * the captions are then expressed in.
    */
-  async function doRespeak(cue, { mode = null, seed = null, quiet = false } = {}) {
+  async function respeakScript() {
+    const state = getState();
+    if (!state) return null;
+    const text = scriptText().trim();
+    if (!text) throw new Error('Write a script first — “Use the transcript” fills it in from what you said.');
+
+    const words = (state.captions && state.captions.words) || [];
+    if (!words.length) throw new Error('Generate a transcript first: the alignment needs to know when you said what.');
+
+    running = true;
+    if (onChanged) onChanged();
     try {
-      const state = getState();
       await ensureCloned();
 
-      const words = (state.captions && state.captions.words) || [];
-      const span = snapSpan(cue.start, cue.end, words);
-      if (!quiet) {
-        const n = jobs.length;
-        status(n ? `Respeaking… (${n} more queued)` : 'Respeaking…');
-      }
-      const use = seed == null ? (Math.random() * 1e9) | 0 : seed;
-      const res = await ask({ type: 'speak', text: cue.text, temperature: 0.7, seed: use },
-        'audio', (m) => {
-          if (quiet) return;
-          if (m.type === 'status') status(m.text);
-          else if (m.type === 'progress' && m.estimate) setProgress(m.frames / m.estimate, els.voiceProgress);
-        });
+      // Start from the timeline as the user left it, not as the last respeak
+      // left it. A previous plan's cuts are part of the kept timeline, so
+      // measuring against them would align this script to a video that only
+      // exists because of the last one.
+      revertScript({ quiet: true });
+
+      // The plan is made on the *kept* timeline — the trim minus the sections
+      // already cut — because that is what the viewer sees and what the
+      // narration has to match.
+      const kept = timeline.keptSegments();
+      const keptS = timeline.keptTotal();
+      if (!(keptS > 0.5)) throw new Error('Nothing is left to respeak — the selection is empty.');
+      const keptWords = words
+        .filter((w) => kept.some((seg) => w.start >= seg.start - 1e-3 && w.end <= seg.end + 1e-3))
+        .map((w) => ({ text: w.text, start: timeline.sourceToKept(w.start), end: timeline.sourceToKept(w.end) }));
+
+      const parts = alignScript(splitScript(text, pauseOpts()), keptWords, { startS: 0, endS: keptS });
+
+      status(`Respeaking ${parts.length} sentence${parts.length > 1 ? 's' : ''}…`);
+      const seed = (Math.random() * 1e9) | 0;
+      const res = await ask({
+        type: 'speak', temperature: 0.7, seed,
+        parts: parts.map((p) => ({ text: p.text, pauseAfterS: p.pauseAfterS })),
+      }, 'audio', (m) => {
+        if (m.type === 'status') status(m.text);
+        else if (m.type === 'progress' && m.estimate) setProgress(m.frames / m.estimate, els.voiceProgress);
+      });
       setProgress(null, els.voiceProgress);
+      if (!res.pcm || !res.pcm.length) throw new Error('The model produced no audio.');
+      if (!res.parts || res.parts.length !== parts.length) {
+        throw new Error(`The model spoke ${res.parts ? res.parts.length : 0} of ${parts.length} sentences.`);
+      }
 
-      const dubS = res.pcm.length / res.sampleRate;
-      const srcS = span.end - span.start;
-      // The pause the span reached into at each end: silence that belongs to
-      // the span but is not the line's own dead air. `leadS` is the half of it
-      // at the front, which is what keeps the respoken line on its timestamp.
-      const leadS = span.lead || 0;
-      const borrowedS = leadS + (span.tail || 0);
-      const plan = planFit(srcS, dubS, { ...fitOpts(), borrowedS });
-      const chosen = mode || plan.mode;
+      // The silence the recording had before the first word and after the
+      // last is kept as it was: the picture there plays at normal speed with
+      // nothing said over it, which is what a lead-in is.
+      const spoken = res.parts || [];
+      const leadS = spoken.length ? Math.max(0, parts[0].srcStart) : 0;
+      const tailS = spoken.length ? Math.max(0, keptS - parts[parts.length - 1].srcEnd) : 0;
+      const narrationS = leadS + res.pcm.length / res.sampleRate + tailS;
+      parts.forEach((p, i) => {
+        const s = spoken[i];
+        p.outStart = leadS + (s ? s.start : 0);
+        p.outEnd = leadS + (s ? s.end : 0);
+      });
 
-      const id = `d${Date.now().toString(36)}${(Math.random() * 1e6 | 0).toString(36)}`;
-      const rec = {
-        id, text: cue.text, start: span.start, end: span.end,
-        mode: chosen, seed: use, pcm: res.pcm, sampleRate: res.sampleRate,
-        dubS, srcS, leadS, borrowedS,
-        cueStart: cue.start, targetDbfs: targetDbfs(), rate: 1,
+      const pcm = new Float32Array(Math.round(narrationS * res.sampleRate));
+      pcm.set(res.pcm, Math.round(leadS * res.sampleRate));
+
+      // Everywhere the narration is silent by construction — the lead-in, the
+      // gaps between sentences, the tail. voice.js needs these to know where
+      // to put the room back if the recording never gave it a clean sample.
+      const pauses = [];
+      let at = 0;
+      for (const p of parts) {
+        if (p.outStart > at + 1e-3) pauses.push({ from: at, to: p.outStart });
+        at = Math.max(at, p.outEnd);
+      }
+      if (narrationS > at + 1e-3) pauses.push({ from: at, to: narrationS });
+
+      const { maxRate, minRate } = rateBand();
+      const plan = planTimeline(parts, { keptS, narrationS, minRate, maxRate });
+
+      const id = `s${Date.now().toString(36)}`;
+      state.script = {
+        id, text, seed, parts, pcm, sampleRate: res.sampleRate,
+        keptS, narrationS, leadS, tailS, pauses, targetDbfs: targetDbfs(),
+        stats: plan.stats,
       };
-      dubs().set(id, rec);
-      finished.clear(); previewBufs.clear();
+      finishedCache.clear();
+      previewBufs.clear();
 
-      // A dub is an ordinary edit carrying an id: 'fit' keeps the section's
-      // length (rate 1), 'natural' lets the rate absorb the difference, which
-      // everything downstream already understands.
-      const rate = chosen === 'natural' ? plan.rate : 1;
-      rec.rate = rate;
-      ctx.edits.applyDub(span.start, span.end, rate, id);
-
-      cue.dub = id;
-      cue.orig = cue.text;      // it now matches what will be spoken
-
-      // What the section will actually occupy, and therefore how much of it is
-      // pause. The rate is bounded, so cutting nearly all of a long line can
-      // still leave real dead air — say so instead of quietly producing it,
-      // because the right answer then is to cut the section, not respeak it.
-      const outS = srcS / rate;
-      // Net of the pause borrowed for the seams: that much is *supposed* to be
-      // silence, so counting it would have the tool advising you to cut a
-      // section over padding it added itself.
-      const padS = Math.max(0, outS - dubS - borrowedS / rate);
-      const pct = Math.abs(rate - 1) * 100;
-      const pictureNote = pct >= 0.5
-        ? ` Picture ${rate > 1 ? 'runs' : 'eases'} ${pct.toFixed(0)}% ${rate > 1 ? 'faster' : 'slower'} here.`
-        : '';
-      const squeezeNote = plan.squeeze > 1.01
-        ? ` Speech squeezed ${((plan.squeeze - 1) * 100).toFixed(0)}% to finish fitting.` : '';
-      // Past the speed bound there can still be real dead air. Say so, rather
-      // than producing it quietly — the answer there is Cut, not respeak.
-      const tail = padS > fitOpts().deadAirS + 0.25
-        ? ` ${padS.toFixed(1)} s of it is still pause — consider cutting this section instead.` : '';
-      if (!quiet) {
-        status(`Respoken — ${outS.toFixed(1)} s where the original took ${srcS.toFixed(1)} s.`
-          + pictureNote + squeezeNote + tail);
-      }
-      save();
+      applyPlan(plan);
+      retitleCaptions(parts);
+      saveScript();
+      status(planNote(plan.stats, keptS, narrationS));
+      renderPlan();
       if (onChanged) onChanged();
-      return rec;
+      return state.script;
     } finally {
+      running = false;
       setProgress(null, els.voiceProgress);
+      if (onChanged) onChanged();
     }
   }
 
-  // ---- the queue ----------------------------------------------------------
-  // Generating a line takes seconds, and clicking respeak on the next one
-  // while the first is running is the obvious thing to do. Rejecting that
-  // ("already respeaking a line") looked exactly like a frozen page: the
-  // button went dead and nothing happened. So clicks queue instead, one
-  // generation at a time — the model is single-threaded anyway, so running
-  // two at once would only make both slower.
-  const jobs = [];          // cues waiting their turn
-  let running = null;       // the cue being respoken right now
-  let pumping = false;
-
-  /** 'running', 'queued', or null — what the list shows on each row. */
-  function jobState(cue) {
-    if (cue && running === cue) return 'running';
-    return jobs.some((j) => j.cue === cue) ? 'queued' : null;
-  }
-  function queued() { return jobs.length + (running ? 1 : 0); }
-
-  async function pump() {
-    if (pumping) return;
-    pumping = true;
-    try {
-      while (jobs.length) {
-        const job = jobs.shift();
-        running = job.cue;
-        if (onChanged) onChanged();
-        try { job.resolve(await doRespeak(job.cue, job.opts)); }
-        catch (e) { job.reject(e); }
-        running = null;
+  /**
+   * Turn the plan into edits, one respoken span at a time.
+   *
+   * A planned section is a stretch of the kept timeline, which may straddle a
+   * section the user cut out earlier — so it lands as one or more source
+   * spans. Each gets its own slice of the narration, taken by *output*
+   * position rather than by its own length, so the slices stay exactly
+   * contiguous however the frame counts round.
+   */
+  function applyPlan(plan) {
+    const state = getState();
+    dubs().clear();
+    const edits = [];
+    for (const c of plan.cuts) {
+      for (const r of timeline.keptRangeToSource(c.start, c.end)) {
+        edits.push({ start: r.start, end: r.end, rate: 0, audio: 'mute', src: 'respeak' });
       }
-    } finally {
-      pumping = false;
-      running = null;
-      if (onChanged) onChanged();
     }
+    for (const sp of plan.spans) {
+      let out = sp.outStart;
+      for (const r of timeline.keptRangeToSource(sp.srcStart, sp.srcEnd)) {
+        const id = `d${dubs().size.toString(36)}`;
+        dubs().set(id, { id, scriptId: state.script ? state.script.id : null, atS: out });
+        edits.push({ start: r.start, end: r.end, rate: sp.rate, audio: 'keep', dub: id, src: 'respeak' });
+        out += (r.end - r.start) / sp.rate;
+      }
+    }
+    ctx.edits.replaceRespeak(edits);
   }
 
-  /** Respeak a line. Returns when *this* line is done; others may be queued. */
-  function respeak(cue, opts = {}) {
-    if (jobState(cue)) return Promise.resolve(null);   // already on its way
-    return new Promise((resolve, reject) => {
-      jobs.push({ cue, opts, resolve, reject });
-      if (onChanged) onChanged();
-      pump();
-    });
-  }
-
-  /**
-   * Respeak the whole script.
-   *
-   * Worth having for its own sake — you can rewrite the transcript and have the
-   * narration delivered again from end to end — but it also sidesteps the
-   * hardest problem in here. Every splice is a join between generated speech
-   * and a real recording, and those two never match perfectly. Respeak
-   * everything and there are no such joins left: the only seams are generated
-   * to generated, over one continuous bed of the room's own tone, and the
-   * whole track is consistent because one voice made all of it.
-   *
-   * Timing survives because each line is still dubbed into *its own* span, at
-   * its own timestamp, under the same dead-air rules. The narration is
-   * rebuilt; the screen recording is not touched.
-   */
-  async function respeakAll(cues, { onProgress = null } = {}) {
-    const list = (cues || []).filter((c) => c && String(c.text || '').trim() && !c.dub);
-    if (!list.length) throw new Error('Nothing left to respeak — every line already has been.');
-    await ensureCloned();
-
-    // Everything goes through the one queue, so a line clicked by hand while
-    // the batch runs simply takes its place in the same line rather than
-    // fighting it.
-    const total = list.length;
-    let done = 0, failed = 0;
-    const each = list.map((cue) => respeak(cue, { quiet: true }).then(
-      () => { done++; },
-      () => { done++; failed++; },
-    ).then(() => {
-      status(`Respeaking the script — ${done} of ${total}${failed ? ` (${failed} failed)` : ''}…`);
-      setProgress(done / total, els.voiceProgress);
-      if (onProgress) onProgress(done, total);
+  /** Captions for what is now being said, in source time. */
+  function retitleCaptions(parts) {
+    const state = getState();
+    const caps = state.captions;
+    if (!caps) return;
+    // Only the cues are replaced — the word timings still describe the
+    // recording, which is what the reference clip and the breath detector
+    // read them for — so only the cues need keeping for the way back.
+    if (!caps.beforeRespeak) caps.beforeRespeak = { cues: caps.cues };
+    const cues = wordsToCues(narrationWords(parts)).map((c) => ({
+      // The plan was built so that output time *is* narration time, so the
+      // inverse map is all it takes to put a cue back on the source timeline —
+      // which is the only timeline cues are ever stored in.
+      start: timeline.fromOutputTime(c.start),
+      end: timeline.fromOutputTime(c.end),
+      text: c.text,
     }));
-
-    await Promise.all(each);
-    setProgress(null, els.voiceProgress);
-    status(`Respoke ${done - failed} of ${total} lines${failed ? `, ${failed} failed` : ''}.`);
-    if (onChanged) onChanged();
+    caps.cues = cues;
+    ctx.captionsChanged();
   }
 
-  /** Drop everything still waiting. The line in flight finishes. */
-  function cancelRespeakAll() {
-    const dropped = jobs.splice(0, jobs.length);
-    for (const j of dropped) j.reject(new Error('cancelled'));
-    status(dropped.length ? `Cancelled ${dropped.length} queued line${dropped.length > 1 ? 's' : ''}.` : '');
-    if (onChanged) onChanged();
+  function planNote(st, keptS, narrationS) {
+    const bits = [`Respoke the script in ${fmt.fmtTime(narrationS)}, where the recording took ${fmt.fmtTime(keptS)}`];
+    bits.push(`${st.sections} section${st.sections > 1 ? 's' : ''} of picture re-timed`
+      + ` (${st.slowest.toFixed(2)}×–${st.fastest.toFixed(2)}×)`);
+    if (st.cutS > 0.05) bits.push(`${st.cutS.toFixed(1)} s cut where the script no longer covers the footage`);
+    if (st.tooSlow) {
+      bits.push(`${st.tooSlow} section${st.tooSlow > 1 ? 's run' : ' runs'} slower than you allowed`
+        + ' — there is more to say there than there is footage to show');
+    }
+    return bits.join('. ') + '.';
+  }
+
+  function renderPlan() {
+    if (!els.voicePlan) return;
+    const state = getState();
+    const sc = state && state.script;
+    if (!sc) { els.voicePlan.textContent = ''; return; }
+    els.voicePlan.textContent =
+      `Narration: ${fmt.fmtTime(sc.narrationS)} · ${sc.parts.length} sentences · `
+      + `${sc.parts.filter((p) => p.anchored).length} aligned to the recording by their own words.`;
   }
 
   /**
-   * Re-apply the dead-air settings to lines that were already respoken.
-   * Nothing is regenerated — the samples are unchanged and only the span's
-   * rate moves — but without this, changing the threshold would appear to do
-   * nothing until the next respeak, which is the kind of setting nobody
-   * trusts again afterwards.
+   * Re-time the picture to narration that has already been spoken.
+   *
+   * `Video may stretch` only decides how the picture moves, which means it can
+   * be turned and heard rather than being a promise about the next
+   * generation — the audio is untouched and only the spans' rates and the
+   * plan's cuts change. `Pause between sentences` is not like this: it is
+   * baked into the samples, so it needs a new take.
    */
-  function replanAll() {
-    const list = [...dubs().values()];
-    if (!list.length) return;
-    const opts = fitOpts();
-    let moved = 0;
-    for (const rec of list) {
-      const plan = planFit(rec.srcS, rec.dubS, { ...opts, borrowedS: rec.borrowedS || 0 });
-      const rate = plan.mode === 'natural' ? plan.rate : 1;
-      if (Math.abs(rate - (rec.rate ?? 1)) < 1e-6) continue;
-      rec.rate = rate;
-      rec.mode = plan.mode;
-      ctx.edits.applyDub(rec.start, rec.end, rate, rec.id);
-      moved++;
-    }
-    if (moved) {
-      finished.clear(); previewBufs.clear();
-      save();
-      if (onChanged) onChanged();
-      status(`Re-timed ${moved} respoken line${moved > 1 ? 's' : ''}.`);
-    }
+  function replan() {
+    const state = getState();
+    const sc = state && state.script;
+    if (!sc || running) return;
+    // Measure against the user's timeline, not the one the last plan left.
+    ctx.edits.replaceRespeak([]);
+    const { maxRate, minRate } = rateBand();
+    const plan = planTimeline(sc.parts, {
+      keptS: sc.keptS, narrationS: sc.narrationS, minRate, maxRate,
+    });
+    sc.stats = plan.stats;
+    previewBufs.clear();
+    applyPlan(plan);
+    retitleCaptions(sc.parts);
+    saveScript();
+    status(planNote(plan.stats, sc.keptS, sc.narrationS));
+    renderPlan();
+    if (onChanged) onChanged();
   }
 
-  /** Drop a respoken line, putting the original audio back. */
-  function revert(cue) {
-    if (!cue || !cue.dub) return;
-    const rec = dubs().get(cue.dub);
-    dubs().delete(cue.dub);
-    finished.clear(); previewBufs.clear();
-    if (rec) ctx.edits.clearDub(rec.start, rec.end);
-    cue.dub = null;
-    save();
+  /** Stop a generation in flight. */
+  function cancel() {
+    if (!worker) return;
+    worker.postMessage({ type: 'cancel' });
+    status('Cancelled.');
+  }
+
+  /** Drop the respoken narration and put the recording back. */
+  function revertScript({ quiet = false } = {}) {
+    const state = getState();
+    if (!state) return;
+    state.script = null;
+    dubs().clear();
+    finishedCache.clear();
+    previewBufs.clear();
+    ctx.edits.replaceRespeak([]);
+    const caps = state.captions;
+    if (caps && caps.beforeRespeak) {
+      caps.cues = caps.beforeRespeak.cues;
+      caps.beforeRespeak = null;
+      ctx.captionsChanged();
+    }
+    renderPlan();
+    if (!quiet) status('Back to the original recording.');
     if (onChanged) onChanged();
   }
 
   // ---- what the encoder asks for -----------------------------------------
-  // Called once per respoken span while exporting. The generation is stored at
-  // the model's 24 kHz mono; this is where it becomes exactly `frames` of
-  // interleaved audio at the video's rate, level-matched and faded.
+  // The narration is finished once, as one buffer at the output's rate, and
+  // every span is a window onto it. Finishing per span would give each span
+  // its own tone and level correction, which is exactly the drift this design
+  // exists to avoid.
 
   const resampleMono = (a, from, to) => {
-    if (from === to) return a;
+    if (!a || !a.length || from === to) return a;
     const r = createResampler(from, to);
     return r.push(a).slice();
   };
 
-  // The recording's room tone, at whatever rate is being asked for. Cached,
-  // because resampling a couple of seconds on every span would be silly.
-  const toneCache = new Map();
+  // The recording's room tone, at whatever rate is being asked for.
   function roomToneAt(sampleRate) {
     const state = getState();
     const src = state && state.audioAnalysis && state.audioAnalysis.roomTone;
     if (!src || !src.length) return null;
     const key = String(sampleRate);
-    if (toneCache.has(key)) return toneCache.get(key);
-    const at = resampleMono(src, state.audio.audio.sample_rate, sampleRate);
-    toneCache.set(key, at);
-    return at;
+    if (!toneCache.has(key)) {
+      toneCache.set(key, resampleMono(src, state.audio.audio.sample_rate, sampleRate));
+    }
+    return toneCache.get(key);
   }
 
-  /**
-   * The samples the encoder (or the preview) should emit for a respoken span.
-   * `toneReference` is the recording of the line being replaced, when the
-   * caller has it — the export does, and it is the best possible reference for
-   * matching the generation's tonal balance.
-   */
-  function pcmFor(id, { sampleRate, channels, frames, toneReference = null }) {
-    const rec = dubs().get(id);
-    if (!rec || !rec.pcm || !rec.pcm.length) return null;
-    // The span's head is borrowed pause (snapSpan), and the whole span plays
-    // at `rate`, so it occupies `leadS / rate` seconds of the output.
-    const leadSamples = Math.round(((rec.leadS || 0) / (rec.rate || 1)) * sampleRate);
-    const key = `${id}|${sampleRate}|${channels}|${frames}|${leadSamples}|${toneReference ? toneReference.length : 0}`;
-    if (finished.has(key)) return finished.get(key);
+  // The reference clip, at the output's rate: the tonal yardstick. Same
+  // speaker, same microphone, same room — and, unlike the model, it has
+  // something above 12 kHz, which is the whole reason to match to it.
+  function refToneAt(sampleRate) {
+    if (!refAudio || !refAudio.native || !refAudio.native.length) return null;
+    const key = String(sampleRate);
+    if (!refToneCache.has(key)) {
+      refToneCache.set(key, resampleMono(refAudio.native, refAudio.rate, sampleRate));
+    }
+    return refToneCache.get(key);
+  }
 
-    const out = finishDub(rec.pcm, {
-      modelRate: rec.sampleRate, outRate: sampleRate, channels, targetSamples: frames,
-      targetDbfs: rec.targetDbfs ?? targetDbfs(),
+  /** The whole narration, finished, mono, at `sampleRate`. */
+  function finishedAt(sampleRate) {
+    const state = getState();
+    const sc = state && state.script;
+    if (!sc || !sc.pcm || !sc.pcm.length) return null;
+    const key = String(sampleRate);
+    if (finishedCache.has(key)) return finishedCache.get(key);
+    const out = finishNarration(sc.pcm, {
+      modelRate: sc.sampleRate, outRate: sampleRate,
+      resample: resampleMono,
+      targetDbfs: sc.targetDbfs ?? targetDbfs(),
+      toneReference: refToneAt(sampleRate),
       roomTone: roomToneAt(sampleRate),
-      toneReference: toneReference ? toMono(toneReference, channels) : null,
-      resample: resampleMono, leadSamples,
+      pauses: sc.pauses,
     });
-    finished.set(key, out.pcm);
+    finishedCache.set(key, out.pcm);
     return out.pcm;
   }
 
-  /** Every respoken line, for the export summary. */
-  function count() { return dubs().size; }
+  /** The samples the encoder (or the preview) should emit for a respoken span. */
+  function pcmFor(id, { sampleRate, channels, frames }) {
+    const rec = dubs().get(id);
+    if (!rec) return null;
+    const mono = finishedAt(sampleRate);
+    if (!mono) return null;
+    const from = Math.round(rec.atS * sampleRate);
+    const out = new Float32Array(Math.max(0, frames | 0));
+    const n = Math.max(0, Math.min(out.length, mono.length - from));
+    if (n > 0) out.set(mono.subarray(from, from + n), 0);
+    return toInterleaved(out, channels);
+  }
 
   // ---- hearing it before exporting ---------------------------------------
-  // The preview is a <video> playing the original file, so a respoken line is
+  // The preview is a <video> playing the original file, so the narration is
   // not in it. `previewBuffer` renders the same samples the encoder will get —
-  // through the same finishDub, at the same length — as an AudioBuffer, and
-  // compressor.js plays it over the muted original while the playhead is
-  // inside that span. What you hear before exporting is what gets exported.
-  const previewBufs = new Map();
+  // through the same finishNarration, at the same length — as an AudioBuffer,
+  // and compressor.js plays it over the muted original while the playhead is
+  // inside that span.
 
-  function previewBuffer(id, { sampleRate, frames }, ctx) {
+  function previewBuffer(id, { sampleRate, frames }, audioCtx) {
     const key = `${id}|${sampleRate}|${frames}`;
     if (previewBufs.has(key)) return previewBufs.get(key);
     const pcm = pcmFor(id, { sampleRate, channels: 1, frames });
     if (!pcm) return null;
-    const buf = ctx.createBuffer(1, pcm.length, sampleRate);
+    const buf = audioCtx.createBuffer(1, pcm.length, sampleRate);
     buf.copyToChannel(pcm, 0);
     previewBufs.set(key, buf);
     return buf;
   }
 
-  /** 'respoken' (hear your edits) or 'original' (hear the recording). */
+  /** 'respoken' (hear the new narration) or 'original' (hear the recording). */
   function previewTrack() {
     return els.inVoiceTrack ? els.inVoiceTrack.value : 'respoken';
   }
 
-  /** Is there anything respoken to listen to? */
-  function hasDubs() { return dubs().size > 0; }
+  function isRespoken() { const s = getState(); return !!(s && s.script); }
+  function isRunning() { return running; }
 
   // ---- persistence --------------------------------------------------------
-  // Intent only: the samples are regenerated from the same text and seed.
-  function save() {
+  // The script and the seed, not the samples: a few minutes of narration is
+  // tens of MB, and it can be made again exactly from these two.
+  function saveScript() {
     const state = getState();
-    if (!state) return;
+    if (!state || !state.file) return;
     try {
-      const list = [...dubs().values()].map(({ pcm, ...rest }) => rest);
-      if (!list.length) { localStorage.removeItem(LS_DUB_KEY); return; }
+      const text = scriptText();
       const f = state.file;
-      localStorage.setItem(LS_DUB_KEY, JSON.stringify({
+      localStorage.setItem(LS_SCRIPT_KEY, JSON.stringify({
         v: 1, file: { name: f.name, size: f.size, lastModified: f.lastModified },
-        lang: els.inVoiceLang.value, reference, dubs: list,
+        lang: els.inVoiceLang.value, reference,
+        text, seed: state.script ? state.script.seed : null,
       }));
     } catch (_) {}
   }
 
   function restore(file) {
     try {
-      const d = JSON.parse(localStorage.getItem(LS_DUB_KEY) || 'null');
+      const d = JSON.parse(localStorage.getItem(LS_SCRIPT_KEY) || 'null');
       if (!d || !d.file || d.file.name !== file.name || d.file.size !== file.size
           || d.file.lastModified !== file.lastModified) return null;
+      if (els.scriptText && d.text) { els.scriptText.value = d.text; scriptEdited = true; }
+      renderScriptInfo();
       return d;
     } catch (_) { return null; }
-  }
-
-  /** Re-make every restored line's audio, in order. */
-  async function regenerateAll(list, onEach) {
-    for (const rec of list) {
-      if (!rec || !rec.text) continue;
-      await ensureCloned();
-      const res = await ask({ type: 'speak', text: rec.text, temperature: 0.7, seed: rec.seed },
-        'audio', (m) => { if (m.type === 'status') status(m.text); });
-      dubs().set(rec.id, { ...rec, pcm: res.pcm, sampleRate: res.sampleRate });
-      finished.clear(); previewBufs.clear();
-      if (onEach) onEach(rec);
-    }
   }
 
   // ---- settings -----------------------------------------------------------
@@ -597,8 +677,7 @@ export function createVoice(ctx) {
     return {
       voiceLang: els.inVoiceLang.value,
       voiceTrack: els.inVoiceTrack ? els.inVoiceTrack.value : 'respoken',
-      voiceTrim: els.inVoiceTrim ? els.inVoiceTrim.checked : true,
-      voiceDeadAir: els.inVoiceDeadAir ? els.inVoiceDeadAir.value : '0.15',
+      voicePause: els.inVoicePause ? els.inVoicePause.value : '0.36',
       voiceStretch: els.inVoiceStretch ? els.inVoiceStretch.value : '50',
     };
   }
@@ -606,9 +685,22 @@ export function createVoice(ctx) {
     if (!g) return;
     if (g.voiceLang && VOICE_LANGS[g.voiceLang]) els.inVoiceLang.value = g.voiceLang;
     if (els.inVoiceTrack && g.voiceTrack) els.inVoiceTrack.value = g.voiceTrack;
-    if (els.inVoiceTrim && g.voiceTrim != null) els.inVoiceTrim.checked = !!g.voiceTrim;
-    if (els.inVoiceDeadAir && g.voiceDeadAir != null) els.inVoiceDeadAir.value = g.voiceDeadAir;
+    if (els.inVoicePause && g.voicePause != null) els.inVoicePause.value = g.voicePause;
     if (els.inVoiceStretch && g.voiceStretch != null) els.inVoiceStretch.value = g.voiceStretch;
+  }
+
+  function updateUI() {
+    const state = getState();
+    const has = isRespoken();
+    if (els.btnVoiceAll) {
+      els.btnVoiceAll.disabled = running;
+      els.btnVoiceAll.textContent = has ? 'Respeak it again' : 'Respeak the whole script';
+    }
+    if (els.btnVoiceAllCancel) els.btnVoiceAllCancel.hidden = !running;
+    if (els.btnVoiceUndo) els.btnVoiceUndo.hidden = !has;
+    if (els.btnScriptFill) {
+      els.btnScriptFill.disabled = !(state && state.captions && state.captions.cues && state.captions.cues.length);
+    }
   }
 
   function wire() {
@@ -624,70 +716,59 @@ export function createVoice(ctx) {
         refreshCachedLabel();
       });
     }
-    for (const el of [els.inVoiceTrim, els.inVoiceDeadAir, els.inVoiceStretch]) {
-      if (!el) continue;
-      // Both re-time every line already respoken, so the setting is something
-      // you can turn and hear rather than a promise about the next generation.
-      el.addEventListener('change', replanAll);
-    }
-    if (els.inVoiceTrack) {
-      els.inVoiceTrack.addEventListener('change', () => {
-        // The running dub (if any) is dropped by the preview loop on the next
-        // frame; nudging onChanged keeps the rest of the UI honest.
-        if (onChanged) onChanged();
+    if (els.scriptText) {
+      els.scriptText.addEventListener('input', () => {
+        scriptEdited = true;
+        renderScriptInfo();
+        saveScript();
       });
+    }
+    if (els.btnScriptFill) {
+      els.btnScriptFill.addEventListener('click', () => fillScriptFromTranscript({ force: true }));
     }
     if (els.btnVoiceAll) {
       els.btnVoiceAll.addEventListener('click', async () => {
-        const state = getState();
-        const cues = state && state.captions && state.captions.cues;
-        els.btnVoiceAll.disabled = true;
-        if (els.btnVoiceAllCancel) els.btnVoiceAllCancel.hidden = false;
-        try { await respeakAll(cues, { onProgress: () => {} }); }
-        catch (e) { status(e.message); }
-        finally {
-          els.btnVoiceAll.disabled = false;
-          if (els.btnVoiceAllCancel) els.btnVoiceAllCancel.hidden = true;
-        }
+        try { await respeakScript(); }
+        catch (e) { if (e && e.message !== 'cancelled') status(e.message); }
       });
     }
-    if (els.btnVoiceAllCancel) {
-      els.btnVoiceAllCancel.addEventListener('click', cancelRespeakAll);
-    }
-    // Keep the Stop button in step with the queue however it was filled —
-    // the batch button, or a handful of clicks down the transcript.
-    els.__voiceQueueTick = setInterval(() => {
-      if (!els.btnVoiceAllCancel) return;
-      const busyNow = queued() > 0;
-      if (els.btnVoiceAllCancel.hidden === busyNow) els.btnVoiceAllCancel.hidden = !busyNow;
-    }, 300);
+    if (els.btnVoiceAllCancel) els.btnVoiceAllCancel.addEventListener('click', cancel);
+    if (els.btnVoiceUndo) els.btnVoiceUndo.addEventListener('click', revertScript);
     if (els.btnVoiceRef) {
-      els.btnVoiceRef.addEventListener('click', async () => {
+      els.btnVoiceRef.addEventListener('click', () => {
         const list = candidates();
         if (!list.length) { status('Generate a transcript first.'); return; }
         refRank = (refRank + 1) % list.length;
         reference = list[refRank];
         clonedFor = null;
         renderReference();
-        status('Reference changed — the next line you respeak will use it.');
+        status('Reference changed — it will be used the next time you respeak.');
       });
     }
+    if (els.inVoicePause) els.inVoicePause.addEventListener('change', renderScriptInfo);
+    // Turning this re-times a narration already spoken, without regenerating
+    // a thing — so it is a dial you can hear rather than a setting you have
+    // to take on trust until next time.
+    if (els.inVoiceStretch) els.inVoiceStretch.addEventListener('change', replan);
     refreshCachedLabel();
   }
 
   /** Called when a new file is loaded. */
   function reset(file) {
-    reference = null; clonedFor = null; refRank = 0; referenceDbfs = null;
-    finished.clear(); previewBufs.clear(); toneCache.clear();
+    reference = null; clonedFor = null; refRank = 0; referenceDbfs = null; refAudio = null;
+    finishedCache.clear(); previewBufs.clear(); toneCache.clear(); refToneCache.clear();
+    if (els.scriptText) els.scriptText.value = '';
+    scriptEdited = false;
+    if (els.voicePlan) els.voicePlan.textContent = '';
+    status('');
     return file ? restore(file) : null;
   }
 
   return {
-    wire, settings, applySettings, reset, restore, regenerateAll,
-    respeak, respeakAll, cancelRespeakAll, jobState, queued,
-    revert, replanAll, pcmFor, count, save,
-    previewBuffer, previewTrack, hasDubs,
-    isChanged, changedLines,
+    wire, settings, applySettings, reset, restore, updateUI,
+    respeakScript, cancel, revertScript, replan,
+    fillScriptFromTranscript, renderScriptInfo, renderPlan,
+    pcmFor, previewBuffer, previewTrack, isRespoken, isRunning,
     reference: () => reference,
     setStatus: status,
     ready: () => loaded,
