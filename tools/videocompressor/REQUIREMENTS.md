@@ -201,6 +201,9 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 |------|------|
 | `index.html` | Page + UI (raw HTML) |
 | `compressor.js` | Demux, preview/trim/cuts, transcode, mux, caption orchestration, all UI wiring |
+| `filmstrip.js` | Timeline rows 1 & 2 (overview filmstrip + zoom window): the hidden decode `<video>`, the serialized seek queue, the frame cache, the canvases, and the full-resolution grab the cover picker uses (given a `ctx` by `compressor.js`) |
+| `cover.js` | Pure MP4 cover art: write `moov/udta/meta/ilst/covr` into a finished file and shift every `stco`/`co64` chunk offset to match |
+| `cover.test.mjs` | Node test for `cover.js` — `node cover.test.mjs` |
 | `audio-boost.js` | Pure gain / voice-band leveler math |
 | `captions.js` | Pure caption logic: resampler, voice activity + compaction + time mapping, window planning, seam merging, words → cues, `cueAt`, `drawCaption` |
 | `captions-ui.js` | Caption UI + job orchestration: model presets, worker, cue list, overlay, persistence (given a `ctx` by `compressor.js`) |
@@ -230,6 +233,66 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
   which maps each kept span to where it lands in the output — the timeline,
   the preview's `playbackRate`, caption times and the encoder all read it.
   Older saved `cuts` migrate to `rate: 0`.
+- **Three timeline rows, one domain.** `tlDomain()` says what the rows are
+  laid out in — the source clip in Trim, the *output* (cuts closed up, speed
+  applied) in Settings/Export — and all three read it, so they can never
+  disagree. Row 1 is a filmstrip of the whole thing; row 2 is a zoom window
+  with a ruler (and one tick per frame once frames are >6 px apart); row 3 is
+  the clip region with the handles and the edit bands. **Only row 3 carries
+  controls.** That is the point of the split: an edit band is drawn over
+  exactly the pixels you want to press to move the playhead, so on rows 1 and
+  2 cuts and speed-ups are a 5 px `pointer-events: none` strip along the
+  bottom and nothing else. Row 2 re-pages only when the playhead leaves it
+  (12 % margin) and never during a drag, so the frames don't slide under the
+  pointer; it is frozen while the preview plays, because a still fetched for
+  a window that has already moved on is worse than no still.
+- **Stills come from a second, hidden `<video>`** on the same Blob URL, never
+  from the preview: seeking to build a strip must not disturb what is being
+  watched. One element services one seek at a time, so every request — both
+  rows and the cover picker — goes through one queue, and results are cached
+  by timestamp (96 px tall, 360 max) so a resize or a step change repaints
+  for free. A newer generation of a row cancels the older one's outstanding
+  requests.
+- **That queue is prioritised, fine row first,** because an MP4 is not random
+  access: a time is reached by decoding forward from the preceding keyframe.
+  Row 2's stills are clustered (mostly one GOP); row 1's are scattered across
+  the file and cost a full seek each. Priorities are hand-grab (the cover
+  picker) > zoom > film, and row 1's fill is additionally held back ~260 ms
+  behind row 2's debounce, because a seek already *in progress* cannot be
+  preempted. **A whole row's requests are enqueued before the first is
+  awaited** — this is the part that actually makes the priority work; awaiting
+  them one at a time leaves a single job per row in the queue, there is
+  nothing to order, and the two rows simply alternate.
+- **Cover image.** The chosen frame is written into the finished MP4 as
+  iTunes-style cover art (`moov/udta/meta/ilst/covr`, `data` type 13 = JPEG),
+  which is the mechanism ffmpeg uses for `attached_pic`. It happens *after*
+  `muxer.finalize()`, because mp4-muxer has no notion of it and because a
+  metadata edit must not touch a frame of picture. The hazard is that `moov`
+  precedes `mdat` (fastStart) and media is addressed by absolute file offset,
+  so `cover.js` bumps every `stco`/`co64` entry at or past the insertion point
+  by the size of the inserted tree *before* splicing it in. Failure degrades
+  to a note on the result line — it must never lose an export. The image is a
+  JPEG at the source frame's size capped to 1920 px on the long edge (a cover
+  is a thumbnail, not a master) and is also downloadable, because most
+  non-Apple players ignore cover art and a `<video poster>` wants a file.
+  Persisted as a timestamp, not as bytes: a JPEG in `localStorage` would eat
+  the quota, and the frame can simply be grabbed again.
+- **The cover button lives in the transport**, not in a panel: the transport
+  is relocated into whichever step is open, so the button is wherever you
+  just scrubbed. It carries its own state (lit + a tooltip naming the frame)
+  because the Export panel's thumbnail is invisible from the editing steps.
+- **A frame is never taken on trust.** `drawImage` on a `<video>` that has
+  reached HAVE_METADATA but decoded nothing does not throw: it draws nothing
+  and leaves the canvas transparent, so an early grab yields a *blank cover
+  with no error anywhere* — confirmed in Chrome (`readyState 0`, no throw,
+  centre pixel alpha 0). Every grab therefore checks `readyState >= 2` first
+  and the centre pixel's alpha after, since a decoded frame is always opaque.
+  `coverFrameAt()` then works down a ladder — the preview when it is already
+  on that frame (no seek; the ordinary press), the hidden `<video>` seeked
+  there (a restored cover), and the preview once it has a frame, waited for —
+  returning the time it really used. Same class of bug in `seekGrab`:
+  assigning `currentTime` the value it already holds fires no `seeked`, which
+  at t = 0 on a cold start meant waiting out the 5 s timeout for nothing.
 - **Transcript-first.** Step 2 transcribes the *whole* file, then cutting and
   speeding are done by reading: each line and each silence longer than 1.5 s
   gets a row with `cut` / `N× voice` / `N× silent`, plus a toolbar that applies
@@ -616,6 +679,45 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
     edits and the transcript, and a real export (960×540, 15 fps) produced a
     19.32 s file whose audio had 2 sample-to-sample jumps over the whole track
     — i.e. no discontinuity at any of the five section seams.
+- Cover at a cold start (2026-09-19, Chrome): pressing the button the instant
+  the tool has parsed the file — `preview.readyState === 0`, nothing decoded
+  anywhere — must produce a *real* frame, not a blank. It does: 53 ms, and the
+  JPEG spans the full 0–255 range rather than being flat. Pressed once
+  anything has decoded it is 43 ms and takes no seek at all. Restoring a cover
+  saved at 0:12.00 into a freshly opened page came back in 205 ms, from the
+  right frame. (Note when testing by hand: settings save on a 300 ms debounce,
+  so reloading immediately after choosing a cover legitimately loses it.)
+- Cover art: `node cover.test.mjs` (the tree lands at the end of `moov`;
+  `moov` and the file grow by the same amount; every chunk offset moves with
+  `mdat`, and offsets *ahead* of the insertion point don't; the media is still
+  where the patched tables say it is; `co64` and multiple tracks; the image
+  reads back byte for byte; the input buffer is untouched; tagging twice and a
+  file with no `moov` are refused). Against real files, checked 2026-09-19
+  with ffmpeg: tagging an H.264+AAC MP4 left `framemd5` of both the video and
+  the audio **identical**, and ffprobe then reported a third stream,
+  `mjpeg` with `disposition:attached_pic=1`. End to end in Chrome on a 30 s
+  960×540 clip: cover chosen at 0:18.50, exported to 480×270/Opus, and the
+  downloaded file came back as h264 + opus + a 960×540 attached mjpeg, decoded
+  clean on both real streams, and still played in the page's own `<video>`.
+- Timeline rows: checked 2026-09-19 in Chrome. On a 30 s clip the overview
+  filled from the file's own frames, pressing at 70 % seeked to 0:21.00 and
+  re-centred the zoom window, four wheel notches took the window 30 s → 4.1 s
+  with a 0.5 s ruler, and dragging across row 2 scrubbed to 0:22.23. A cut, a
+  speed-up and a head trim showed as red / blue / dimmed strips on both
+  navigation rows while staying clickable only on row 3. Dragging the window
+  box moved the window and left the playhead alone. In Settings the rows
+  switched to the output timeline (0:22.67, no marks).
+- Fill order, measured on the 249 MB 3:29 **4K** source by hashing each row's
+  canvas every 50 ms (2026-09-19). Sixteen seeks on that file: **2456 ms
+  scattered across the whole clip vs 1872 ms clustered in 10 s**, i.e. 154 ms
+  against 117 ms each — the premise, and mild enough that *ordering*, not
+  throughput, is the win. Queuing one request at a time the rows alternated
+  (fine row done at 2524 ms, overview at 2873 ms); queuing each row up front,
+  every fine still lands first — fine row done at **1482 ms**, the overview's
+  first still not until 1672 ms and done at 2725 ms. Jumping the playhead
+  1.9 s in, while the overview was still filling, put eight fresh fine stills
+  on screen between 2089 and 3187 ms and the overview only resumed at
+  3279 ms, i.e. preemption works down to the one seek already in flight.
 - Transcript flow: a 20 s clip with three spoken sentences transcribed whole,
   two silence rows detected (5.9 s and 6.5 s), "all 4× silent" took 20.18 s →
   10.93 s, and cutting one line took it to 9.25 s.

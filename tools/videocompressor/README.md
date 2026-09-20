@@ -39,6 +39,45 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   drop (mark start → mark end); removed sections are skipped during encode and
   the output timestamps compact to stitch the clip back together (audio too). A
   shorter kept duration encodes to a smaller file.
+- **The timeline is three rows.** The row that carries the trim handles, the
+  cut bands and the speed bands is exactly the row you want to press to get
+  somewhere, and the bands win — so navigation moved to two rows of its own
+  above it:
+  1. a **filmstrip** of the whole clip, drawn from stills of the file itself:
+     where am I, and what is over there? Press anywhere to jump; drag the
+     white box to move the zoom window without moving the playhead.
+  2. a **zoom window** — a few seconds, with a ruler and, once the frames are
+     more than a few pixels apart, one tick per frame. Drag to scrub, scroll
+     to zoom (or use −/+/Fit). It follows the playhead, but only re-pages when
+     the playhead actually leaves it, so the picture doesn't slide about under
+     the pointer mid-drag. This is the row that makes "mark the cut *here*"
+     a matter of aiming rather than of nudging with the arrow keys.
+  3. the **clip region** as before: green kept range, dimmed head and tail,
+     red cuts, blue speed-ups, draggable handles — the only row with controls
+     on it. Cuts and speed-ups appear on rows 1 and 2 only as a thin,
+     unclickable strip along the bottom, so they can never sit between you
+     and the frame you're aiming at.
+
+  The stills come from a *second*, hidden `<video>` on the same Blob URL, so
+  building a strip never disturbs playback; seeks are serialized through one
+  queue and cached by timestamp, so resizing or changing step is free. In
+  Settings/Export all three rows switch to the **output** timeline, so the
+  strip shows the film you are actually making, cuts closed up.
+
+  **The fine row is filled first.** An MP4 is not random access: reaching a
+  time means decoding forward from the keyframe before it. Row 2's stills are
+  a fraction of a second apart and mostly share a GOP; row 1's are scattered
+  over the whole file, so each is a fresh seek — on a 4K screencast, 154 ms
+  each against 117 ms for a clustered one, and sixteen of them. Filling the
+  overview first would make you wait on frames you aren't looking at, so the
+  queue is a *priority* queue: row 2 goes first and always jumps ahead, and
+  moving the zoom window preempts whatever is left of the overview, which
+  resumes afterwards. The subtlety is that a whole row's requests are queued
+  **up front** rather than one at a time — a priority queue can only order
+  what has been queued, and asking one at a time left one job from each row
+  in it, so the rows just took turns. On a 249 MB 3:29 4K source that is the
+  difference between the fine row being ready at 2.5 s and at 1.5 s, with the
+  overview following at 2.7 s either way.
 - **Stepped workflow** — one panel at a time (Source → Transcript & edit →
   Settings →
   Export). The single `<video>` preview is *relocated* into the active step: it's
@@ -59,6 +98,39 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
   frames by presentation timestamp.
 - **Mux** — [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) writes the
   encoded chunks back into an MP4 with `fastStart` (moov at the front).
+- **Cover image** (optional) — the still a player shows before you press
+  play. MP4 has no field called "thumbnail"; what it has is iTunes-style
+  cover art, `moov/udta/meta/ilst/covr`, which is what ffmpeg writes for
+  `-disposition:v:N attached_pic`. Scrub to a frame and press the picture
+  button in the transport — it sits with the play controls, so it travels
+  with the preview into whichever step is open and the frame you want is
+  always the one you just scrubbed to; it lights up once a cover is set and
+  its tooltip names the frame. (Export has the same button beside the
+  thumbnail.) `cover.js` splices that JPEG into the finished file *after* the
+  mux —
+  metadata only, so it costs no encoding time and touches no picture. The
+  catch is that growing `moov` slides `mdat` forward, and every chunk of media
+  is addressed by its absolute offset in the file, so each track's `stco` /
+  `co64` table is patched by the same amount before the bytes go in; get that
+  wrong and the file plays garbage. Apple's players and Finder, VLC and Plex
+  read cover art; plenty of other players and file managers ignore any such
+  tag and just decode a frame, so the image is downloadable too — that is the
+  file to hand a `<video poster>` or a video site. The choice is remembered
+  as a *timestamp* (the frame is re-grabbed next time the same file is
+  loaded), never as a JPEG in `localStorage`.
+
+  Getting the frame is a three-step ladder, because `<video>` will hand you a
+  blank one if you ask too early: `drawImage` on a video that has metadata
+  but no decoded frame does not throw — it draws *nothing*, leaving the
+  canvas transparent, and you get a blank cover with no error anywhere. So
+  every grab is checked both before (`readyState >= 2`) and after (a decoded
+  frame is opaque, so a transparent centre pixel means the draw was a no-op).
+  Then: **the preview itself** when it is already on that frame, which is
+  every ordinary press — no seek at all, 43 ms, and literally the picture you
+  were looking at; **the filmstrip's hidden `<video>`** seeked there, for a
+  cover restored from last time; and failing that, **the preview once it has
+  a frame**, waiting for it if the video has only just opened, and reporting
+  the time it actually took rather than claiming one it hasn't got.
 - **Audio** — AAC audio is **copied through unchanged** via
   `addAudioChunkRaw` (remuxed, never re-encoded) by default. Non-AAC audio is
   dropped, and the UI says so. When something *does* change the samples — a
@@ -270,6 +342,9 @@ reached, so trims near the start of a long video finish quickly.
 |------|------------|
 | `index.html` | The page. Templated by Jekyll (`layout: null`) only to stamp `?v=<commit>` on every asset URL and to emit the cache-busting import map; it holds no inline JS, and the `.js` files beside it stay front-matter-free and are served verbatim. Loads MP4Box as a global `<script>`, then the module. |
 | `compressor.js` | ES module: streaming demux, preview/trim, transcode, mux, and all UI wiring. |
+| `filmstrip.js` | ES module: timeline rows 1 and 2 — the overview filmstrip and the zoom window — plus the hidden `<video>`, seek queue and frame cache that feed them (and the full-resolution grab the cover picker uses). Gets its DOM/state/timeline through one `ctx`, like `captions-ui.js`. |
+| `cover.js` | ES module: MP4 cover art. Writes the `moov/udta/meta/ilst/covr` tree into a finished file and shifts every `stco`/`co64` chunk offset to match. Pure `ArrayBuffer` maths — no DOM — so it runs under Node. |
+| `cover.test.mjs` | Node test for the above. `node cover.test.mjs`. |
 | `breath.js` | ES module: breath detection (gap + level + noise-like + rises out of the floor) and region ducking with ramps. Pure `Float32Array` maths, tested by `breath.test.mjs`. |
 | `breath.test.mjs` | Node test for the above. `node breath.test.mjs`. |
 | `audio-boost.test.mjs` | Node test for the leveller's non-speech hold. `node audio-boost.test.mjs`. |

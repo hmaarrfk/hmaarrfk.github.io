@@ -31,6 +31,8 @@ import { detectBreaths, duckRegions } from './breath.js';
 import { findRoomTone } from './voice.js';
 import { createCaptions } from './captions-ui.js';
 import { createVoice } from './voice-ui.js';
+import { createFilmstrip } from './filmstrip.js';
+import { addCoverArt } from './cover.js';
 
 const MP4Box = window.MP4Box;
 
@@ -68,6 +70,12 @@ const els = {
   // preview / trim
   preview: $('preview'), timecode: $('timecode'),
   tlTrack: $('tl-track'), handleIn: $('handle-in'), handleOut: $('handle-out'),
+  // timeline rows 1 & 2 (overview filmstrip + zoom window)
+  tlFilm: $('tl-film'), filmCanvas: $('film-canvas'), filmMarks: $('film-marks'),
+  filmView: $('film-view'), filmPlayhead: $('film-playhead'),
+  tlZoom: $('tl-zoom'), zoomCanvas: $('zoom-canvas'), zoomMarks: $('zoom-marks'),
+  zoomPlayhead: $('zoom-playhead'), zoomLabel: $('zoom-label'),
+  btnZoomIn: $('btn-zoom-in'), btnZoomOut: $('btn-zoom-out'), btnZoomFit: $('btn-zoom-fit'),
   playhead: $('playhead'), dimHead: $('dim-head'), dimTail: $('dim-tail'), keepRegion: $('keep-region'),
   cutsLayer: $('cuts-layer'), tlPending: $('tl-pending'),
   btnSetIn: $('btn-set-in'), btnSetOut: $('btn-set-out'), btnResetTrim: $('btn-reset-trim'),
@@ -107,6 +115,9 @@ const els = {
   btnCompress: $('btn-compress'), btnCancel: $('btn-cancel'),
   est: $('est'), progress: $('progress'), status: $('status'),
   resultVideo: $('result-video'), resultMeta: $('result-meta'), download: $('download'),
+  // cover image
+  coverThumb: $('cover-thumb'), coverInfo: $('cover-info'), coverDownload: $('cover-download'),
+  btnCoverSet: $('btn-cover-set'), btnCoverClear: $('btn-cover-clear'),
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +212,24 @@ function scrubSeek(t) {
   else els.preview.currentTime = t;
 }
 
+// What the timeline's rows are laid out in. In Trim that is the source clip,
+// end to end; in Settings/Export it is the *output* — cuts closed up, speed
+// changes applied — so every row shows the film you are actually making.
+// One definition, read by all three rows.
+function tlDomain() {
+  if (!state) return { total: 1, toSrc: (t) => t, fromSrc: (t) => t, output: false };
+  if (previewMode === 'output') {
+    const total = keptDuration();
+    return { total, toSrc: (o) => fromOutputTime(clamp(o, 0, total)), fromSrc: (t) => toOutputTime(t), output: true };
+  }
+  return {
+    total: state.durationS,
+    toSrc: (t) => clamp(t, 0, state.durationS),
+    fromSrc: (t) => t,
+    output: false,
+  };
+}
+
 // Position the playhead + timecode for a source time, respecting the timeline
 // mode (full edit timeline vs compressed output timeline).
 function paintPlayhead(t) {
@@ -213,12 +242,13 @@ function paintPlayhead(t) {
     els.playhead.style.left = `${timeToX(t)}px`;
     els.timecode.textContent = `${fmtTime(t)} / ${fmtTime(state.durationS)}`;
   }
+  film.renderHeads(t);
 }
 
 // Map a track x-offset to the source time to seek to (compressed in output mode).
 function xToSeekTime(x) {
-  const frac = clamp(x / trackWidth(), 0, 1);
-  return previewMode === 'output' ? fromOutputTime(frac * keptDuration()) : frac * state.durationS;
+  const d = tlDomain();
+  return d.toSrc(clamp(x / trackWidth(), 0, 1) * d.total);
 }
 
 function relocatePreview(name) {
@@ -295,7 +325,8 @@ function updateExportSummary() {
   const voiceNote = voice.isRespoken() ? ' · narration respoken' : '';
   els.exportSummary.textContent =
     `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
-    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}${voiceNote}${codecNote}${captions.burnOn() ? ' · captions burned in' : ''}`;
+    `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}${voiceNote}${codecNote}${captions.burnOn() ? ' · captions burned in' : ''}` +
+    `${state.cover ? ` · cover from ${fmtTime(state.cover.time)}` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +354,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Overdub lives in its own module too (voice-ui.js). It is created before
 // captions because the transcript list has to be able to ask it whether the
 // narration has been respoken.
+// The timeline's two navigation rows (filmstrip + zoom window) live in their
+// own module; row 3 — the clip region with the handles and the edit bands —
+// stays here, because it is the one that edits things.
+const film = createFilmstrip({
+  els,
+  getState: () => state,
+  domain: tlDomain,
+  activeEdits: () => activeEdits(),
+  scrub: (t) => scrubSeek(t),
+  isPlaying: () => !els.preview.paused && !els.preview.ended,
+});
+
 const voice = createVoice({
   els,
   getState: () => state,
@@ -407,7 +450,13 @@ function saveSettings() {
       ...voice.settings(),
     },
     file: { name: state.file.name, size: state.file.size, lastModified: state.file.lastModified },
-    trim: { inS: state.inS, outS: state.outS, edits: state.edits },
+    // The cover is stored as a *time*, not an image: the frame is re-grabbed
+    // from the file when the same file is loaded again, and a JPEG in
+    // localStorage would blow the quota for nothing.
+    trim: {
+      inS: state.inS, outS: state.outS, edits: state.edits,
+      cover: state.cover ? state.cover.time : null,
+    },
   };
   try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (_) {}
 }
@@ -598,7 +647,7 @@ async function loadFile(file) {
     file, mp4, atoms, mdat, video, audio, durationS, fps, previewURL,
     inS: 0, outS: durationS, edits: [], pendingMarkStart: null,
     audioAnalysis: null, audioEncoderSupported: false, audioEnc: null, breaths: [],
-    isAac: false, captions: captions.restore(file),
+    isAac: false, captions: captions.restore(file), cover: null,
     // Respoken lines: the samples aren't persisted (they're regenerated from
     // the same text and seed), so this starts empty even when intent survives.
     dubs: new Map(), script: null, scriptRestored: voice.reset(file),
@@ -662,6 +711,7 @@ async function loadFile(file) {
   // trim + cuts only when the same file is loaded again.
   const saved = readSettings();
   let restoredNote = '';
+  let coverAt = null;
   if (saved) {
     applyGeneral(saved.general);
     if (isAac && saved.general && saved.general.keepAudio != null) els.inAudio.checked = !!saved.general.keepAudio;
@@ -683,6 +733,7 @@ async function loadFile(file) {
           audio: e.audio === 'keep' ? 'keep' : 'mute',
           ...(e.dub ? { dub: e.dub } : {}), ...(e.src ? { src: e.src } : {}),
         }));
+      if (saved.trim.cover != null && isFinite(saved.trim.cover)) coverAt = saved.trim.cover;
       restoredNote = '  ·  restored your last trim, edits & settings';
     } else if (saved.general) {
       restoredNote = '  ·  applied your last settings';
@@ -690,8 +741,13 @@ async function loadFile(file) {
   }
   if (restoredNote) els.info.textContent += restoredNote;
 
-  // Preview + trim
+  // Preview + trim. The filmstrip's own hidden <video> follows the new file,
+  // and any stills cached from the last one are thrown away.
+  film.reset();
   setupPreview();
+  renderCover();
+  // A cover chosen last time is a timestamp; go and fetch that frame again.
+  if (coverAt != null) captureCover(coverAt).catch((e) => console.warn('Cover frame:', e));
 
   els.steps.hidden = false;      // reveal step nav now that a video is loaded
   updateAudioUI();
@@ -1137,6 +1193,7 @@ function renderTrim() {
     els.dimTail.style.width = '0px';
     els.cutsLayer.innerHTML = '';
     els.tlPending.style.display = 'none';
+    film.render();
     renderPlayhead();
     updateEstimate();
     return;
@@ -1167,11 +1224,14 @@ function renderTrim() {
   for (const b of [els.btnCutEnd, els.btnSpeedVoice, els.btnSpeedSilent]) {
     if (b) b.style.outline = marked ? '2px solid var(--good)' : 'none';
   }
+  film.render();
   updateEstimate();
 }
 
 function renderPlayhead() {
   paintPlayhead(els.preview.currentTime || 0);
+  // …and let the zoom window re-page itself if the playhead has walked out.
+  film.trackPlayhead();
   if (state.pendingMarkStart != null) renderPending();
 }
 
@@ -1214,6 +1274,7 @@ function setupPreview() {
         case 'nextFrame': v.pause(); seek((v.currentTime || 0) + frameStep()); break;
         case 'toIn': seek(state.inS); break;
         case 'toOut': seek(state.outS); break;
+        case 'cover': v.pause(); useFrameAsCover(); break;
       }
     };
   });
@@ -2335,8 +2396,22 @@ async function compress() {
 
     setStatus('Finalizing…');
     muxer.finalize();
-    const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
-    showResult(blob, s, audioNote + (capCues.length ? ' · captions burned in' : ''));
+    // Cover art goes in after the mux, not during it: mp4-muxer has no notion
+    // of it, and splicing it into `moov` is a metadata edit (see cover.js).
+    // A failure here must not lose the export, so it degrades to a note.
+    let out = muxer.target.buffer;
+    let coverNote = '';
+    if (state.cover) {
+      try {
+        out = addCoverArt(out, state.cover.bytes);
+        coverNote = ' · cover image';
+      } catch (e) {
+        console.warn('Cover art not written:', e);
+        coverNote = ` · cover image skipped (${e.message})`;
+      }
+    }
+    const blob = new Blob([out], { type: 'video/mp4' });
+    showResult(blob, s, audioNote + (capCues.length ? ' · captions burned in' : '') + coverNote);
     setProgress(1);
     setStatus('');
   } catch (err) {
@@ -2356,6 +2431,161 @@ async function compress() {
     els.previewBlock.style.display = '';
     if (state && currentStep === 'export') relocatePreview('export');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cover image — the still a player shows before you press play
+//
+// MP4 has no field called "thumbnail". What it has is iTunes-style cover art
+// (moov/udta/meta/ilst/covr), which `cover.js` splices into the finished file
+// afterwards. So a cover costs nothing at encode time, touches no frame of
+// video, and — because the image is kept here as JPEG bytes — can be changed
+// and re-exported without re-reading the source.
+//
+// A cover is a thumbnail, not a master: the long edge is capped so a 4K still
+// doesn't add a megabyte to a file whose whole point is being small.
+// ---------------------------------------------------------------------------
+const COVER_MAX = 1920;
+
+// A full-resolution still of a `<video>`, or null if it has not decoded one.
+// `videoWidth` is set at HAVE_METADATA, before any frame exists, and
+// `drawImage` then quietly draws nothing — so the state is checked first and
+// the result checked after: a decoded frame is opaque, so a transparent
+// centre pixel means the draw was a no-op.
+function frameFromVideo(v) {
+  if (!v || v.readyState < 2 || !v.videoWidth || !v.videoHeight) return null;
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth;
+  c.height = v.videoHeight;
+  const g = c.getContext('2d');
+  try { g.drawImage(v, 0, 0); } catch (_) { return null; }
+  try { if (g.getImageData(c.width >> 1, c.height >> 1, 1, 1).data[3] === 0) return null; } catch (_) {}
+  return c;
+}
+
+// The frame the preview is showing — waiting for it if the page has only
+// just opened and nothing has decoded yet. Resolves immediately in the
+// ordinary case, and with null if the wait runs out.
+function previewFrame(timeoutMs = 3000) {
+  const p = els.preview;
+  const now = frameFromVideo(p);
+  if (now) return Promise.resolve(now);
+  return new Promise((resolve) => {
+    const events = ['loadeddata', 'canplay', 'seeked'];
+    const done = (r) => {
+      clearTimeout(timer);
+      events.forEach((e) => p.removeEventListener(e, tick));
+      resolve(r);
+    };
+    const tick = () => { const c = frameFromVideo(p); if (c) done(c); };
+    const timer = setTimeout(() => done(null), timeoutMs);
+    events.forEach((e) => p.addEventListener(e, tick));
+  });
+}
+
+// The still to use for the cover, and the time it really came from. Three
+// ways to get one, in order of both speed and trustworthiness:
+//
+//   1. **The preview itself**, when it is already sitting on that frame —
+//      which it is whenever you press the button. No seek at all, and it is
+//      literally the picture you were looking at. Press it the instant a
+//      video opens and nothing has decoded anywhere yet, so this waits for
+//      the preview's first frame rather than going and asking a second
+//      decoder that is no further along.
+//   2. **The filmstrip's hidden `<video>`**, seeked there. This is the path
+//      for a cover restored from last time, where the preview sits at 0 and
+//      the saved frame is somewhere else entirely.
+//   3. **The preview wherever it happens to be**, if that seek came back
+//      with nothing. A blank cover is worse than an honest frame of the
+//      film, so this falls back to what is on screen — and reports the time
+//      it actually took, rather than claiming a frame it hasn't got.
+async function coverFrameAt(t) {
+  const p = els.preview;
+  if (Math.abs((p.currentTime || 0) - t) < 1e-3) {
+    const here = await previewFrame();
+    if (here) return { canvas: here, time: t };
+  }
+  const grabbed = await film.grabFull(t);
+  if (grabbed) return { canvas: grabbed, time: t };
+  const fallback = await previewFrame();
+  return fallback ? { canvas: fallback, time: p.currentTime || 0 } : null;
+}
+
+async function captureCover(t) {
+  if (!state) return false;
+  const want = state;
+  const got = await coverFrameAt(clamp(t, 0, Math.max(0, state.durationS - 1e-3)));
+  if (!got || state !== want) return false;
+  const frame = got.canvas;
+  const scale = Math.min(1, COVER_MAX / Math.max(frame.width, frame.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(2, Math.round(frame.width * scale));
+  c.height = Math.max(2, Math.round(frame.height * scale));
+  c.getContext('2d').drawImage(frame, 0, 0, c.width, c.height);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+  if (!blob || state !== want) return false;
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (state !== want) return false;
+  if (state.cover && state.cover.url) URL.revokeObjectURL(state.cover.url);
+  state.cover = { time: got.time, bytes, url: URL.createObjectURL(blob), w: c.width, h: c.height };
+  renderCover();
+  queueSave();
+  if (currentStep === 'export') updateExportSummary();
+  return true;
+}
+
+function clearCover() {
+  if (!state) return;
+  if (state.cover && state.cover.url) URL.revokeObjectURL(state.cover.url);
+  state.cover = null;
+  renderCover();
+  queueSave();
+  if (currentStep === 'export') updateExportSummary();
+}
+
+// Take the frame the preview is showing. Behind both the transport button
+// and the Export panel's, so there is one answer to "which frame is it".
+async function useFrameAsCover() {
+  if (!state) return;
+  const buttons = coverButtons();
+  buttons.forEach((b) => { b.disabled = true; });
+  els.coverInfo.textContent = 'Reading that frame…';
+  const ok = await captureCover(els.preview.currentTime || 0).catch(() => false);
+  buttons.forEach((b) => { b.disabled = false; });
+  if (!ok) els.coverInfo.textContent = 'Could not read that frame — try another one.';
+}
+
+// The transport is relocated between steps, so find its button inside the
+// preview block itself rather than wherever it currently hangs.
+function coverButtons() {
+  return [els.btnCoverSet, els.previewBlock.querySelector('.transport [data-act="cover"]')].filter(Boolean);
+}
+
+function renderCover() {
+  const c = state && state.cover;
+  els.coverThumb.hidden = !c;
+  els.btnCoverClear.hidden = !c;
+  els.coverDownload.hidden = !c;
+  // The panel's thumbnail is invisible from the Trim step, so the transport
+  // button carries the answer itself: lit when a cover is set, and its
+  // tooltip says which frame.
+  const tbtn = els.previewBlock.querySelector('.transport [data-act="cover"]');
+  if (tbtn) {
+    tbtn.classList.toggle('has-cover', !!c);
+    tbtn.title = c
+      ? `Cover image: the frame at ${fmtTime(c.time)} — press to use this one instead`
+      : 'Use this frame as the cover image';
+  }
+  if (!c) {
+    els.coverThumb.removeAttribute('src');
+    els.coverDownload.removeAttribute('href');
+    els.coverInfo.textContent = state ? 'No cover chosen — a player will show whatever frame it likes.' : '';
+    return;
+  }
+  els.coverThumb.src = c.url;
+  els.coverDownload.href = c.url;
+  els.coverDownload.download = `${state.file.name.replace(/\.[^.]+$/, '')}_cover.jpg`;
+  els.coverInfo.textContent = `${c.w}×${c.h} JPEG · ${fmtBytes(c.bytes.length)} · from ${fmtTime(c.time)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2448,9 +2678,16 @@ function initUI() {
     ro.observe(els.previewBlock);   // the caption overlay follows the video's box
   }
 
+  film.wire();
   captions.wire();
   voice.wire();
   voice.updateUI();
+
+  // Cover image: whatever the preview is showing, grabbed from the source at
+  // full resolution (the preview element is scaled to fit the page, so it is
+  // not the thing to read pixels out of).
+  els.btnCoverSet.addEventListener('click', useFrameAsCover);
+  els.btnCoverClear.addEventListener('click', clearCover);
 
   // Step navigation
   document.querySelectorAll('.stepbtn').forEach((b) => b.addEventListener('click', () => {
