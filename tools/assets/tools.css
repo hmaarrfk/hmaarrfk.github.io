@@ -231,6 +231,10 @@ input[type="range"] { width: 100%; }
   font-weight: 600;
   cursor: pointer;
 }
+/* `display:inline-flex` above would otherwise beat the [hidden] attribute's
+   default `display:none`, leaving buttons like Cancel and the cover-image
+   actions on screen while the code believes they are hidden. */
+.btn[hidden] { display: none; }
 .btn:hover:not(:disabled) { background: var(--accent-hover); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn.secondary { background: var(--panel-2); }
@@ -404,6 +408,10 @@ input[type="range"] { width: 100%; }
 .tbtn svg { width: 20px; height: 20px; fill: currentColor; display: block; }
 .tbtn:hover { background: var(--accent); color: #fff; }
 .tbtn.play { background: var(--accent); color: #fff; width: 56px; }
+/* Lit while a cover image is set — the Export panel's thumbnail is out of
+   sight from the editing steps, so this button has to say so itself. */
+.tbtn.has-cover { background: var(--good); color: #06231b; border-color: var(--good); }
+.tbtn:disabled { opacity: .45; cursor: not-allowed; }
 .timecode { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-size: .9rem; }
 
 .timeline { padding: 6px 0; }
@@ -470,6 +478,57 @@ input[type="range"] { width: 100%; }
   border-left: 5px solid transparent; border-right: 5px solid transparent;
   border-top: 6px solid #fff;
 }
+/* Timeline rows 1 and 2 — navigation only.
+   Row 1 is the whole clip as a strip of stills; row 2 is a window of a few
+   seconds of it with a ruler. Neither ever carries a control, so nothing can
+   land on top of the pixels you press to move the playhead. */
+.tl-film, .tl-zoom {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  touch-action: none;
+}
+.tl-film { height: 48px; margin-bottom: 6px; cursor: pointer; }
+.tl-zoom { height: 62px; cursor: ew-resize; }
+.tl-film canvas, .tl-zoom canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+}
+/* The slice of the clip that row 2 is showing, drawn on row 1 and draggable. */
+.tl-view {
+  position: absolute; top: 0; bottom: 0; z-index: 3; min-width: 3px;
+  border: 1px solid rgba(255,255,255,.9);
+  background: rgba(255,255,255,.14);
+  border-radius: 3px;
+  cursor: grab;
+}
+.tl-view:active { cursor: grabbing; }
+/* Cuts, speed-ups and the trimmed-away head/tail as a legend along the bottom
+   of a navigation row — deliberately not clickable; row 3 is where they're
+   edited. */
+.tl-marks { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; z-index: 2; pointer-events: none; }
+.tl-mark { position: absolute; top: 0; bottom: 0; }
+.tl-mark.cut     { background: #e74c3c; }
+.tl-mark.fast    { background: #3478f6; }
+.tl-mark.pending { background: #f1c40f; }
+.tl-mark.outside { background: rgba(255,255,255,.22); }
+/* Row 1's playhead is a hairline (no pointer): the arrowhead belongs to the
+   rows you actually aim with, and would be clipped here anyway. */
+.tl-playhead.thin { top: 0; bottom: 0; }
+.tl-playhead.thin::before { display: none; }
+.tl-zoom .tl-playhead { top: 0; bottom: 0; }
+.tl-zoomctl { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; }
+.tl-zspan { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .8rem; min-width: 52px; text-align: center; }
+.tl-zbtn {
+  width: 26px; height: 24px; padding: 0;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  cursor: pointer; font-size: .9rem; line-height: 1;
+}
+.tl-zbtn.wide { width: auto; padding: 0 8px; font-size: .78rem; }
+.tl-zbtn:hover { background: var(--accent); color: #fff; }
+
 .tl-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .tl-actions .small-btn { padding: 7px 12px; font-size: .85rem; }
 .tl-actions .small-btn.armed { background: #f1c40f; color: #3a2f00; border-color: #f1c40f; }
@@ -953,6 +1012,9 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .transport { margin: 10px 0 8px; }
   .timeline { padding: 4px 0; }
   .tl-track { height: 40px; }
+  .tl-film { height: 34px; margin-bottom: 4px; }
+  .tl-zoom { height: 44px; }
+  .tl-zoomctl { margin: 3px 0 5px; }
 
   /* Cap the preview HARDER on the heavy editing steps (Crop/Style/Logo) where the
      controls are dense and the preview is secondary — 32vh frees ~60px over the
@@ -1005,6 +1067,9 @@ footer.legal { color: #7a8590; font-size: .8rem; margin-top: 40px; border-top: 1
   .tbtn.play { width: 60px; }
   .ndg { width: 44px; height: 40px; }
   .tl-track { height: 56px; }
+  .tl-film { height: 56px; }
+  .tl-zoom { height: 72px; }
+  .tl-zbtn { min-width: 36px; min-height: 36px; }
   .tl-handle { width: 18px; }
   /* enlarge crop handles and re-center them on the corners/edges */
   #crop-rect .ch { width: 22px; height: 22px; }

@@ -49,7 +49,7 @@ layout: null
        that only change by being replaced, so they are left alone.
        Workers are absent on purpose: import maps do not apply to `new Worker`,
        so captions-ui.js / voice-ui.js append the version themselves. -->
-  {%- assign own_modules = "audio-boost,breath,captions,captions-ui,compressor,speed,voice,voice-ui" | split: "," %}
+  {%- assign own_modules = "audio-boost,breath,captions,captions-ui,compressor,cover,filmstrip,speed,voice,voice-ui" | split: "," %}
   <script type="importmap">
   { "imports": {
   {% for m in own_modules -%}
@@ -154,11 +154,50 @@ layout: null
         <button class="tbtn" data-act="toOut" title="Jump to end of selection (End)" aria-label="Jump to selection end">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.6 5H17v14h-2.4z"/><path d="M4 5l10.4 7L4 19z"/></svg>
         </button>
+        <!-- Lives in the transport, not in a panel, because the transport travels
+             with the preview into whichever step is open: the frame you want for
+             the cover is the one you just scrubbed to, wherever you were. -->
+        <button class="tbtn" data-act="cover" title="Use this frame as the cover image" aria-label="Use this frame as the cover image">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1.6 11.4h12.8l-4.3-5.7-3.3 4.3-2.3-2.8z"/>
+            <circle cx="8.4" cy="9.2" r="1.6"/>
+          </svg>
+        </button>
         <span class="timecode" id="timecode">0:00.00 / 0:00.00</span>
         <span class="small muted" id="audio-live-note" style="margin-left:auto"></span>
       </div>
 
+      <!-- The timeline is three rows, each answering a different question.
+           1 and 2 are for moving; 3 is the only one carrying controls, so the
+           cut and speed bands can never sit on top of the pixels you need to
+           press to get somewhere. -->
       <div class="timeline">
+        <!-- 1 · the whole clip as a strip of stills -->
+        <div class="tl-film" id="tl-film"
+             title="The whole video — press anywhere to jump there, or drag the box to move the zoom window">
+          <canvas id="film-canvas" aria-hidden="true"></canvas>
+          <div class="tl-marks" id="film-marks"></div>
+          <div class="tl-view" id="film-view" title="What the zoomed row below is showing — drag to move it"></div>
+          <div class="tl-playhead thin" id="film-playhead"></div>
+        </div>
+
+        <!-- 2 · a few seconds of it, close up: scrub to the frame -->
+        <div class="tl-zoom" id="tl-zoom"
+             title="Zoomed in — drag to scrub frame by frame, scroll to zoom">
+          <canvas id="zoom-canvas" aria-hidden="true"></canvas>
+          <div class="tl-marks" id="zoom-marks"></div>
+          <div class="tl-playhead" id="zoom-playhead"></div>
+        </div>
+        <div class="tl-zoomctl">
+          <span class="small muted">Zoom</span>
+          <button class="tl-zbtn" id="btn-zoom-out" type="button" title="Show more" aria-label="Zoom out">&minus;</button>
+          <span class="tl-zspan" id="zoom-label"></span>
+          <button class="tl-zbtn" id="btn-zoom-in" type="button" title="Show less" aria-label="Zoom in">+</button>
+          <button class="tl-zbtn wide" id="btn-zoom-fit" type="button" title="Show the whole clip">Fit</button>
+          <span class="small muted" style="margin-left:auto">Cuts &amp; speed-ups are edited on the row below</span>
+        </div>
+
+        <!-- 3 · the clip region: trim handles, cuts, speed-ups -->
         <div class="tl-track" id="tl-track">
           <!-- green fill for the kept selection -->
           <div id="keep-region" style="position:absolute;top:0;bottom:0;z-index:1;background:rgba(0,188,140,.30);border-top:2px solid var(--good);border-bottom:2px solid var(--good)"></div>
@@ -565,6 +604,36 @@ layout: null
 
       <!-- Final-track preview is relocated here before compressing -->
       <div id="host-export" style="margin-bottom:16px"></div>
+
+      <!-- Cover image: the still a player shows before you press play -->
+      <div class="field-group" id="cover-group" style="margin-bottom:16px">
+        <label style="font-size:.85rem;color:var(--muted);font-weight:600">Cover image</label>
+        <p class="small muted" style="margin:6px 0 0">
+          Scrub the preview to the frame you want, then press <b>Use this
+          frame</b> &mdash; here, or the same button in the transport under
+          the preview, which is to hand in every step. It is written into the MP4 as cover art
+          &mdash; the <code>covr</code> atom, the same one
+          <code>ffmpeg&nbsp;-disposition&nbsp;attached_pic</code> writes
+          &mdash; as a JPEG at the source frame's size, capped at 1920&nbsp;px
+          on the long edge. It is metadata, so it costs no encoding time and
+          no picture quality. Apple's players and Finder, VLC
+          and Plex show it; plenty of other players and file managers ignore
+          any such tag and just decode a frame instead, so the picture is
+          downloadable too: that is the file to hand a
+          <code>&lt;video poster&gt;</code> or a video site.
+        </p>
+        <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px;align-items:center">
+          <img id="cover-thumb" alt="The chosen cover frame" hidden
+               style="height:54px;width:auto;display:block;border-radius:6px;border:1px solid var(--border)">
+          <button class="btn" id="btn-cover-set" type="button"
+                  style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Use this frame</button>
+          <button class="btn" id="btn-cover-clear" type="button" hidden
+                  style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Remove</button>
+          <a class="btn" id="cover-download" hidden download
+             style="padding:8px 14px;font-size:.9rem;background:var(--panel-2)">Save the image</a>
+          <span class="small muted" id="cover-info"></span>
+        </div>
+      </div>
 
       <!-- Live view of frames as they're encoded (shown during compression) -->
       <figure id="encode-view" hidden style="margin:0 0 16px">
