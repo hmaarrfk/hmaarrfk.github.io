@@ -256,16 +256,32 @@ export function fillWithRoomTone(out, from, sampleRate, {
   }
 
   const tones = picked.map((at) => out.slice(at, at + win));
-  // Deterministic order, so the same dub always fills the same way.
+  tileTones(out, from, need, tones, sampleRate);
+  return out;
+}
+
+/**
+ * Write `need` samples of room, shuffled out of `tones`, into `out[from..]`.
+ *
+ * Tiling a single fragment is what makes a long pause sound wrong: at 120 ms a
+ * second and a half of pad is the same fragment a dozen times over, and the ear
+ * hears the period immediately — as a breath or a hum that was never recorded.
+ * Several different fragments, shuffled, read as room. A caller may only have
+ * found one, though, and then shuffling has nothing to shuffle: room tone is
+ * noise, so a reversed copy of it is still the same room but no longer the
+ * same waveform, and that plus a little level jitter is what stops even a
+ * single fragment from reading as a loop.
+ */
+export function tileTones(out, from, need, tones, sampleRate) {
+  if (!tones || !tones.length || !(need > 0)) return out;
+  const win = tones[0].length;
+  if (!(win > 0)) return out;
+  // Deterministic order, so the same narration always fills the same way.
   let seed = (need * 2654435761) >>> 0;
   const rnd = () => {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return (seed >>> 8) / 0x1000000;
   };
-  // A line may only contain one usable pause, and then shuffling has nothing
-  // to shuffle. Room tone is noise, so a reversed copy of it is still the same
-  // room but no longer the same waveform — that, plus a little level jitter,
-  // is what stops even a single fragment from reading as a loop.
   const nextTone = () => {
     const src = tones[Math.floor(rnd() * tones.length) % tones.length];
     const reverse = rnd() < 0.5;
@@ -292,6 +308,92 @@ export function fillWithRoomTone(out, from, sampleRate, {
     cur = next;
   }
   return out;
+}
+
+/**
+ * A presence track made out of the narration itself.
+ *
+ * `layRoomTone` needs a room, and when the recording is being replaced outright
+ * there is no longer one to have — that is the whole point of replacing it.
+ * What there *is* is the generation's own quiet: the clone was cloned from this
+ * microphone, so the air in its pauses is the right air, and none of it is the
+ * recording.
+ *
+ * Why a bed is needed at all, when the pauses are not digital silence to begin
+ * with: the model's own floor sits forty-odd dB under its speech, and the
+ * recording's room tone used to sit over the top of that. Take the room tone
+ * away and every pause drops by that much at a stroke, which the ear reads not
+ * as a pause but as the track cutting out — and because `planTimeline` puts its
+ * anchors on sentence edges, it cuts out at *every transition*. So the clone's
+ * quiet is collected once, over the whole narration, tiled into a continuous
+ * sample, and brought up to a level that reads as presence rather than as
+ * noise.
+ *
+ * `targetRms` is that level, and it is the only judgement here. Everything
+ * else — which windows are quiet, how they are tiled — is measurement.
+ *
+ * Returns mono samples to hand to `layRoomTone`, or null if there is nothing
+ * to build one out of.
+ */
+export function generatedBed(mono, sampleRate, {
+  windowMs = 250, windows = 8, targetRms = null,
+} = {}) {
+  if (!mono || !mono.length || !(targetRms > 0)) return null;
+  const win = Math.round((windowMs / 1000) * sampleRate);
+  if (win < 64 || mono.length < win * 2) return null;
+
+  // Quietest first, over the whole narration — not the three seconds beside
+  // one gap, which is what `fillWithRoomTone` has to make do with and why it
+  // so often finds nothing usable. A minute of narration has dozens of pauses
+  // in it and one of them is bound to be clean.
+  // Digital silence is the *inserted* silence — the lead-in before the first
+  // word, the tail after the last, the hole a pause was written into — and not
+  // the model's floor. There is no room in it to learn from, and a window that
+  // merely *overlaps* it is the worst possible pick: it is the quietest thing
+  // in the buffer, so it wins, and then the bed is mostly zeros and lays
+  // nothing at all over exactly the stretches that needed it most. So count
+  // the exact zeros and disqualify any window that is more than a few percent
+  // of them. (Found by measuring: the first version of this scored on level
+  // alone and built a 0.5 s bed that was half silence.)
+  const zeros = new Int32Array(mono.length + 1);
+  for (let i = 0; i < mono.length; i++) zeros[i + 1] = zeros[i] + (mono[i] === 0 ? 1 : 0);
+  const maxZeros = Math.floor(win * 0.02);
+
+  const step = Math.max(1, Math.floor(win / 2));
+  const cands = [];
+  for (let at = 0; at + win <= mono.length; at += step) {
+    if (zeros[at + win] - zeros[at] > maxZeros) continue;
+    const level = rms(mono, at, at + win);
+    if (level > 0) cands.push({ at, level });
+  }
+  if (!cands.length) return null;              // nothing but digital silence
+  cands.sort((a, b) => a.level - b.level);
+
+  // Non-overlapping, and only while they are still *pauses*: four times the
+  // quietest window is generous enough to gather a handful of fragments and
+  // tight enough that a soft word never gets in.
+  const picked = [];
+  for (const c of cands) {
+    if (c.level > cands[0].level * 4) break;
+    if (picked.some((at) => Math.abs(at - c.at) < win)) continue;
+    picked.push(c.at);
+    if (picked.length >= windows) break;
+  }
+  if (!picked.length) return null;
+
+  const tones = picked.map((at) => mono.slice(at, at + win));
+  const bed = new Float32Array(win * Math.max(3, picked.length));
+  tileTones(bed, 0, bed.length, tones, sampleRate);
+
+  // Then to the level asked for. The fragments came from the pauses, so this
+  // is a lift rather than a cut, and a big one — which is exactly why the
+  // material has to be the *quietest* windows and not merely quiet ones: this
+  // multiplies whatever was in them.
+  const cur = rms(bed);
+  if (!(cur > 0)) return null;
+  const g = targetRms / cur;
+  for (let i = 0; i < bed.length; i++) bed[i] *= g;
+  return bed;
 }
 
 // ---------------------------------------------------------------------------
@@ -942,7 +1044,7 @@ export function narrationWords(parts) {
 
 export function finishNarration(mono, {
   modelRate, outRate, resample = null, targetDbfs = null,
-  toneReference = null, roomTone = null, pauses = [], fadeMs = 30,
+  toneReference = null, roomTone = null, bedDb = null, pauses = [], fadeMs = 30,
 }) {
   let out = mono || new Float32Array(0);
   if (!out.length) return { pcm: out, gainDb: 0, gainsDb: null };
@@ -960,6 +1062,7 @@ export function finishNarration(mono, {
     gainsDb = t.gainsDb;
   }
   let gainDb = 0;
+  let laid = null;
   if (targetDbfs != null) {
     const m = matchVoiceLevel(out, outRate, targetDbfs);
     out = m.pcm;
@@ -969,25 +1072,54 @@ export function finishNarration(mono, {
 
   if (roomTone && roomTone.length) {
     out = layRoomTone(out, roomTone);
-  } else if (pauses && pauses.length) {
-    // No sample of the room to lay under it, so the pauses between sentences
-    // are digital silence — which reads as a dropout, not a pause. Rebuild one
-    // from the narration either side of each gap. Learning from a few seconds
-    // around it rather than the whole track keeps this linear in the length of
-    // the narration instead of quadratic.
-    out = Float32Array.from(out);
-    const near = Math.round(3 * outRate);
-    for (const p of pauses) {
-      const from = Math.round(p.from * outRate);
-      const to = Math.min(out.length, Math.round(p.to * outRate));
-      if (to - from < Math.round(0.05 * outRate)) continue;
-      let learnFrom = Math.max(0, from - near), learnTo = from;
-      if (learnTo - learnFrom < Math.round(0.3 * outRate)) {
-        learnFrom = to;
-        learnTo = Math.min(out.length, to + near);
-      }
-      fillWithRoomTone(out, from, outRate, { to, learnFrom, learnTo });
-    }
+  } else if (bedDb != null) {
+    // The recording is being replaced outright, so the presence has to come
+    // from the narration itself (`generatedBed`) — laid under everything, the
+    // way the room tone was, because what stops a pause reading as a dropout
+    // is that the background never stops. `bedDb` is how far under the voice
+    // it sits; the voice's own level is the one we just matched to, or a fresh
+    // measurement when nothing was asked for.
+    const voiceDbfs = targetDbfs != null ? targetDbfs : analyzeVoiceLevel(out, outRate).voiceDbfs;
+    const targetRms = Number.isFinite(voiceDbfs) ? Math.pow(10, (voiceDbfs + bedDb) / 20) : 0;
+    const bed = generatedBed(out, outRate, { targetRms });
+    // A generation with no quiet anywhere in it lends no presence, and inventing
+    // some would be inventing signal. Rebuilding the pauses one at a time is
+    // then still better than nothing.
+    if (bed) { out = layRoomTone(out, bed); laid = bed; }
+    else out = fillPauses(out, outRate, pauses);
+  } else {
+    out = fillPauses(out, outRate, pauses);
   }
-  return { pcm: out, gainDb, gainsDb };
+  // `bed` rides back out so the export can lay the same presence under the
+  // seconds the narration does not cover, instead of punching a hole in it.
+  return { pcm: out, gainDb, gainsDb, bed: laid };
+}
+
+/**
+ * Rebuild each inserted pause from the narration beside it.
+ *
+ * The fallback when there is no bed to lay under the whole thing, whether
+ * because the recording never gave a clean room sample or because the
+ * generation has no quiet of its own to lend. Learning from a few seconds
+ * around each gap rather than the whole track keeps this linear in the length
+ * of the narration instead of quadratic — and is also why it finds nothing
+ * usable more often than `generatedBed` does: three seconds beside one gap can
+ * easily be unbroken speech.
+ */
+function fillPauses(mono, outRate, pauses) {
+  if (!pauses || !pauses.length) return mono;
+  const out = Float32Array.from(mono);
+  const near = Math.round(3 * outRate);
+  for (const p of pauses) {
+    const from = Math.round(p.from * outRate);
+    const to = Math.min(out.length, Math.round(p.to * outRate));
+    if (to - from < Math.round(0.05 * outRate)) continue;
+    let learnFrom = Math.max(0, from - near), learnTo = from;
+    if (learnTo - learnFrom < Math.round(0.3 * outRate)) {
+      learnFrom = to;
+      learnTo = Math.min(out.length, to + near);
+    }
+    fillWithRoomTone(out, from, outRate, { to, learnFrom, learnTo });
+  }
+  return out;
 }

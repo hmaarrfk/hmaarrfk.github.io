@@ -301,6 +301,26 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     section (the paragraph you deleted), the surplus footage is **cut**. Where
     there are more words than picture, the section runs slower than asked and
     the status line says so, because there is no more footage to show.
+  - **`Original audio`: replace it, or keep the room.** Replacing it is the
+    default and is what a fully respoken video wants. A respoken *line* has to
+    sit inside a recording, so the recording's own quiet goes under it and the
+    background never stops; a respoken *video* has no recording left to blend
+    into, and the same room tone is then just the room's noise put back. So
+    `Replace it entirely` lays none of it under. Instead `generatedBed`
+    collects the *generation's* own quiet — the clone carries this microphone,
+    not this room's noise — tiles it into a continuous sample, brings it up to
+    40 dB under the voice and lays that under everything. Simply leaving the
+    room tone out was not enough, and only listening showed why: the model's
+    floor sits forty-odd dB under its speech, the room tone used to sit over
+    the top of it, and removing it dropped every pause by that much at a
+    stroke — heard not as a pause but as the track cutting out, at every
+    sentence edge, which is exactly where the picture's sections are cut. The
+    same bed also fills wherever the narration doesn't reach — the millisecond at a section boundary that rounded away, footage
+    the trim was widened onto afterwards — instead of letting the old voice
+    back in for a frame. The preview follows the same rule, so it never
+    promises audio the export won't have; `Preview plays: Original recording`
+    and a line's own play button still give you the recording when you ask for
+    it on purpose. `Keep the room under the narration` is the old behaviour.
   - **One measurement for the whole narration.** Tone matching, level matching
     and the room tone laid under it are all measured once, over all of it.
     Per-sentence measurements give each sentence a slightly different answer,
@@ -354,7 +374,7 @@ reached, so trims near the start of a long video finish quickly.
 | `captions.js` | ES module: the pure caption logic — 16 kHz resampler, `detectSpeech`/`compactSpeech`/`mapCompactSpan`, window planning, `mergeChunkWords`, words → cues, `cueAt`, and `drawCaption` (used by both the preview overlay and the encoder). No DOM/model, so it runs under Node too. |
 | `captions-ui.js` | ES module: the interactive half — model presets and the WebGPU probe, the transcription job and its worker, the editable cue list, the preview overlay, and caption persistence. Gets the DOM, the state and a few timeline/audio helpers from `compressor.js` through one `ctx` object. |
 | `captions-worker.js` | Module Web Worker: loads Whisper through transformers.js, detects the language, transcribes chunk by chunk and posts words (with timestamps) back as it goes. Jobs are id-tagged and serialized so a cancelled one can't interleave with a new one. |
-| `voice.js` | ES module: the pure overdub logic — turning a transcript into a script and a script into sentences (`scriptFromCues`, `splitScript`), aligning a rewritten script back onto the recording (`matchWords`, `alignScript`), re-timing the picture to it (`planTimeline`), captions for what is now said (`narrationWords`), which few seconds to clone from (`pickReference`), and finishing the narration (`finishNarration`, `matchTone`, `matchVoiceLevel`, `findRoomTone`). No DOM or model, so it runs under Node, which is where `voice.test.mjs` tests it. |
+| `voice.js` | ES module: the pure overdub logic — turning a transcript into a script and a script into sentences (`scriptFromCues`, `splitScript`), aligning a rewritten script back onto the recording (`matchWords`, `alignScript`), re-timing the picture to it (`planTimeline`), captions for what is now said (`narrationWords`), which few seconds to clone from (`pickReference`), and finishing the narration (`finishNarration`, `matchTone`, `matchVoiceLevel`, `findRoomTone`, `generatedBed`). No DOM or model, so it runs under Node, which is where `voice.test.mjs` tests it. |
 | `voice.test.mjs` | Node test for the above. `node voice.test.mjs`. |
 | `voice-tokenizer.js` | ES module: a minimal SentencePiece reader (protobuf) and unigram Viterbi segmenter with byte fallback, so the voice model's `tokenizer.model` can be used directly rather than vendoring a converted copy per language. |
 | `voice-tokenizer.test.mjs` | Node test for the above, against models built in the test. `node voice-tokenizer.test.mjs`. |
