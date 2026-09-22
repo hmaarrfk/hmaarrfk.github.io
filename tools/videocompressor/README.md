@@ -301,6 +301,19 @@ MP4Box.js  ──►  VideoDecoder  ──►  <canvas> scale  ──►  VideoE
     section (the paragraph you deleted), the surplus footage is **cut**. Where
     there are more words than picture, the section runs slower than asked and
     the status line says so, because there is no more footage to show.
+  - **`Original audio`: replace it, or keep the room.** Replacing it is the
+    default and is what a fully respoken video wants. A respoken *line* has to
+    sit inside a recording, so the recording's own quiet goes under it and the
+    background never stops; a respoken *video* has no recording left to blend
+    into, and the same room tone is then just the room's noise put back. So
+    `Replace it entirely` lays none under, rebuilds the pauses out of the
+    generated audio instead, and runs **silent** wherever the narration doesn't
+    reach — the millisecond at a section boundary that rounded away, footage
+    the trim was widened onto afterwards — instead of letting the old voice
+    back in for a frame. The preview follows the same rule, so it never
+    promises audio the export won't have; `Preview plays: Original recording`
+    and a line's own play button still give you the recording when you ask for
+    it on purpose. `Keep the room under the narration` is the old behaviour.
   - **One measurement for the whole narration.** Tone matching, level matching
     and the room tone laid under it are all measured once, over all of it.
     Per-sentence measurements give each sentence a slightly different answer,

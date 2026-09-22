@@ -104,7 +104,7 @@ const els = {
   // overdub
   inVoiceLang: $('in-voice-lang'), hintVoiceLang: $('hint-voice-lang'),
   hintVoiceAudio: $('hint-voice-audio'),
-  inVoiceTrack: $('in-voice-track'),
+  inVoiceTrack: $('in-voice-track'), inVoiceBed: $('in-voice-bed'),
   inVoicePause: $('in-voice-pause'), inVoiceStretch: $('in-voice-stretch'),
   scriptText: $('script-text'), scriptInfo: $('script-info'), btnScriptFill: $('btn-script-fill'),
   btnVoiceRef: $('btn-voice-ref'), voiceRef: $('voice-ref'), voicePlan: $('voice-plan'),
@@ -322,7 +322,9 @@ function updateExportSummary() {
     : '';
   const enc = state.audioEnc;
   const codecNote = enc && enc.track !== 'aac' && willReencodeAudio(s) ? ` · audio as ${enc.label}` : '';
-  const voiceNote = voice.isRespoken() ? ' · narration respoken' : '';
+  const voiceNote = voice.isRespoken()
+    ? (voice.replacesAudio() ? ' · narration respoken, audio replaced' : ' · narration respoken')
+    : '';
   els.exportSummary.textContent =
     `${s.outW}×${s.outH} · ${s.outFps.toFixed(0)} fps · ${s.codec === 'hevc' ? 'H.265' : 'H.264'} · ` +
     `${target} · ${fmtTime(s.trimDur)} kept${s.keepAudio ? ' · audio kept' : (state.audio ? ' · audio dropped' : '')}${volumeNote}${voiceNote}${codecNote}${captions.burnOn() ? ' · captions burned in' : ''}` +
@@ -1100,10 +1102,17 @@ function applySpanPlayback() {
   if (v.preservesPitch === false) v.preservesPitch = true;
   const dubbing = syncDubPlayback(s, v.currentTime || 0, !v.paused);
   const lapseSilent = !!s && s.rate !== 1 && s.audio !== 'keep';
+  // With the audio replaced, a second the narration doesn't cover is silent in
+  // the export, so it has to be silent here too — otherwise the preview offers
+  // the one reassurance it must never offer, that the old voice is still
+  // there. Asking to hear the original (the track select, or auditioning a
+  // line) is an explicit request for the recording and still gets it.
+  const wantsRespoken = (dubOverride || voice.previewTrack()) === 'respoken';
+  const replacedSilent = !dubbing && wantsRespoken && voice.isRespoken() && voice.replacesAudio();
   // What silences the *original* under a respoken line is the element's own
   // mute, not the gain node: the dub is routed through that node and has to
   // keep coming out of it.
-  const mute = lapseSilent || dubbing;
+  const mute = lapseSilent || dubbing || replacedSilent;
   if (v.muted !== mute) v.muted = mute;
   if (previewGainNode) {
     // Breath ducking describes the original audio, which isn't playing here.
@@ -2028,6 +2037,14 @@ async function compress() {
     // emits exactly its own length of silence.
     let curSpan = null, curProc = null, curEmitted = 0, curTarget = 0;
     let curDub = null;                     // the narration slice this span plays, if any
+    let curSilent = false;                 // replaced audio, but no narration here: emit nothing
+    // "Replace it entirely" means the recording is gone, not merely covered.
+    // The narration tiles the whole kept timeline, so what is left over is
+    // slivers — a millisecond at a section boundary that rounded away, footage
+    // the trim was widened onto after respeaking — and those play the old
+    // voice in flashes. Silence is the honest answer for a second the new
+    // narration does not reach.
+    const replacingAudio = hasDubs && voice.isRespoken() && voice.replacesAudio();
     const spanTargetFrames = (sp) => Math.round(((sp.end - sp.start) / sp.rate) * SR);
 
     const spanOut = (interleaved) => {
@@ -2065,7 +2082,11 @@ async function compress() {
       // treated as an ordinary one, so the export still has sound.
       curDub = (sp.dub && voice.isRespoken()) ? sp.dub : null;
       curProc = null;
+      curSilent = false;
       if (curDub) return;
+      // No narration for these seconds, and the recording is not coming back:
+      // `closeSpan` pads the shortfall, which is exactly this section's length.
+      if (replacingAudio) { curSilent = true; return; }
       curProc = (sp.rate !== 1 && sp.audio === 'keep')
         ? createTimeStretcher({ sampleRate: SR, channels: CH, speed: sp.rate })
         : null;
@@ -2087,6 +2108,7 @@ async function compress() {
       if (curEmitted < curTarget) spanOut(new Float32Array((curTarget - curEmitted) * CH));
       curSpan = null;
       curProc = null;
+      curSilent = false;
     };
 
     // Breaths are turned down *before* the leveller rather than after: the
@@ -2121,7 +2143,7 @@ async function compress() {
 
     const feedSpan = (slice, frames, startSec) => {
       if (!curSpan) return;
-      if (curDub) return;               // respoken: the recording is not emitted
+      if (curDub || curSilent) return;  // respoken: the recording is not emitted
       if (curSpan.rate !== 1 && curSpan.audio !== 'keep') return;   // silent: nothing to carry over
       const processed = gainStage(duckBreaths(slice, frames, startSec), frames);
       if (curProc) spanOut(curProc.process(processed));
@@ -2362,7 +2384,9 @@ async function compress() {
     if (s.keepAudio && audio) {
       const speedNote = hasSpeed ? ' · sped-up sections re-timed' : '';
       const breathNote = wantsBreathWork && !dropAudio ? ` · ${state.breaths.length} breaths turned down` : '';
-      const dubNote = hasDubs && !dropAudio ? ' · narration respoken' : '';
+      const dubNote = hasDubs && !dropAudio
+        ? (replacingAudio ? ' · narration respoken, audio replaced' : ' · narration respoken')
+        : '';
       // Opus only ever turns up on a browser that can't encode AAC, and it is
       // the reason the track is there at all, so it is worth a word.
       const codecNote = needAudioWork && audioEnc.track !== 'aac'
@@ -2641,8 +2665,12 @@ function initUI() {
     updateEstimate();
   }));
 
+  // `inVoiceBed` is here and `inVoiceTrack` is not: replacing the recording
+  // changes the file that comes out (and the line the Export panel prints
+  // about it), where the preview track only changes what you hear now.
   [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain,
-    els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapLook, els.inCapBurn]
+    els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapLook, els.inCapBurn,
+    els.inVoiceBed]
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
   // Changing how breaths are handled can add or drop timeline edits, so it does
   // more than the generic "something changed" refresh.

@@ -600,4 +600,28 @@ test('the pauses between sentences get the room, not digital silence', () => {
   assert.ok(rms(out.pcm, from + 2400, to - 2400) > 1e-4, 'the pause is dead silence');
 });
 
+test('replacing the audio keeps the recording out of the narration entirely', () => {
+  // A generation with its own faint floor — the clone's quiet, which came from
+  // the microphone it was cloned from and is all the room there is to have.
+  const gen = speechish(4, { amp: 0.2 });
+  for (let i = 0; i < gen.length; i++) gen[i] += 0.0006 * Math.sin((2 * Math.PI * 3000 * i) / SR);
+  const from = Math.round(1.5 * SR), to = Math.round(2.5 * SR);
+  const withGap = Float32Array.from(gen);
+  withGap.fill(0, from, to);                       // the pause between two sentences
+  const pauses = [{ from: 1.5, to: 2.5 }];
+  const room = tone(0.5, { freq: 60, amp: 0.02 }); // the recording's hum
+
+  const kept = finishNarration(withGap, { modelRate: SR, outRate: SR, roomTone: room, pauses });
+  const replaced = finishNarration(withGap, { modelRate: SR, outRate: SR, roomTone: null, pauses });
+
+  const a = rms(kept.pcm, from + 2400, to - 2400);
+  const b = rms(replaced.pcm, from + 2400, to - 2400);
+  assert.ok(b > 1e-6, 'the pause is a dropout — it should be rebuilt from the generation');
+  assert.ok(b < a / 5, `the recording is still under it: ${b.toFixed(5)} vs ${a.toFixed(5)}`);
+  // And nothing was added under the speech either.
+  const speechA = rms(kept.pcm, 0.1 * SR, 0.5 * SR);
+  const speechB = rms(replaced.pcm, 0.1 * SR, 0.5 * SR);
+  assert.ok(speechB <= speechA, 'replacing the audio should never add energy');
+});
+
 console.log(`\n${passed} passed`);

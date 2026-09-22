@@ -303,6 +303,33 @@ export function createVoice(ctx) {
     return referenceDbfs;
   }
 
+  /**
+   * Whether the respoken narration *replaces* the recording's audio outright.
+   *
+   * Two things follow from it, and they are the two places the recording
+   * otherwise survives a full respeak.
+   *
+   * The first is the room tone. `layRoomTone` mixes the recording's own quiet
+   * under the whole narration, which is the right answer when a respoken line
+   * has to sit *inside* a recording — the background never stops, so the ear
+   * never finds the seam. When the entire narration is respoken there is no
+   * recording left to blend into and nothing to hide, and all the room tone
+   * does then is put the room's noise back: the fan, the street, the hum that
+   * made the take sound amateur in the first place. So this turns it off and
+   * lets `fillWithRoomTone` rebuild the pauses out of the *generated* audio,
+   * which is quiet, consistent, and not the room.
+   *
+   * The second is the seconds the narration does not cover. Those play the
+   * recording at rate 1 (see `editSpans`), which is how a stray millisecond at
+   * a section boundary, or footage the trim was widened onto after respeaking,
+   * brings the old voice back in flashes. In this mode the export and the
+   * preview run them silent instead — see `replacesAudio()`'s callers in
+   * compressor.js.
+   */
+  function replacesAudio() {
+    return els.inVoiceBed ? els.inVoiceBed.value !== 'room' : true;
+  }
+
   function dubs() {
     const state = getState();
     if (!state.dubs) state.dubs = new Map();
@@ -597,8 +624,11 @@ export function createVoice(ctx) {
       modelRate: sc.sampleRate, outRate: sampleRate,
       resample: resampleMono,
       targetDbfs: sc.targetDbfs ?? targetDbfs(),
+      // The tonal yardstick is a measurement, not a sample — three band gains
+      // taken off the reference clip — so it stays on either way: it is what
+      // gives the clone the speaker's own microphone above 12 kHz.
       toneReference: refToneAt(sampleRate),
-      roomTone: roomToneAt(sampleRate),
+      roomTone: replacesAudio() ? null : roomToneAt(sampleRate),
       pauses: sc.pauses,
     });
     finishedCache.set(key, out.pcm);
@@ -677,6 +707,7 @@ export function createVoice(ctx) {
     return {
       voiceLang: els.inVoiceLang.value,
       voiceTrack: els.inVoiceTrack ? els.inVoiceTrack.value : 'respoken',
+      voiceBed: els.inVoiceBed ? els.inVoiceBed.value : 'replace',
       voicePause: els.inVoicePause ? els.inVoicePause.value : '0.36',
       voiceStretch: els.inVoiceStretch ? els.inVoiceStretch.value : '50',
     };
@@ -685,6 +716,7 @@ export function createVoice(ctx) {
     if (!g) return;
     if (g.voiceLang && VOICE_LANGS[g.voiceLang]) els.inVoiceLang.value = g.voiceLang;
     if (els.inVoiceTrack && g.voiceTrack) els.inVoiceTrack.value = g.voiceTrack;
+    if (els.inVoiceBed && g.voiceBed) els.inVoiceBed.value = g.voiceBed;
     if (els.inVoicePause && g.voicePause != null) els.inVoicePause.value = g.voicePause;
     if (els.inVoiceStretch && g.voiceStretch != null) els.inVoiceStretch.value = g.voiceStretch;
   }
@@ -746,6 +778,22 @@ export function createVoice(ctx) {
       });
     }
     if (els.inVoicePause) els.inVoicePause.addEventListener('change', renderScriptInfo);
+    // Replacing the audio or keeping the room only changes how the narration
+    // is *finished*, so a take already spoken is reused — drop what was
+    // finished under the old answer and it is audible on the next play.
+    if (els.inVoiceBed) {
+      els.inVoiceBed.addEventListener('change', () => {
+        finishedCache.clear();
+        previewBufs.clear();
+        // Nothing spoken yet — and possibly no file open — so there is no
+        // timeline to redraw and nobody to tell. It applies when there is.
+        if (!isRespoken()) return;
+        status(replacesAudio()
+          ? 'The recording is replaced outright: no room tone under the narration, and silence where it does not reach.'
+          : 'The recording’s room tone is laid back under the narration.');
+        if (onChanged) onChanged();
+      });
+    }
     // Turning this re-times a narration already spoken, without regenerating
     // a thing — so it is a dial you can hear rather than a setting you have
     // to take on trust until next time.
@@ -768,7 +816,7 @@ export function createVoice(ctx) {
     wire, settings, applySettings, reset, restore, updateUI,
     respeakScript, cancel, revertScript, replan,
     fillScriptFromTranscript, renderScriptInfo, renderPlan,
-    pcmFor, previewBuffer, previewTrack, isRespoken, isRunning,
+    pcmFor, previewBuffer, previewTrack, replacesAudio, isRespoken, isRunning,
     reference: () => reference,
     setStatus: status,
     ready: () => loaded,
