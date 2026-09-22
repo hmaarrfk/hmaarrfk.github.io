@@ -624,4 +624,75 @@ test('replacing the audio keeps the recording out of the narration entirely', ()
   assert.ok(speechB <= speechA, 'replacing the audio should never add energy');
 });
 
+test('replacing the audio lays a bed of the narration\'s own quiet under it', () => {
+  // A generation shaped like the model's: speech with a faint floor under it,
+  // and pauses that are that floor and nothing else. Without a bed those
+  // pauses sit ~40 dB under the speech and the ear calls it a dropout.
+  const gen = speechish(6, { amp: 0.2 });
+  let seed = 12345;
+  for (let i = 0; i < gen.length; i++) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    gen[i] += 0.0002 * ((seed >>> 8) / 0x1000000 - 0.5);
+  }
+  const bare = finishNarration(gen, { modelRate: SR, outRate: SR, targetDbfs: -20 });
+  const bedded = finishNarration(gen, { modelRate: SR, outRate: SR, targetDbfs: -20, bedDb: -40 });
+
+  // speechish talks for the first 0.6 s of every second, so [0.7, 0.9] is pause.
+  const pauseBare = rms(bare.pcm, 0.7 * SR, 0.9 * SR);
+  const pauseBed = rms(bedded.pcm, 0.7 * SR, 0.9 * SR);
+  const speech = rms(bedded.pcm, 0.1 * SR, 0.5 * SR);
+  assert.ok(pauseBed > pauseBare * 4,
+    `no bed was laid: ${pauseBed.toExponential(2)} vs ${pauseBare.toExponential(2)}`);
+  const under = 20 * Math.log10(pauseBed / speech);
+  assert.ok(under < -28 && under > -52, `the bed sits ${under.toFixed(1)} dB under the voice`);
+  // And it never stops: every 50 ms window of the pause has something in it.
+  for (let at = 0.7 * SR; at + 0.05 * SR < 0.9 * SR; at += 0.05 * SR) {
+    assert.ok(rms(bedded.pcm, at, at + 0.05 * SR) > pauseBed / 4, 'the bed drops out mid-pause');
+  }
+  // The speech itself is untouched by it.
+  assert.ok(Math.abs(20 * Math.log10(speech / rms(bare.pcm, 0.1 * SR, 0.5 * SR))) < 0.2,
+    'the bed changed the level of the speech');
+});
+
+test('the bed reaches the inserted silence, not just the model\'s pauses', () => {
+  // What respeakScript actually builds: a true-zero lead-in and tail around a
+  // generation that has its own faint floor. The lead-in is the stretch most in
+  // need of a bed, and also the one a window scored on level alone will pick
+  // *from* — half silence, half floor — which lays almost nothing anywhere.
+  const SR2 = SR;
+  const n = Math.round(9 * SR2);
+  const gen = new Float32Array(n);
+  let seed = 99;
+  for (let i = 0; i < n; i++) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    const t = i / SR2;
+    if (t < 1.2 || t > 7.5) continue;                        // inserted silence
+    const talking = ((t - 1.2) % 2.2) < 1.6;                 // 0.6 s pauses
+    gen[i] = 0.00015 * ((seed >>> 8) / 0x1000000 - 0.5)
+      + (talking ? 0.2 * Math.sin((2 * Math.PI * 500 * i) / SR2) : 0);
+  }
+  const out = finishNarration(gen, {
+    modelRate: SR2, outRate: SR2, targetDbfs: -20, bedDb: -40,
+    pauses: [{ from: 0, to: 1.2 }, { from: 7.5, to: 9 }],
+  });
+  assert.ok(out.bed && out.bed.length, 'no bed was built at all');
+
+  // Nothing anywhere is digital silence any more — that is the property that
+  // stops a pause reading as the track cutting out.
+  const step = Math.round(0.005 * SR2);
+  let worstRun = 0, run = 0;
+  for (let i = 0; i + step <= out.pcm.length; i += step) {
+    if (rms(out.pcm, i, i + step) < 1e-5) { run += 1; worstRun = Math.max(worstRun, run); } else run = 0;
+  }
+  assert.equal(worstRun, 0, `${worstRun * 5} ms of the narration is still dead`);
+
+  // And the bed sits where it was asked to, in the inserted silence as much as
+  // in the model's own pauses.
+  const speech = rms(out.pcm, 1.4 * SR2, 2.6 * SR2);
+  for (const [label, from, to] of [['lead-in', 0.2, 1.0], ['tail', 8.0, 8.8]]) {
+    const under = 20 * Math.log10(rms(out.pcm, from * SR2, to * SR2) / speech);
+    assert.ok(under < -28 && under > -52, `the ${label} sits ${under.toFixed(1)} dB under the voice`);
+  }
+});
+
 console.log(`\n${passed} passed`);

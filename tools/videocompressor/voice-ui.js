@@ -31,7 +31,7 @@
 // one button to re-make the audio from the same script and the same seed.
 import {
   pickReference, splitScript, scriptFromCues, alignScript, planTimeline,
-  narrationWords, finishNarration, toInterleaved,
+  narrationWords, finishNarration, layRoomTone, toInterleaved,
 } from './voice.js';
 import { createResampler, wordsToCues } from './captions.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
@@ -53,6 +53,12 @@ const VOICE_MB = 146;              // the five graphs, int8
 const MODEL_SR = 24000;            // what the model speaks at
 const REF_MIN_S = 6, REF_MAX_S = 15;
 const LS_SCRIPT_KEY = 'videocompressor:script:v1';
+// How far under the voice the presence track sits when the recording is being
+// replaced. 40 dB is the room of a quiet office rather than the room of the
+// office you actually recorded in: continuous, so no pause reads as the track
+// cutting out, and far enough down that nobody would call it background noise.
+// The one number of taste in the whole replacement path.
+const BED_DB = -40;
 
 // ctx: { els, getState, timeline, edits, captions, audio, fmt, setProgress, onChanged }
 export function createVoice(ctx) {
@@ -69,6 +75,7 @@ export function createVoice(ctx) {
   let running = false;         // a generation is in flight
   let scriptEdited = false;    // the script has been written, not just filled in
   const finishedCache = new Map();   // sampleRate -> the whole narration, mono
+  const bedCache = new Map();        // sampleRate -> the presence laid under it, if any
   const toneCache = new Map();       // sampleRate -> room tone
   const refToneCache = new Map();    // sampleRate -> the reference clip
   const previewBufs = new Map();
@@ -432,6 +439,7 @@ export function createVoice(ctx) {
         stats: plan.stats,
       };
       finishedCache.clear();
+      bedCache.clear();
       previewBufs.clear();
 
       applyPlan(plan);
@@ -564,6 +572,7 @@ export function createVoice(ctx) {
     state.script = null;
     dubs().clear();
     finishedCache.clear();
+    bedCache.clear();
     previewBufs.clear();
     ctx.edits.replaceRespeak([]);
     const caps = state.captions;
@@ -629,10 +638,30 @@ export function createVoice(ctx) {
       // gives the clone the speaker's own microphone above 12 kHz.
       toneReference: refToneAt(sampleRate),
       roomTone: replacesAudio() ? null : roomToneAt(sampleRate),
+      bedDb: replacesAudio() ? BED_DB : null,
       pauses: sc.pauses,
     });
     finishedCache.set(key, out.pcm);
+    bedCache.set(key, out.bed || null);
     return out.pcm;
+  }
+
+  /**
+   * The presence laid under the narration, as `frames` of it.
+   *
+   * What the export emits for a span the narration does not cover, when the
+   * recording is being replaced. Silence there would be a hole in a bed that
+   * is otherwise continuous, which is the artefact the bed exists to remove —
+   * and unlike a slice of narration it is right at any output position, so it
+   * cannot go out of sync with a timeline edited after the respeak.
+   */
+  function bedFor({ sampleRate, channels, frames }) {
+    const n = Math.max(0, frames | 0);
+    if (!n) return null;
+    if (!bedCache.has(String(sampleRate))) finishedAt(sampleRate);
+    const bed = bedCache.get(String(sampleRate));
+    if (!bed || !bed.length) return null;
+    return toInterleaved(layRoomTone(new Float32Array(n), bed), channels);
   }
 
   /** The samples the encoder (or the preview) should emit for a respoken span. */
@@ -784,6 +813,7 @@ export function createVoice(ctx) {
     if (els.inVoiceBed) {
       els.inVoiceBed.addEventListener('change', () => {
         finishedCache.clear();
+        bedCache.clear();
         previewBufs.clear();
         // Nothing spoken yet — and possibly no file open — so there is no
         // timeline to redraw and nobody to tell. It applies when there is.
@@ -804,7 +834,7 @@ export function createVoice(ctx) {
   /** Called when a new file is loaded. */
   function reset(file) {
     reference = null; clonedFor = null; refRank = 0; referenceDbfs = null; refAudio = null;
-    finishedCache.clear(); previewBufs.clear(); toneCache.clear(); refToneCache.clear();
+    finishedCache.clear(); bedCache.clear(); previewBufs.clear(); toneCache.clear(); refToneCache.clear();
     if (els.scriptText) els.scriptText.value = '';
     scriptEdited = false;
     if (els.voicePlan) els.voicePlan.textContent = '';
@@ -816,7 +846,7 @@ export function createVoice(ctx) {
     wire, settings, applySettings, reset, restore, updateUI,
     respeakScript, cancel, revertScript, replan,
     fillScriptFromTranscript, renderScriptInfo, renderPlan,
-    pcmFor, previewBuffer, previewTrack, replacesAudio, isRespoken, isRunning,
+    pcmFor, bedFor, previewBuffer, previewTrack, replacesAudio, isRespoken, isRunning,
     reference: () => reference,
     setStatus: status,
     ready: () => loaded,

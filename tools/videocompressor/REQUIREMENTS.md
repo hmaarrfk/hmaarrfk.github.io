@@ -20,7 +20,15 @@ not the room) and runs the second silent. `voice.replacesAudio()` is read by
 the export and by the preview, so the preview never claims the old voice is
 still there; asking for the recording explicitly — `Preview plays`, or a line's
 play button — still gets it. `Keep the room under the narration` is the old
-behaviour, one select away.)_
+behaviour, one select away. **Then the first listen said "it feels like the
+audio skips now at every transition, instead of just being set to quiet when
+nobody is speaking"**, and it was right: leaving the room tone out is not the
+same as replacing it. The model's floor sits forty-odd dB under its own speech,
+the room tone used to sit over the top of that, and removing it dropped every
+pause by that much — at every sentence edge, which is where the picture's
+sections are cut. So `generatedBed` now builds a presence track out of the
+clone's own quiet, 40 dB under the voice, and lays it under everything; a
+section the narration doesn't cover gets the same bed rather than a hole in it.)_
 
 _Earlier: 2026-09-19 (**Respeak the whole script, and re-time the picture
 to it.** Phrase-by-phrase overdub is gone. It worked and it sounded wrong:
@@ -231,7 +239,7 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 | `breath.test.mjs` | Node test for `breath.js` — `node breath.test.mjs` |
 | `audio-boost.test.mjs` | Node test for the leveller's non-speech hold |
 | `speed.test.mjs` | Node test for `speed.js` — `node speed.test.mjs` |
-| `voice.js` | Pure overdub logic: `scriptFromCues`, `splitScript`, `matchWords`, `alignScript`, `planTimeline`, `narrationWords`, `finishNarration`, `pickReference`, `findRoomTone`, `matchTone`, `matchVoiceLevel` |
+| `voice.js` | Pure overdub logic: `scriptFromCues`, `splitScript`, `matchWords`, `alignScript`, `planTimeline`, `narrationWords`, `finishNarration`, `pickReference`, `findRoomTone`, `generatedBed`, `matchTone`, `matchVoiceLevel` |
 | `voice.test.mjs` | Node test for `voice.js` — `node voice.test.mjs` |
 | `voice-tokenizer.js` | SentencePiece protobuf reader + unigram Viterbi with byte fallback |
 | `voice-tokenizer.test.mjs` | Node test for the above — `node voice-tokenizer.test.mjs` |
@@ -498,10 +506,10 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
     noise put back — the fan, the street, the hum that made the take sound
     amateur. Replacing it does two things, which are the two places the
     recording otherwise survives a full respeak. `voice-ui.js` passes
-    `roomTone: null` to `finishNarration`, so the pauses are rebuilt out of the
-    *generated* audio instead (`fillWithRoomTone`, below); and any span the
-    narration does not cover runs **silent** rather than falling back to the
-    recording at rate 1 — a millisecond at a section boundary that rounded
+    `roomTone: null` and a `bedDb` to `finishNarration`, which lays a presence
+    track built out of the *generated* audio under everything instead
+    (`generatedBed`, below); and any span the narration does not cover gets
+    that same bed rather than falling back to the recording at rate 1 — a millisecond at a section boundary that rounded
     away, or footage the trim was widened onto after respeaking, which
     otherwise brings the old voice back in flashes. `voice.replacesAudio()` is
     read by `openSpan`/`feedSpan` in the export and by `applySpanPlayback` in
@@ -522,6 +530,32 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
     A recording that never pauses yields no tone rather than a bad one: with no
     real gap the percentile floor lands inside the speech, and taking it would
     lay the speaker's own voice under the narration.
+  - **A presence track out of the narration itself.** `generatedBed` is what
+    `Replace it entirely` lays under the narration in place of the room. The
+    first version of replacing simply left the room tone out, and it was wrong
+    in a way that only listening showed: the model's own floor sits forty-odd dB
+    under its speech, the room tone used to sit over the top of that, and taking
+    it away dropped every pause by that much at a stroke. The ear does not hear
+    that as a pause, it hears the track cutting out — and because `planTimeline`
+    puts its anchors on sentence edges, it cut out at *every transition*. (The
+    report was exactly that: "it feels like the audio skips now at every
+    transition, instead of just being set to quiet when nobody is speaking.")
+    So the clone's own quiet is collected once over the whole narration, tiled
+    with `tileTones` (shared with `fillWithRoomTone`), brought up to `BED_DB`
+    = **−40 dB** under the voice level already matched to, and laid under
+    everything with `layRoomTone`. Nothing of the recording is in it — the clone
+    carries this microphone, not this room's noise — and the background never
+    stops. Two measurement details, both found by measuring rather than
+    reasoning: candidate windows are scored over the **whole** narration, not
+    the three seconds beside one gap that `fillWithRoomTone` has to make do
+    with (which is why that one so often finds nothing usable); and a window
+    holding more than 2% **exact zeros** is disqualified, because the inserted
+    silence — the lead-in, the tail, the hole a pause was written into — is the
+    quietest thing in the buffer and a window straddling its edge would win and
+    then lay a bed that was itself half silence. `finishNarration` hands the bed
+    back so the export can lay the same presence under a section the narration
+    does not cover (`voice.bedFor()`), instead of punching a hole in a bed that
+    is otherwise continuous.
   - **Without a room sample, the pauses are rebuilt.** `fillWithRoomTone` fills
     each inserted pause from the narration around it (learning from ~3 s beside
     the gap, never the whole track, so this stays linear in the length of the

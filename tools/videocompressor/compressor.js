@@ -2102,6 +2102,15 @@ async function compress() {
         spanOut(gainStage(voice.pcmFor(curDub, { sampleRate: SR, channels: CH, frames: curTarget }), curTarget));
         curDub = null;
       }
+      // A section the narration doesn't cover gets the same presence that is
+      // laid under the narration, not digital silence: a hole in a continuous
+      // bed is audible as a dropout, which is the whole thing the bed is there
+      // to prevent. If there is no bed, the shortfall below falls through to
+      // silence as before.
+      if (curSilent) {
+        const bed = voice.bedFor({ sampleRate: SR, channels: CH, frames: curTarget });
+        if (bed) spanOut(gainStage(bed, curTarget));
+      }
       if (curProc) spanOut(curProc.flush());
       // Silence fills a muted section, and any shortfall elsewhere, so the
       // section lands at exactly the length the video expects.

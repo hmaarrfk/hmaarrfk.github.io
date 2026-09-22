@@ -383,11 +383,12 @@ layout: null
               <option value="room">Keep the room under the narration</option>
             </select>
             <span class="hint">Replacing it gives a clean track: nothing of the
-              recording survives, not even the room tone under the pauses, and
-              any second the narration doesn&rsquo;t cover runs silent rather
-              than falling back to what you originally said. Keeping the room
-              lays the recording&rsquo;s own quiet under everything, which hides
-              the seams but brings its background noise with it.</span>
+              recording survives. The background instead comes from the
+              narration&rsquo;s own quiet, brought up to 40 dB under the voice
+              and laid under everything &mdash; continuous, so a pause is quiet
+              rather than a dropout, but far too low to call noise. Keeping the
+              room lays the recording&rsquo;s own quiet under it instead, which
+              hides a seam better but brings its background along with it.</span>
           </div>
           <div class="field">
             <label for="in-voice-pause">Pause between sentences <span class="lu">(s)</span></label>
