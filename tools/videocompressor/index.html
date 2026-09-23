@@ -445,15 +445,29 @@ layout: null
       <div class="field-group" style="margin-bottom:14px">
         <div class="row" style="gap:22px; flex-wrap:wrap">
           <label class="checkbox" style="cursor:pointer">
-            <input type="radio" name="mode" value="size" checked> Target file size
+            <input type="radio" name="mode" value="quality" checked> Quality
+          </label>
+          <label class="checkbox" style="cursor:pointer">
+            <input type="radio" name="mode" value="size"> Target file size
           </label>
           <label class="checkbox" style="cursor:pointer">
             <input type="radio" name="mode" value="bitrate"> Set bitrate
           </label>
         </div>
 
+        <!-- Each preset is a bits-per-pixel figure, so it follows the resolution
+             and frame rate below; each button shows the size it would make. -->
+        <div id="field-quality" style="margin-top:14px">
+          <div class="tabs" role="group" aria-label="Quality" style="margin-bottom:6px">
+            <button type="button" class="tab" data-quality="low" aria-pressed="false" style="font:inherit;font-weight:600">Low<br><span class="small" data-quality-est></span></button>
+            <button type="button" class="tab active" data-quality="medium" aria-pressed="true" style="font:inherit;font-weight:600">Medium<br><span class="small" data-quality-est></span></button>
+            <button type="button" class="tab" data-quality="high" aria-pressed="false" style="font:inherit;font-weight:600">High<br><span class="small" data-quality-est></span></button>
+          </div>
+          <span class="hint" id="hint-quality"></span>
+        </div>
+
         <div class="controls" style="margin-top:14px">
-          <div class="field" id="field-size">
+          <div class="field" id="field-size" hidden>
             <label for="in-size">Target size <span class="lu">(MB)</span></label>
             <input type="number" id="in-size" value="100" min="1" step="1">
             <span class="hint" id="hint-size"></span>
@@ -483,9 +497,9 @@ layout: null
           <select id="in-fps">
             <option value="0">Keep original</option>
             <option value="60">60 fps</option>
-            <option value="30" selected>30 fps</option>
+            <option value="30">30 fps</option>
             <option value="24">24 fps</option>
-            <option value="15">15 fps</option>
+            <option value="15" selected>15 fps</option>
           </select>
           <span class="hint" id="hint-fps"></span>
         </div>
