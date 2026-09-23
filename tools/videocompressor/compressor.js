@@ -86,6 +86,7 @@ const els = {
   fieldBreathDb: $('field-breath-db'), hintBreath: $('hint-breath'),
   cutInfo: $('cut-info'),
   // settings
+  fieldQuality: $('field-quality'), hintQuality: $('hint-quality'),
   fieldSize: $('field-size'), fieldBitrate: $('field-bitrate'),
   inSize: $('in-size'), inBitrate: $('in-bitrate'),
   inScale: $('in-scale'), inFps: $('in-fps'), inCodec: $('in-codec'), inAudio: $('in-audio'),
@@ -314,9 +315,11 @@ function audioCodecNote() {
 function updateExportSummary() {
   if (!state) return;
   const s = currentSettings();
-  const target = s.mode === 'size'
-    ? `target ${els.inSize.value} MB`
-    : `${parseFloat(els.inBitrate.value)} Mbps`;
+  const target = s.mode === 'quality'
+    ? `${currentQuality()} quality`
+    : s.mode === 'size'
+      ? `target ${els.inSize.value} MB`
+      : `${parseFloat(els.inBitrate.value)} Mbps`;
   const volumeNote = s.keepAudio && s.audioGainDb > 0.05
     ? ` · ${s.volumeMode === 'auto' ? 'up to ' : ''}+${s.audioGainDb.toFixed(1)} dB (${s.volumeMode})`
     : '';
@@ -443,6 +446,7 @@ function saveSettings() {
     v: 1,
     general: {
       mode: document.querySelector('input[name="mode"]:checked').value,
+      quality: currentQuality(),
       size: els.inSize.value, bitrate: els.inBitrate.value,
       scale: els.inScale.value, fps: els.inFps.value, codec: els.inCodec.value,
       keepAudio: els.inAudio.checked,
@@ -468,18 +472,24 @@ function queueSave() {
 }
 function applyGeneral(g) {
   if (!g) return;
+  // Settings saved before the quality presets existed carry the old defaults
+  // (a 100 MB target at 30 fps) that almost nobody chose on purpose. Once, they
+  // give way to the new ones — Medium at 15 fps — and from then on whatever is
+  // picked is remembered as usual.
+  const predatesQuality = g.quality == null;
   if (g.size != null) els.inSize.value = g.size;
   if (g.bitrate != null) els.inBitrate.value = g.bitrate;
   if (g.scale != null) els.inScale.value = g.scale;
-  if (g.fps != null) els.inFps.value = g.fps;
+  if (g.fps != null && !predatesQuality) els.inFps.value = g.fps;
+  if (!predatesQuality) setQuality(g.quality);
   if (g.codec != null) els.inCodec.value = g.codec;
   if (g.gain != null) els.inGain.value = g.gain;
   if (g.breathMode != null) els.inBreathMode.value = g.breathMode;
   if (g.breathDb != null) els.inBreathDb.value = g.breathDb;
   captions.applySettings(g);
   voice.applySettings(g);
-  const modeRadio = document.querySelector(`input[name="mode"][value="${g.mode}"]`);
-  if (modeRadio) { modeRadio.checked = true; els.fieldSize.hidden = g.mode !== 'size'; els.fieldBitrate.hidden = g.mode !== 'bitrate'; }
+  const modeRadio = !predatesQuality && document.querySelector(`input[name="mode"][value="${g.mode}"]`);
+  if (modeRadio) { modeRadio.checked = true; showModeFields(g.mode); }
   // The volume boost is deliberately *not* restored: it starts off for every
   // recording. It re-encodes the audio and lifts whatever sits in the gaps —
   // breaths included — so it should be a choice made while listening to this
@@ -1586,7 +1596,42 @@ function audioBytesPerSecond() {
   return br / 8;
 }
 
+// Quality presets, as H.264 bits per pixel per frame. A size or a bitrate means
+// nothing until you know what it is spread over; bits per pixel is the one
+// number that looks about the same whatever the resolution and frame rate, so
+// a preset keeps its look when either of those changes. Screen recordings are
+// mostly still, which is why these sit well below the ~0.1 usually quoted for
+// camera footage. HEVC gets the same look from fewer bits.
+const QUALITY_BPP = { low: 0.03, medium: 0.06, high: 0.12 };
+const HEVC_BPP_FACTOR = 0.7;
+const DEFAULT_QUALITY = 'medium';
+
+function currentQuality() {
+  const b = document.querySelector('[data-quality].active');
+  return (b && QUALITY_BPP[b.dataset.quality]) ? b.dataset.quality : DEFAULT_QUALITY;
+}
+function setQuality(q) {
+  if (!QUALITY_BPP[q]) q = DEFAULT_QUALITY;
+  document.querySelectorAll('[data-quality]').forEach((b) => {
+    const on = b.dataset.quality === q;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+function qualityBitrate(s, q) {
+  const bpp = QUALITY_BPP[q] * (s.codec === 'hevc' ? HEVC_BPP_FACTOR : 1);
+  return Math.max(100_000, Math.round(bpp * s.outW * s.outH * s.outFps));
+}
+
+// Only one of the three mode panels shows at a time.
+function showModeFields(mode) {
+  els.fieldQuality.hidden = mode !== 'quality';
+  els.fieldSize.hidden = mode !== 'size';
+  els.fieldBitrate.hidden = mode !== 'bitrate';
+}
+
 function targetVideoBitrate(s) {
+  if (s.mode === 'quality') return qualityBitrate(s, currentQuality());
   if (s.mode === 'bitrate') return Math.round(parseFloat(els.inBitrate.value) * 1e6);
   const targetBytes = parseFloat(els.inSize.value) * 1024 * 1024 * 0.97;
   const audio = s.keepAudio ? audioBytesPerSecond() * s.trimDur : 0;
@@ -1654,7 +1699,23 @@ function updateEstimate() {
     if (r < 0.95) return ` — ${(1 / r).toFixed(1)}× *larger* than the source`;
     return ' — about the same size as the source';
   };
-  if (s.mode === 'size') {
+  // The presets are there to guide a choice, so each one says what it would
+  // make — even while a target size is selected, the three sizes are the
+  // useful reference for what to type. They are ceilings, and said as such:
+  // the bitrate is what the encoder may spend, and how much of it it uses
+  // depends on the footage — a mostly-still clip came in at 4.7 MB against
+  // 11.3 MB allowed, a busier recording used nearly all of its budget.
+  const audioBytes = s.keepAudio ? audioBytesPerSecond() * s.trimDur : 0;
+  document.querySelectorAll('[data-quality]').forEach((b) => {
+    const est = b.querySelector('[data-quality-est]');
+    if (est) est.textContent = `up to ${fmtBytes(qualityBitrate(s, b.dataset.quality) / 8 * s.trimDur + audioBytes)}`;
+  });
+  if (s.mode === 'quality') {
+    const est = (vBitrate / 8 * s.trimDur) + audioBytes;
+    els.hintQuality.textContent =
+      `Up to ${fmtBitrate(vBitrate)} video${s.keepAudio ? ' + audio' : ''} at ${s.outW}×${s.outH}, ${s.outFps.toFixed(0)} fps`
+      + ` — at most ${fmtBytes(est)} over ${fmtTime(s.trimDur)}${ratio(est)}; how much of that is used depends on how much moves on screen`;
+  } else if (s.mode === 'size') {
     const target = parseFloat(els.inSize.value) * 1024 * 1024;
     els.hintSize.textContent =
       `≈ ${fmtBitrate(vBitrate)} video${s.keepAudio ? ' + audio' : ''} over ${fmtTime(s.trimDur)}`
@@ -2668,9 +2729,11 @@ function initUI() {
   });
 
   document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener('change', () => {
-    const mode = document.querySelector('input[name="mode"]:checked').value;
-    els.fieldSize.hidden = mode !== 'size';
-    els.fieldBitrate.hidden = mode !== 'bitrate';
+    showModeFields(document.querySelector('input[name="mode"]:checked').value);
+    updateEstimate();
+  }));
+  document.querySelectorAll('[data-quality]').forEach((b) => b.addEventListener('click', () => {
+    setQuality(b.dataset.quality);
     updateEstimate();
   }));
 

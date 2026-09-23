@@ -4,7 +4,25 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-21 (**`Original audio: Replace it entirely`, and it is
+_Last updated: 2026-09-22 (**Quality presets: Low / Medium / High, and 15 fps
+by default.** A target size in MB is a number nobody can pick without knowing
+what it gets spread over, and the old default — 100 MB at 30 fps — was a guess
+the user kept second-guessing. The Settings step now opens on a third mode,
+`Quality`, with three buttons. Each preset is a bits-per-pixel-per-frame figure
+(`QUALITY_BPP`: 0.03 / 0.06 / 0.12 for H.264, ×0.7 for HEVC), so it keeps its
+look when the resolution or frame rate changes, and each button prints the
+size it could reach — shown in every mode, since those three sizes are also the
+best guide for what to type as a target. They are said as *up to*: the figure
+is what the encoder may spend, and how much it uses depends on the footage (a
+mostly-still 37 s Medium export at 2048×1324, 15 fps measured 4.7 MB against
+11.3 MB allowed; a busier recording used nearly all of its budget). Target size and bitrate are unchanged. Defaults are Medium
+and 15 fps; settings saved before the presets existed (no `quality` key) give
+up their mode and frame rate once, so returning users land on the new defaults
+too, and from then on the choice is remembered. Found while chasing a respoken
+export with no audio track: that was `Keep audio` switched off, not the
+narration path — a full respeak-all export on `main` has the audio.)_
+
+_Earlier: 2026-09-21 (**`Original audio: Replace it entirely`, and it is
 the default.** The feedback was that the videos should look professional, and
 what stopped them was the background of the room coming back under a narration
 that had been respoken from end to end. Two things were putting it there.
@@ -250,8 +268,11 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 
 ## Features
 
-- Target size or bitrate; resolution 100/75/50/25 %; fps cap; H.264 / H.265
-  with early `isConfigSupported` validation.
+- Quality preset (Low / **Medium** / High — the default), target size, or
+  bitrate; resolution 100/75/50/25 %; fps cap (**15 fps** default); H.264 /
+  H.265 with early `isConfigSupported` validation. A preset is bits per pixel
+  per frame, so its bitrate follows the resolution and frame rate; every button
+  shows the size it could reach ("up to"), in every mode.
 - **One edit model.** `state.edits` is a sorted, non-overlapping set of
   `{ start, end, rate, audio }` spans over the source timeline: `rate: 0` is a
   cut, `rate > 1` is a speed-up, `audio` is `'keep'` (time-stretched narration)

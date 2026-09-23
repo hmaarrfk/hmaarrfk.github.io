@@ -1,7 +1,7 @@
 # Video Compressor
 
-A static, offline, in-browser video compressor. It shrinks a video to a target
-file size or a chosen bitrate using the browser's **WebCodecs** API — which
+A static, offline, in-browser video compressor. It shrinks a video to a quality
+preset (Low / Medium / High), a target file size, or a chosen bitrate using the browser's **WebCodecs** API — which
 routes to the machine's *hardware* video encoder (Apple VideoToolbox, NVIDIA
 NVENC, Intel QSV, VAAPI, …). Nothing is uploaded; every step runs locally.
 
@@ -460,6 +460,10 @@ is the default there.
 - Trim decodes from the start of the file up to the selection's end (it can't
   skip into the middle of a GOP), so a trim near the *end* of a long video still
   streams most of the file. A trim near the start is fast.
+- Quality presets set a bitrate from bits per pixel per frame
+  (`QUALITY_BPP` in `compressor.js`) times the output resolution and frame
+  rate. That bitrate is a ceiling: a mostly-still recording can come in far
+  under it, a busy one close to it, so the sizes on the buttons read "up to".
 - Target-size mode computes a constant video bitrate from the (trimmed)
   duration (single-pass), so the final size is an estimate — very close, not
   exact. Use the result's size readout and nudge the target for a hard cap.
