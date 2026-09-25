@@ -104,6 +104,9 @@ const els = {
   capProgress: $('cap-progress'), capStatus: $('cap-status'), capNote: $('cap-note'), capList: $('cap-list'),
   // overdub
   inVoiceLang: $('in-voice-lang'), hintVoiceLang: $('hint-voice-lang'),
+  inVoiceEngine: $('in-voice-engine'), hintVoiceEngine: $('hint-voice-engine'),
+  inVoiceProfile: $('in-voice-profile'), inVoiceProfileFile: $('in-voice-profile-file'),
+  voiceProfileRow: $('voice-profile-row'),
   hintVoiceAudio: $('hint-voice-audio'),
   inVoiceTrack: $('in-voice-track'), inVoiceBed: $('in-voice-bed'),
   inVoicePause: $('in-voice-pause'), inVoiceStretch: $('in-voice-stretch'),
@@ -2742,7 +2745,8 @@ function initUI() {
   // about it), where the preview track only changes what you hear now.
   [els.inSize, els.inBitrate, els.inScale, els.inFps, els.inCodec, els.inAudio, els.inGain,
     els.inCapModel, els.inCapLang, els.inCapSize, els.inCapPos, els.inCapLook, els.inCapBurn,
-    els.inVoiceBed]
+    els.inVoiceBed, els.inVoiceEngine, els.inVoiceProfile]
+    .filter(Boolean)
     .forEach((el) => { el.addEventListener('input', updateEstimate); el.addEventListener('change', updateEstimate); });
   // Changing how breaths are handled can add or drop timeline edits, so it does
   // more than the generic "something changed" refresh.

@@ -4,7 +4,27 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-22 (**Quality presets: Low / Medium / High, and 15 fps
+_Last updated: 2026-09-23 (**Voice: "My voice profile".** A second engine for
+Respeak, next to the in-browser clone. The respoken voice was "close, but
+robotic", and measured that way: 0.40 speaker similarity against a held-out
+recording of the speaker, where the real voice scores 0.72, with 0.46 s pauses
+where he pauses 0.19 s. A 100M-parameter model cloned from ~10 s cannot do
+better, so the new engine is a local server (`../voice-studio/server/`) running
+VoxCPM2 with a LoRA trained on 52 min of his own narration: 0.73 similarity,
+pitch movement 2.99 st against his 2.97, every sentence checked back by Whisper.
+`voice-local.js` speaks the worker's protocol over `fetch` to 127.0.0.1:7865, so
+`ask()` is unchanged; the choice lives in the new **Voice** select and is
+persisted with the other settings. Parts now carry a `kind` (sentence / clause /
+paragraph / end) so an engine with its own pause model can use it. The
+reference clip is still read from the video, for level and tone matching. Full
+research, measurements and the protocol: `../voice-studio/REQUIREMENTS.md`.
+Later the same day: with *My voice profile* chosen, a **Voice profile** select
+lists every voice the server has, and **Load a .voice.zip…** installs one.
+The zip is checked server-side for schema, file list and checksums, and a
+name clash asks before replacing. The chosen profile is sent with each
+`/speak` and persisted in settings.)_
+
+_Earlier: 2026-09-22 (**Quality presets: Low / Medium / High, and 15 fps
 by default.** A target size in MB is a number nobody can pick without knowing
 what it gets spread over, and the old default — 100 MB at 30 fps — was a guess
 the user kept second-guessing. The Settings step now opens on a third mode,
@@ -263,6 +283,7 @@ transformers.js, ONNX Runtime) are pinned copies and are left unversioned.
 | `voice-tokenizer.test.mjs` | Node test for the above — `node voice-tokenizer.test.mjs` |
 | `voice-ui.js` | Overdub UI: model cache, reference clip, the script box, respeaking the script and applying its plan, `pcmFor()` for the encoder (given a `ctx` by `compressor.js`) |
 | `voice-worker.js` | Module worker running Pocket TTS on onnxruntime-web |
+| `voice-local.js` | The "My voice profile" engine: a Worker-shaped client for the local voice server (`../voice-studio/server/voice_server.py`) |
 | `voice-bench.html` | Dev-only harness for the Python/JS parity check (not linked) |
 | `vendor/` | Vendored deps + `update-vendor.sh` |
 
