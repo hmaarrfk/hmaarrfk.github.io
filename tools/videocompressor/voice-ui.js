@@ -35,6 +35,9 @@ import {
 } from './voice.js';
 import { createResampler, wordsToCues } from './captions.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
+import {
+  LocalVoice, probeLocalVoice, listLocalProfiles, importLocalProfile, START_HINT,
+} from './voice-local.js';
 
 // Only the int8 bundle is offered. The fp32 flow model is 302 MB against
 // 76 MB and measured no better on a screencast; the encoder and the text
@@ -101,8 +104,98 @@ export function createVoice(ctx) {
     hint.textContent = (await isCached()) ? 'downloaded' : `${VOICE_MB} MB download, once`;
   }
 
+  // Which voice speaks: the in-browser clone of this recording, or the voice
+  // profile served from this machine (voice-local.js). Switching engines
+  // drops the old one; the next respeak loads the new one.
+  function engine() { return els.inVoiceEngine && els.inVoiceEngine.value === 'local' ? 'local' : 'browser'; }
+
+  function dropWorker() {
+    if (worker) { try { worker.terminate(); } catch (_) {} }
+    worker = null; loaded = false; clonedFor = null;
+  }
+
+  async function refreshEngineHint() {
+    const hint = els.hintVoiceEngine;
+    const local = engine() === 'local';
+    if (els.inVoiceLang) els.inVoiceLang.disabled = local;
+    if (els.voiceProfileRow) els.voiceProfileRow.hidden = !local;
+    if (!hint) return;
+    if (!local) {
+      hint.textContent = 'Cloned from ~10 s of this recording, in the browser. Nothing to set up.';
+      return;
+    }
+    hint.textContent = 'Looking for your voice server…';
+    const h = await probeLocalVoice();
+    if (engine() !== 'local') return;
+    if (!h) {
+      hint.textContent = `No voice server found on this machine. ${START_HINT}`;
+      fillProfiles([]);
+      return;
+    }
+    let list = [];
+    try { list = await listLocalProfiles(); } catch (_) {}
+    fillProfiles(list, h.profile && h.profile.name);
+    hint.textContent = list.length
+      ? 'Your voice server is running. Pauses come from your own measured ones, so the pause setting below is only a fallback.'
+      : 'Your voice server is running but has no voice yet: load the .voice.zip you made in Voice Studio.';
+  }
+
+  // The profiles the server has, as a select; the choice rides along with
+  // every speak request, so two people's voices can live on one machine.
+  let wantProfile = null;      // from saved settings, applied once the list arrives
+  function fillProfiles(list, active) {
+    const sel = els.inVoiceProfile;
+    if (!sel) return;
+    const keep = sel.value || wantProfile || active;
+    sel.innerHTML = '';
+    for (const p of list) {
+      const o = document.createElement('option');
+      o.value = p.name;
+      o.textContent = p.error ? `${p.name} (unusable: ${p.error})` : p.name;
+      o.disabled = !!p.error;
+      sel.appendChild(o);
+    }
+    if (!list.length) {
+      const o = document.createElement('option');
+      o.value = ''; o.textContent = 'No voice profiles yet';
+      sel.appendChild(o);
+    }
+    if (keep && list.some((p) => p.name === keep && !p.error)) sel.value = keep;
+    if (worker instanceof LocalVoice) worker.profile = sel.value || null;
+  }
+
+  async function importProfileFile(file) {
+    if (!file) return;
+    const hint = els.hintVoiceEngine;
+    try {
+      if (hint) hint.textContent = `Checking and installing ${file.name}…`;
+      let name;
+      try {
+        name = await importLocalProfile(file);
+      } catch (e) {
+        if (!e.exists || !confirm(`${e.message}. Replace it with ${file.name}?`)) throw e;
+        name = await importLocalProfile(file, { replace: true });
+      }
+      wantProfile = name;
+      if (els.inVoiceProfile) els.inVoiceProfile.value = '';
+      await refreshEngineHint();
+      if (els.inVoiceProfile) els.inVoiceProfile.value = name;
+      if (worker instanceof LocalVoice) worker.profile = name;
+      if (hint) hint.textContent = `Installed “${name}”. Respeak to hear it.`;
+      if (onChanged) onChanged();
+    } catch (e) {
+      if (hint) hint.textContent = `Could not load ${file.name}: ${e.message}`;
+    } finally {
+      if (els.inVoiceProfileFile) els.inVoiceProfileFile.value = '';
+    }
+  }
+
   function ensureWorker() {
     if (worker) return worker;
+    if (engine() === 'local') {
+      worker = new LocalVoice(undefined, (els.inVoiceProfile && els.inVoiceProfile.value) || null);
+      return worker;
+    }
     // Import maps do not reach `new Worker`, so carry this module's own
     // ?v=<commit> across by hand: without it a release could pair a freshly
     // fetched voice-ui.js with a cached voice-worker.js.
@@ -291,6 +384,16 @@ export function createVoice(ctx) {
     return { sentencePauseS: s, paragraphPauseS: s * 2.2, clausePauseS: s * 0.56 };
   }
 
+  // What a pause *is*, for an engine that has its own idea of how long each
+  // kind should be (the local voice draws them from the speaker's own).
+  function pauseKind(s) {
+    const o = pauseOpts();
+    if (!(s > 0)) return 'end';
+    if (s >= o.paragraphPauseS - 1e-6) return 'paragraph';
+    if (s <= o.clausePauseS + 1e-6) return 'clause';
+    return 'sentence';
+  }
+
   // How far the picture may drift from real time, in either direction, to keep
   // up with what is now being said.
   function rateBand() {
@@ -391,7 +494,7 @@ export function createVoice(ctx) {
       const seed = (Math.random() * 1e9) | 0;
       const res = await ask({
         type: 'speak', temperature: 0.7, seed,
-        parts: parts.map((p) => ({ text: p.text, pauseAfterS: p.pauseAfterS })),
+        parts: parts.map((p) => ({ text: p.text, pauseAfterS: p.pauseAfterS, kind: pauseKind(p.pauseAfterS) })),
       }, 'audio', (m) => {
         if (m.type === 'status') status(m.text);
         else if (m.type === 'progress' && m.estimate) setProgress(m.frames / m.estimate, els.voiceProgress);
@@ -735,6 +838,8 @@ export function createVoice(ctx) {
   function settings() {
     return {
       voiceLang: els.inVoiceLang.value,
+      voiceEngine: engine(),
+      voiceProfile: (els.inVoiceProfile && els.inVoiceProfile.value) || wantProfile || '',
       voiceTrack: els.inVoiceTrack ? els.inVoiceTrack.value : 'respoken',
       voiceBed: els.inVoiceBed ? els.inVoiceBed.value : 'replace',
       voicePause: els.inVoicePause ? els.inVoicePause.value : '0.36',
@@ -744,6 +849,13 @@ export function createVoice(ctx) {
   function applySettings(g) {
     if (!g) return;
     if (g.voiceLang && VOICE_LANGS[g.voiceLang]) els.inVoiceLang.value = g.voiceLang;
+    if (g.voiceProfile) wantProfile = g.voiceProfile;
+    if (els.inVoiceEngine && (g.voiceEngine === 'local' || g.voiceEngine === 'browser')
+        && els.inVoiceEngine.value !== g.voiceEngine) {
+      els.inVoiceEngine.value = g.voiceEngine;
+      dropWorker();
+      refreshEngineHint();
+    }
     if (els.inVoiceTrack && g.voiceTrack) els.inVoiceTrack.value = g.voiceTrack;
     if (els.inVoiceBed && g.voiceBed) els.inVoiceBed.value = g.voiceBed;
     if (els.inVoicePause && g.voicePause != null) els.inVoicePause.value = g.voicePause;
@@ -776,6 +888,24 @@ export function createVoice(ctx) {
         loaded = false; clonedFor = null;       // a different language is a different model
         refreshCachedLabel();
       });
+    }
+    if (els.inVoiceEngine) {
+      els.inVoiceEngine.addEventListener('change', () => {
+        dropWorker();
+        refreshEngineHint();
+        if (onChanged) onChanged();
+      });
+      refreshEngineHint();
+    }
+    if (els.inVoiceProfile) {
+      els.inVoiceProfile.addEventListener('change', () => {
+        wantProfile = els.inVoiceProfile.value;
+        if (worker instanceof LocalVoice) worker.profile = wantProfile || null;
+        if (onChanged) onChanged();
+      });
+    }
+    if (els.inVoiceProfileFile) {
+      els.inVoiceProfileFile.addEventListener('change', () => importProfileFile(els.inVoiceProfileFile.files[0]));
     }
     if (els.scriptText) {
       els.scriptText.addEventListener('input', () => {

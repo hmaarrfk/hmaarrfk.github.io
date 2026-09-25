@@ -1,0 +1,150 @@
+---
+# Front matter (even empty) is what makes Jekyll run Liquid over this file, which
+# is how the asset URLs below pick up ?v=<commit>. `layout: null` overrides the
+# site-wide default layout so the page stays standalone.
+layout: null
+---
+<!DOCTYPE html>
+<!--
+  Voice Studio — record the material a personal voice model is trained on,
+  and hear the voice profile you already have.
+
+  The page records; the training and the speaking happen on your own machine,
+  in server/ (see README.md): build_voice.py turns the takes into a LoRA on
+  VoxCPM2, and voice_server.py serves it to this page and to the Video
+  Compressor over http://127.0.0.1:7865. Nothing is uploaded anywhere.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Studio — record and hear your own voice model</title>
+  <meta name="description" content="Record training takes for a personal voice model, raw and lossless, into a folder on your machine — and audition the voice you have trained. Nothing is uploaded.">
+  <link rel="icon" href="/favicon.ico">
+  {%- capture build_v %}{% include v.html %}{% endcapture %}
+  <meta name="build-revision" content="{{ site.github.build_revision | default: 'dev' }}">
+  <link rel="stylesheet" href="/tools/assets/tools.css?v={{ build_v }}">
+  <!-- Cache-busting import map for this tool's own modules (see the Video
+       Compressor for the reasoning). The worklet is loaded by URL and carries
+       the version by hand. -->
+  <script type="importmap">
+  { "imports": {
+    "/tools/voice-studio/studio.js": "/tools/voice-studio/studio.js?v={{ build_v }}",
+    "/tools/voice-studio/prompts.js": "/tools/voice-studio/prompts.js?v={{ build_v }}"
+  } }
+  </script>
+  <style>
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin: 14px 0; }
+    .card h2 { font-size: 1.05rem; margin: 0 0 10px; }
+    .muted { color: var(--muted); }
+    .small { font-size: .88rem; }
+    .meter { height: 12px; background: var(--bg); border-radius: 6px; overflow: hidden; margin: 10px 0 4px; }
+    .meter > div { height: 100%; width: 0; background: var(--accent); transition: width .05s; }
+    .prompt-mode { display: inline-block; font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; background: var(--accent); color: #fff; border-radius: 4px; padding: 2px 7px; }
+    .prompt-title { font-size: 1.35rem; line-height: 1.35; margin: 12px 0 6px; }
+    .prompt-points { margin: 6px 0 0; color: var(--muted); }
+    .btn.small { padding: 5px 12px; font-size: .85rem; background: var(--panel-2); }
+    #btn-rec { min-width: 180px; }
+    #btn-rec.on { background: var(--danger); }
+    .takes { list-style: none; padding: 0; margin: 10px 0 0; }
+    .take { border-top: 1px solid var(--border); padding: 10px 0; display: grid; gap: 6px; }
+    .take-head { display: flex; gap: 10px; justify-content: space-between; flex-wrap: wrap; font-size: .9rem; }
+    .take-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .take audio { width: 100%; height: 34px; }
+    .take-warn { font-size: .85rem; }
+    .take-warn.bad { color: var(--danger); }
+    .take-warn.good { color: var(--good); }
+    .take .btn { justify-self: start; }
+    textarea { width: 100%; padding: 10px 12px; font: inherit; font-size: .95rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; }
+    .wrap-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    code { font-size: .85em; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+    ol.steps-list li { margin: 4px 0; }
+    @media (max-width: 600px) { .prompt-title { font-size: 1.15rem; } #btn-rec { min-width: 0; flex: 1; } }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/tools/">&larr; Tools</a>
+    <span class="title">Voice Studio</span>
+    <a class="brand" href="/">Mark Harfouche</a>
+  </div>
+
+  <div class="wrap">
+    <p class="lede">
+      Record the raw material for a voice model that sounds like you talking,
+      not like you reading. Takes are saved losslessly to a folder on this
+      machine; the model is trained and run on this machine too.
+      Only record, and only clone, your own voice.
+    </p>
+
+    <div class="card">
+      <h2>1. Set up</h2>
+      <p class="small muted" style="margin:0 0 10px">
+        Same microphone, same distance (about a hand's width), same room, every
+        session. Close the door, turn off fans. Sessions of 30–45 minutes, water
+        nearby. Aim for loud syllables around −10 dBFS on the meter, never red.
+      </p>
+      <div class="wrap-row">
+        <button class="btn" id="btn-mic" type="button">Turn on microphone</button>
+        <button class="btn secondary" id="btn-room" type="button" disabled>Measure the room (5 s)</button>
+        <button class="btn secondary" id="btn-folder" type="button">Choose folder…</button>
+      </div>
+      <div class="meter"><div id="meter-bar"></div></div>
+      <p class="small muted" id="meter-text" style="margin:0"></p>
+      <p class="small muted" id="mic-info" style="margin:4px 0 0"></p>
+      <p class="small muted" id="room-info" style="margin:4px 0 0"></p>
+      <p class="small muted" id="folder-info" style="margin:4px 0 0">Pick a folder (e.g. <code>~/voice-clone/studio</code>) and every take is written there as it is recorded.</p>
+    </div>
+
+    <div class="card">
+      <h2>2. Record</h2>
+      <div class="wrap-row" style="justify-content:space-between">
+        <span class="prompt-mode" id="p-mode"></span>
+        <span class="small muted" id="p-count"></span>
+      </div>
+      <div class="prompt-title" id="p-title"></div>
+      <ul class="prompt-points" id="p-points"></ul>
+      <p class="small muted" id="p-how" style="margin:10px 0 14px"></p>
+      <div class="wrap-row">
+        <button class="btn" id="btn-rec" type="button" disabled>Record (space)</button>
+        <button class="btn secondary" id="btn-skip" type="button">Skip</button>
+        <span id="rec-time" style="color:var(--danger);font-variant-numeric:tabular-nums"></span>
+      </div>
+      <div class="meter" style="margin-top:16px"><div id="total-bar" style="background:var(--good)"></div></div>
+      <p class="small muted" id="total" style="margin:0"></p>
+      <button class="btn small" id="btn-download" type="button" hidden style="margin-top:8px">Download takes (no folder chosen)</button>
+      <ul class="takes" id="takes"></ul>
+    </div>
+
+    <div class="card">
+      <h2>3. Make your voice</h2>
+      <p class="small muted" style="margin:0 0 6px">One command on an Apple-silicon Mac, pointed at a folder of
+        recordings of you talking — the takes above, old screencasts, voice memos; audio or video, sub-folders
+        included:</p>
+      <pre class="small" style="margin:6px 0;padding:10px 12px;background:var(--bg);border-radius:8px;overflow-x:auto"><code>cd tools/voice-studio/server
+./setup.sh                                   # once
+conda activate voxcpm
+python make_voice.py ~/Recordings/me --name me   # → me.voice.zip</code></pre>
+      <p class="small muted" style="margin:6px 0 0">It skips files without audio, other people's voices and
+        already-respoken audio, transcribes, trains (about 20–30 minutes per hour of speech), keeps the best
+        checkpoint and writes <code>me.voice.zip</code> — your voice, versioned and checksummed. Keep it like a
+        password. Then run <code>python voice_server.py</code> and, in the Video Compressor, choose
+        <em>Voice → My voice profile → Load a .voice.zip…</em></p>
+    </div>
+
+    <div class="card">
+      <h2>4. Hear your voice</h2>
+      <p class="small muted" id="srv-info" style="margin:0 0 10px"></p>
+      <textarea id="say-text" rows="3">So the first thing you'll notice is that the image is a little dim. Let me show you what happens when we turn on auto-contrast.</textarea>
+      <div class="wrap-row" style="margin-top:8px">
+        <button class="btn" id="btn-speak" type="button" disabled>Speak it</button>
+        <button class="btn small" id="btn-probe" type="button">Check again</button>
+        <span class="small muted" id="say-status"></span>
+      </div>
+      <audio id="say-audio" controls style="width:100%;margin-top:10px"></audio>
+    </div>
+  </div>
+
+  <script type="module" src="/tools/voice-studio/studio.js?v={{ build_v }}"></script>
+</body>
+</html>
