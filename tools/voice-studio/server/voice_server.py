@@ -13,6 +13,7 @@ on the Mac's GPU, answering the page over http://127.0.0.1.
 Protocol (what `voice-ui.js` and Voice Studio speak):
 
     GET  /health                -> {"ok", "schema", "profile": {...} | null, "busy"}
+                                   (profile = the active voice: the last one used on this machine)
     GET  /profiles              -> {"ok", "profiles": [{name, engine, schema, provenance, active}]}
     GET  /profiles/<name>/export  -> <name>.voice.zip (see voice_profile.py)
     POST /profiles/import[?name=&replace=1]   body: a .voice.zip
@@ -206,7 +207,10 @@ class Voice:
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         names = self.list_names()
         if names:
-            self.use(default if default in names else names[0])
+            # Start with the voice asked for, else the one last used on this
+            # machine, else the first by name.
+            last = self.last_used()
+            self.use(default if default in names else last if last in names else names[0])
         else:
             log(f"no voice profiles in {self.profiles_dir} yet; import a .voice.zip")
 
@@ -226,6 +230,22 @@ class Voice:
             except voice_profile.ProfileError as e:
                 out.append({"name": n, "error": str(e), "active": False})
         return out
+
+    # The last voice used on this machine, kept next to the profiles, so any
+    # browser on this Mac finds it already selected.
+    LAST = ".last-voice"
+
+    def last_used(self) -> str | None:
+        try:
+            return (self.profiles_dir / self.LAST).read_text().strip() or None
+        except OSError:
+            return None
+
+    def _remember(self, name: str):
+        try:
+            (self.profiles_dir / self.LAST).write_text(name + "\n")
+        except OSError:
+            pass
 
     def use(self, name: str):
         """Make `name` the speaking profile (caller holds the lock or is __init__)."""
@@ -256,6 +276,7 @@ class Voice:
         self.ref_text = p["reference"]["text"]
         self._ref_cache = None
         self.asr_repo = p.get("asr_model", "mlx-community/whisper-large-v3-turbo")
+        self._remember(name)
         log(f"speaking as {name!r} (schema {p['schema']}) at {self.sr} Hz")
 
     def describe(self) -> dict:
@@ -598,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--profiles", default=str(DEFAULT_PROFILES), help="folder of voice profiles")
-    ap.add_argument("--profile", help="which one speaks first (default: the first by name)")
+    ap.add_argument("--profile", help="which one speaks first (default: the last used on this machine)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--say", help="speak this text to --out and exit (no server)")
     ap.add_argument("--out", default="say.wav")

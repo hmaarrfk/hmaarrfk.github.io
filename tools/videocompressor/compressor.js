@@ -106,6 +106,7 @@ const els = {
   inVoiceLang: $('in-voice-lang'), hintVoiceLang: $('hint-voice-lang'),
   inVoiceEngine: $('in-voice-engine'), hintVoiceEngine: $('hint-voice-engine'),
   inVoiceProfile: $('in-voice-profile'), inVoiceProfileFile: $('in-voice-profile-file'),
+  btnVoiceProfileDownload: $('btn-voice-profile-download'),
   voiceProfileRow: $('voice-profile-row'),
   hintVoiceAudio: $('hint-voice-audio'),
   inVoiceTrack: $('in-voice-track'), inVoiceBed: $('in-voice-bed'),

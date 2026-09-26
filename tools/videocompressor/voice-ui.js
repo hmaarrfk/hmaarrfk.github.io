@@ -36,7 +36,7 @@ import {
 import { createResampler, wordsToCues } from './captions.js';
 import { analyzeVoiceLevel } from './audio-boost.js';
 import {
-  LocalVoice, probeLocalVoice, listLocalProfiles, importLocalProfile, START_HINT,
+  LocalVoice, probeLocalVoice, listLocalProfiles, importLocalProfile, exportLocalProfile, START_HINT,
 } from './voice-local.js';
 
 // Only the int8 bundle is offered. The fp32 flow model is 302 MB against
@@ -136,7 +136,7 @@ export function createVoice(ctx) {
     try { list = await listLocalProfiles(); } catch (_) {}
     fillProfiles(list, h.profile && h.profile.name);
     hint.textContent = list.length
-      ? 'Your voice server is running. Pauses come from your own measured ones, so the pause setting below is only a fallback.'
+      ? `Your voice server is running; ${h.profile ? `“${h.profile.name}” was the last voice used on this machine. ` : ''}Pauses come from your own measured ones, so the pause setting below is only a fallback.`
       : 'Your voice server is running but has no voice yet: load the .voice.zip you made in Voice Studio.';
   }
 
@@ -162,6 +162,26 @@ export function createVoice(ctx) {
     }
     if (keep && list.some((p) => p.name === keep && !p.error)) sel.value = keep;
     if (worker instanceof LocalVoice) worker.profile = sel.value || null;
+  }
+
+  // Save the chosen voice as a .voice.zip — a copy to keep, or to take to
+  // another machine, for anyone who no longer has the file they made.
+  async function downloadProfile() {
+    const name = els.inVoiceProfile && els.inVoiceProfile.value;
+    const hint = els.hintVoiceEngine;
+    if (!name) { if (hint) hint.textContent = 'No voice profile to download yet.'; return; }
+    try {
+      if (hint) hint.textContent = `Packing “${name}”…`;
+      const blob = await exportLocalProfile(name);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${name}.voice.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      if (hint) hint.textContent = `Saved ${name}.voice.zip (${(blob.size / 1e6).toFixed(0)} MB). Keep it like a password: it is the whole voice.`;
+    } catch (e) {
+      if (hint) hint.textContent = `Could not download “${name}”: ${e.message}`;
+    }
   }
 
   async function importProfileFile(file) {
@@ -904,6 +924,7 @@ export function createVoice(ctx) {
         if (onChanged) onChanged();
       });
     }
+    if (els.btnVoiceProfileDownload) els.btnVoiceProfileDownload.addEventListener('click', downloadProfile);
     if (els.inVoiceProfileFile) {
       els.inVoiceProfileFile.addEventListener('change', () => importProfileFile(els.inVoiceProfileFile.files[0]));
     }

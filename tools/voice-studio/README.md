@@ -66,6 +66,11 @@ In the Video Compressor, under **Respeak the narration**: **Voice → My voice
 profile**, then **Load a .voice.zip…** (or pick it from the list if
 `make_voice.py` already installed it on this Mac). Respeak as usual.
 
+The server remembers the last voice used on this Mac
+(`~/voice-clone/profiles/.last-voice`) and starts with it, so the list opens
+on your voice in any browser. Lost the zip? **Download this voice** next to
+the list saves the selected one as a `.voice.zip` again.
+
 Chrome may ask to let the site reach "devices on your local network": that
 is the page talking to 127.0.0.1. Allow it.
 

@@ -4,7 +4,17 @@ A living spec for the Video Compressor at `/tools/videocompressor/`. Update
 this file whenever the tool changes so we can always pick up where we left off.
 `README.md` has the deeper technical walkthrough.
 
-_Last updated: 2026-09-23 (**Voice: "My voice profile".** A second engine for
+_Last updated: 2026-09-26 (**Your voice is remembered, and downloadable.**
+With *My voice profile* chosen, the list now opens on the last voice used on
+this Mac (the voice server records it), so a new browser, a cleared cache or a
+different page finds it without being told; the page's own saved choice still
+wins where there is one. **Download this voice** saves the selected profile as
+a `.voice.zip` (the server's `/profiles/<name>/export`), for anyone who no
+longer has the file they made. Checked: with localStorage cleared the list
+chose `mark-desktop` and said why; the downloaded 74 MB zip passes the full
+import check.)_
+
+_Earlier: 2026-09-23 (**Voice: "My voice profile".** A second engine for
 Respeak, next to the in-browser clone. The respoken voice was "close, but
 robotic", and measured that way: 0.40 speaker similarity against a held-out
 recording of the speaker, where the real voice scores 0.72, with 0.46 s pauses

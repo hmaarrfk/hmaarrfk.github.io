@@ -1,6 +1,13 @@
 # Voice Studio — requirements and state
 
-_Last updated: 2026-09-24. **One command: a folder in, a `.voice.zip` out**
+_Last updated: 2026-09-26. **The last voice used on a machine is remembered**
+(`profiles/.last-voice`, written whenever a voice speaks or is selected; the
+server starts with it unless `--profile` says otherwise), and the Video
+Compressor can download the selected voice as a `.voice.zip`. Checked: spoke
+as `mark-desktop`, restarted, the server came back as `mark-desktop` (before:
+`mark`, first by name)._
+
+_Earlier: 2026-09-24. **One command: a folder in, a `.voice.zip` out**
 (`server/make_voice.py`, `server/setup.sh`); in-browser training was built,
 measured and dropped — see "Rejected: training in the browser"._
 
