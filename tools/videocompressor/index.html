@@ -380,9 +380,13 @@ layout: null
             <label class="btn" for="in-voice-profile-file"
                    style="padding:6px 12px;font-size:.85rem;background:var(--panel-2);font-weight:600;margin-top:6px;align-self:flex-start;cursor:pointer">Load a .voice.zip…</label>
             <input type="file" id="in-voice-profile-file" accept=".zip,application/zip" hidden>
+            <button class="btn" id="btn-voice-profile-download" type="button"
+                    style="padding:6px 12px;font-size:.85rem;background:var(--panel-2);margin-top:6px;align-self:flex-start">Download this voice</button>
             <span class="hint">Made in <a href="/tools/voice-studio/">Voice Studio</a>. The
               file is checked (version, contents, checksums) and installed into
-              your voice server; it never leaves this machine.</span>
+              your voice server; it never leaves this machine. The last voice
+              used on this Mac is chosen for you; <em>Download this voice</em>
+              saves a copy of the selected one.</span>
           </div>
           <div class="field">
             <label for="in-voice-lang">Voice model language</label>

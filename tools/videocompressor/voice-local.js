@@ -78,6 +78,20 @@ export async function importLocalProfile(file, { replace = false } = {}, base = 
   return j.name;
 }
 
+/**
+ * The voice as a .voice.zip, from the server (GET /profiles/<name>/export):
+ * for keeping a copy, or moving it to another machine. Resolves to a Blob.
+ */
+export async function exportLocalProfile(name, base = LOCAL_VOICE_URL) {
+  const r = await fetch(`${base}/profiles/${encodeURIComponent(name)}/export`, { ...LOOPBACK, cache: 'no-store' });
+  if (!r.ok) {
+    let msg = `The voice server answered ${r.status}.`;
+    try { msg = (await r.json()).message || msg; } catch (_) {}
+    throw new Error(msg);
+  }
+  return r.blob();
+}
+
 export class LocalVoice extends EventTarget {
   constructor(base = LOCAL_VOICE_URL, profile = null) {
     super();
